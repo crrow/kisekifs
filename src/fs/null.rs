@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::KISEKI;
+use super::KISEKI;
 use fuser::{spawn_mount2, Filesystem, MountOption};
 use snafu::{ResultExt, Snafu};
 
