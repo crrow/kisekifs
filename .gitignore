@@ -1,0 +1,21 @@
+.vscode
+.idea
+.DS_Store
+target
+debug
+out/
+book/
+docs/node_modules/
+
+# OSX leaves these everywhere on SMB shares
+._*
+*.o
+*.so
+*.dump
+*.out
+*.bak
+*.tmp
+*.temp
+*.log
+*.swp
+__debug_bin
