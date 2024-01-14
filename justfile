@@ -16,7 +16,7 @@
 
 alias c := check
 @check:
-    cargo check
+    cargo check --workspace
 
 alias t := test
 @test:
@@ -24,3 +24,17 @@ alias t := test
 
 @book:
     mdbook serve docs
+
+# Applications:
+
+@build-fs:
+    cargo build -p fs --bin kisekifs
+
+@run-fs-help:
+    cargo run -p fs --bin kisekifs help
+
+@mount:
+    cargo run -p fs --color=always --bin kisekifs mount --target /tmp/hello
+
+@unmount:
+    cargo run -p fs --color=always --bin kisekifs unmount --target /tmp/hello
