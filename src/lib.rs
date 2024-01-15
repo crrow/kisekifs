@@ -1,3 +1,3 @@
-mod common;
-mod fs;
-mod meta;
+pub mod common;
+pub mod fs;
+pub mod meta;

@@ -5,6 +5,10 @@ edition = "2021"
 description = "A fuse filesystem"
 
 
+[[bin]]
+name = "kisekifs"
+path = "src/bin/kisekifs.rs"
+
 [dependencies]
 fuser = "0.14.0"
 snafu = "0.8.0"

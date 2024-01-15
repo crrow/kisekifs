@@ -6,7 +6,7 @@ use snafu::{ResultExt, Snafu};
 
 #[derive(Snafu, Debug)]
 pub enum Error {
-    #[snafu(display("failed to mount null fs on {:?}", path))]
+    #[snafu(display("failed to mount null fs on {:?}, {:?}", path, source))]
     ErrTryMountFailed {
         source: std::io::Error,
         path: PathBuf,
@@ -19,6 +19,7 @@ pub type Result = std::result::Result<(), Error>;
 /// not the real file system can be mounted as well. If the test fails, the application can fail
 /// early instead of wasting time constructing the real file system.
 struct NullFs {}
+
 impl Filesystem for NullFs {}
 
 pub fn mount_check<P: AsRef<Path>>(mountpoint: P) -> Result {
