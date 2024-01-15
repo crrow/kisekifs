@@ -1,11 +1,43 @@
+use std::collections::HashMap;
+use std::str::FromStr;
 // Config for clients.
-use super::err::Result;
 use crate::common;
-use serde::{Deserialize, Serialize};
+use crate::common::err::Result;
+use crate::meta::config::ConfigError::FailedToParseScheme;
+use crate::meta::Meta;
+use opendal::Scheme;
+use serde::{Deserialize, Serialize, Serializer};
+use snafu::{ResultExt, Snafu};
 use std::time::Duration;
+
+#[derive(Debug, Snafu)]
+pub enum ConfigError {
+    #[snafu(display("failed to parse scheme: {}: {}", got, source))]
+    FailedToParseScheme { source: opendal::Error, got: String },
+    #[snafu(display("failed to open operator: {}", source))]
+    FailedToOpenOperator { source: opendal::Error },
+}
+
+impl ConfigError {
+    fn name(&self) -> &'static str {
+        "meta-config"
+    }
+}
+
+impl From<ConfigError> for common::err::Error {
+    fn from(value: ConfigError) -> Self {
+        Self::GenericError {
+            component: value.name(),
+            source: Box::new(value),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
+    // connect info
+    pub scheme: String,
+    pub scheme_config: HashMap<String, String>,
     // update ctime
     pub strict: bool,
     pub retries: usize,
@@ -29,6 +61,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            scheme: Scheme::Sled.to_string(),
+            scheme_config: {
+                let mut map = HashMap::new();
+                map.insert("datadir".to_string(), "/tmp/kiseki-meta".to_string());
+                map
+            },
             strict: true,
             retries: 10,
             max_deletes: 2,
@@ -51,6 +89,22 @@ impl Default for Config {
 impl Config {
     pub(crate) fn verify(&mut self) -> Result<()> {
         todo!()
+    }
+    pub fn open(mut self) -> Result<Meta> {
+        let op = opendal::Operator::via_map(
+            Scheme::from_str(&self.scheme).context(FailedToParseSchemeSnafu {
+                got: self.scheme.clone(),
+            })?,
+            self.scheme_config.clone(),
+        )
+        .context(FailedToOpenOperatorSnafu)?;
+        let m = Meta {
+            config: self,
+            format: None,
+            root: 0,
+            operator: op,
+        };
+        Ok(m)
     }
 }
 

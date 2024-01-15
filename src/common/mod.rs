@@ -1,3 +1,5 @@
+pub mod err;
+
 use serde::{Deserialize, Serialize};
 
 /// Atime (Access Time):
