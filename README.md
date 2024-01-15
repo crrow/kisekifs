@@ -1,3 +1,4 @@
 # Kisser
 
-FileSystem in rust.
+Fuse FileSystem in rust, inspired by [JuiceFs](https://github.com/juicedata/juicefs).
+
