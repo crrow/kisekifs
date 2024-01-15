@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 // Config for clients.
 use crate::common;
-use crate::meta::Meta;
+use crate::meta::{types, Meta};
 use common::err::Result;
 use opendal::Scheme;
 use serde::__private::de::IdentifierDeserializer;
@@ -14,12 +14,7 @@ use std::time::Duration;
 use tracing::info;
 
 #[derive(Debug, Snafu)]
-pub enum ConfigError {
-    #[snafu(display("failed to parse scheme: {}: {}", got, source))]
-    FailedToParseScheme { source: opendal::Error, got: String },
-    #[snafu(display("failed to open operator: {}", source))]
-    FailedToOpenOperator { source: opendal::Error },
-}
+pub enum ConfigError {}
 
 impl ConfigError {
     fn name(&self) -> &'static str {
@@ -57,7 +52,7 @@ pub struct MetaConfig {
     pub heartbeat: Duration,
     pub mount_point: PathBuf,
     pub sub_dir: PathBuf,
-    pub atime_mode: common::AccessTimeMode,
+    pub atime_mode: types::AccessTimeMode,
     pub dir_stat_flush_period: Duration,
     pub skip_dir_mtime: Duration,
 }
@@ -110,19 +105,13 @@ impl MetaConfig {
     pub(crate) fn verify(&mut self) -> Result<()> {
         todo!()
     }
-    pub(crate) fn new_meta(&self) -> Result<Meta> {
+    pub(crate) fn open(self) -> Result<Meta> {
         info!(
             "try to open meta on {:?}, {:?}",
             self.scheme, &self.scheme_config
         );
-        let op = opendal::Operator::via_map(self.scheme, self.scheme_config.clone())
-            .context(FailedToOpenOperatorSnafu)?;
-        let m = Meta {
-            config: self.clone(),
-            format: None,
-            root: 0,
-            operator: op,
-        };
+        let m = Meta::open(self)?;
+        info!("open {} successfully.", &m.info());
         Ok(m)
     }
 }

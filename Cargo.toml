@@ -12,7 +12,7 @@ name = "kiseki"
 path = "src/bin/kiseki.rs"
 
 [dependencies]
-fuser = "0.14.0"
+fuser = { version = "0.14.0", features = ["serializable"]}
 snafu = "0.8.0"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
@@ -26,6 +26,7 @@ ctrlc = "3.4.2"
 sys-mount = "2.1.1"
 const_format = "0.2.32"
 procfs = "0.16.0"
+lazy_static = "1.4.0"
 
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}

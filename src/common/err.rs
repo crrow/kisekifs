@@ -8,6 +8,9 @@ pub enum Error {
         component: &'static str,
         source: Box<dyn std::error::Error>,
     },
+    MetaError {
+        source: crate::meta::MetaError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

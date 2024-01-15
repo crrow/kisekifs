@@ -4,17 +4,18 @@ pub mod null;
 pub const KISEKI: &str = "kiseki";
 
 use crate::common;
-use crate::fs::config::{FsConfig, FuseConfig};
+use crate::fs::config::FsConfig;
 use crate::meta::config::MetaConfig;
-use crate::meta::Meta;
-use fuser::{
-    mount2, spawn_mount2, BackgroundSession, Filesystem, KernelConfig, MountOption, ReplyEntry,
-    Request,
+use crate::meta::types::{
+    get_internal_node_by_name, Entry, Ino, CONTROL_INODE, CONTROL_INODE_NAME,
 };
+use crate::meta::Meta;
+use fuser::{Filesystem, KernelConfig, ReplyEntry, Request, FUSE_ROOT_ID};
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
@@ -35,6 +36,24 @@ pub enum FsError {
         mount_point: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// Errors that can be converted to a raw OS error (errno)
+pub trait ToErrno {
+    fn to_errno(&self) -> libc::c_int;
+}
+
+impl ToErrno for InodeError {
+    fn to_errno(&self) -> c_int {
+        match self {
+            InodeError::InvalidFileName { .. } => libc::EINVAL,
+        }
+    }
+}
+#[derive(Debug, Snafu)]
+pub enum InodeError {
+    #[snafu(display("invalid file name {:?}", name))]
+    InvalidFileName { name: OsString },
 }
 
 impl From<FsError> for common::err::Error {
@@ -61,13 +80,22 @@ impl Display for KisekiFS {
 impl KisekiFS {
     pub fn create(fs_config: FsConfig, meta_config: MetaConfig) -> Result<Self, Whatever> {
         let meta = meta_config
-            .new_meta()
+            .open()
             .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
 
         Ok(Self {
             config: fs_config,
             meta,
         })
+    }
+    fn reply_entry(&self, reply: ReplyEntry, entry: &Entry) {
+        let ttl = if entry.is_filetype(fuser::FileType::Directory) {
+            &self.config.dir_entry_timeout
+        } else {
+            &self.config.entry_timeout
+        };
+
+        reply.entry(&ttl, &entry.attr.inner, 1)
     }
 }
 
@@ -79,7 +107,24 @@ impl Filesystem for KisekiFS {
         debug!("init kiseki...");
         Ok(())
     }
-    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {}
+    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        let name = match name.to_str().ok_or_else(|| InodeError::InvalidFileName {
+            name: name.to_owned(),
+        }) {
+            Ok(n) => n,
+            Err(e) => {
+                reply.error(e.to_errno());
+                return;
+            }
+        };
+
+        if parent == FUSE_ROOT_ID || name.eq(CONTROL_INODE_NAME) {
+            if let Some(n) = get_internal_node_by_name(name) {
+                self.reply_entry(reply, &n);
+                return;
+            }
+        }
+    }
 }
 
 // #[cfg(test)]

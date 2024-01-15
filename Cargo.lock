@@ -606,6 +606,7 @@ dependencies = [
  "memchr",
  "page_size",
  "pkg-config",
+ "serde",
  "smallvec",
  "zerocopy",
 ]
@@ -978,6 +979,7 @@ dependencies = [
  "ctrlc",
  "features",
  "fuser",
+ "lazy_static",
  "libc",
  "opendal",
  "procfs",

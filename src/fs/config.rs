@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Configuration for a FUSE background session.
 #[derive(Debug, Clone)]
@@ -8,4 +9,9 @@ pub struct FuseConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct FsConfig {}
+pub struct FsConfig {
+    pub attr_timeout: Duration,
+    pub dir_entry_timeout: Duration,
+    pub entry_timeout: Duration,
+    pub backup_meta_interval: Duration,
+}
