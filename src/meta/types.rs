@@ -1,10 +1,12 @@
 use crate::fs::InodeError;
-use fuser::{FileAttr, FileType};
+use fuser::{FileAttr, FileType, ReplyEntry};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::cell::{RefCell, UnsafeCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
+use std::convert::Into;
+use std::ops::{Add, AddAssign, Deref, DerefMut};
 use std::time;
 use std::time::{Duration, SystemTime};
 
@@ -38,16 +40,65 @@ impl Default for AccessTimeMode {
     }
 }
 
-pub type Ino = u64;
+pub const ZERO_INO: Ino = Ino(0);
 
-const MIN_INTERNAL_INODE: Ino = 0x7FFFFFFF00000000;
-const MAX_INTERNAL_INODE: Ino = 0x7FFFFFFF10000000;
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+pub struct Ino(u64);
 
-pub const LOG_INODE_NAME: &str = ".accesslog";
-pub const CONTROL_INODE_NAME: &str = ".control";
-pub const STATS_INODE_NAME: &str = ".stats";
-pub const CONFIG_INODE_NAME: &str = ".config";
-pub const TRASH_INODE_NAME: &str = ".trash";
+impl AddAssign for Ino {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
+impl Add for Ino {
+    type Output = Ino;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl From<u64> for Ino {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+impl Into<u64> for Ino {
+    fn into(self) -> u64 {
+        self.0
+    }
+}
+
+impl Ino {
+    pub fn is_special(&self) -> bool {
+        *self >= MIN_INTERNAL_INODE
+    }
+    pub fn is_normal(&self) -> bool {
+        !self.is_special()
+    }
+}
+
+const MIN_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF00000000);
+
+const LOG_INODE: Ino = Ino(0x7FFFFFFF00000001);
+const CONTROL_INODE: Ino = Ino(0x7FFFFFFF00000002);
+const STATS_INODE: Ino = Ino(0x7FFFFFFF00000003);
+const CONFIG_INODE: Ino = Ino(0x7FFFFFFF00000004);
+const MAX_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF10000000);
+const TRASH_NODE: Ino = MAX_INTERNAL_INODE;
+
+pub const LOG_INODE_NAME: &'static str = ".accesslog";
+pub const CONTROL_INODE_NAME: &'static str = ".control";
+pub const STATS_INODE_NAME: &'static str = ".stats";
+pub const CONFIG_INODE_NAME: &'static str = ".config";
+pub const TRASH_INODE_NAME: &'static str = ".trash";
+
+lazy_static! {
+    pub static ref UID_GID: (u32, u32) = get_current_uid_gid();
+}
 
 #[inline]
 pub fn get_current_uid_gid() -> (u32, u32) {
@@ -55,61 +106,73 @@ pub fn get_current_uid_gid() -> (u32, u32) {
         libc::getegid() as u32
     })
 }
-
-lazy_static! {
-    pub static ref UID_GID: (u32, u32) = get_current_uid_gid();
-    pub static ref LOG_INODE: InternalNode = InternalNode(Entry {
-        inode: MIN_INTERNAL_INODE + 1,
-        name: LOG_INODE_NAME.to_string(),
-        attr: Attr::default().set_perm(0o400).set_full(),
-    });
-    pub static ref CONTROL_INODE: InternalNode = InternalNode(Entry {
-        inode: MIN_INTERNAL_INODE + 2,
-        name: CONTROL_INODE_NAME.to_string(),
-        attr: Attr::default().set_perm(0o666).set_full(),
-    });
-    pub static ref STATS_INODE: InternalNode = InternalNode(Entry {
-        inode: MIN_INTERNAL_INODE + 3,
-        name: STATS_INODE_NAME.to_string(),
-        attr: Attr::default().set_perm(0o400).set_full(),
-    });
-    pub static ref CONFIG_INODE: InternalNode = InternalNode(Entry {
-        inode: MIN_INTERNAL_INODE + 4,
-        name: CONFIG_INODE_NAME.to_string(),
-        attr: Attr::default().set_perm(0o400).set_full(),
-    });
-    pub static ref TRASH_INODE: InternalNode = InternalNode(Entry {
-        inode: MAX_INTERNAL_INODE,
-        name: TRASH_INODE_NAME.to_string(),
-        attr: Attr::default()
-            .set_perm(0o555)
-            .set_kind(fuser::FileType::Directory)
-            .set_nlink(2)
-            .set_uid(UID_GID.0)
-            .set_gid(UID_GID.1)
-            .set_full(),
-    });
+#[derive(Debug)]
+pub struct PreInternalNodes {
+    nodes: HashMap<&'static str, InternalNode>,
 }
 
-pub fn get_internal_node_by_name(name: &str) -> Option<&'static InternalNode> {
-    match name {
-        LOG_INODE_NAME => Some(&LOG_INODE),
-        CONTROL_INODE_NAME => Some(&CONTROL_INODE),
-        STATS_INODE_NAME => Some(&STATS_INODE),
-        CONFIG_INODE_NAME => Some(&CONFIG_INODE),
-        TRASH_INODE_NAME => Some(&TRASH_INODE),
-        _ => None,
+impl Default for PreInternalNodes {
+    fn default() -> Self {
+        let mut map = HashMap::new();
+        let control_inode: InternalNode = InternalNode(Entry {
+            inode: CONTROL_INODE,
+            name: CONTROL_INODE_NAME.to_string(),
+            attr: RefCell::new(InodeAttr::default().set_perm(0o666).set_full()),
+        });
+        let log_inode: InternalNode = InternalNode(Entry {
+            inode: LOG_INODE,
+            name: LOG_INODE_NAME.to_string(),
+            attr: RefCell::new(InodeAttr::default().set_perm(0o400).set_full()),
+        });
+        let stats_inode: InternalNode = InternalNode(Entry {
+            inode: STATS_INODE,
+            name: STATS_INODE_NAME.to_string(),
+            attr: RefCell::new(InodeAttr::default().set_perm(0o400).set_full()),
+        });
+        let config_inode: InternalNode = InternalNode(Entry {
+            inode: CONFIG_INODE,
+            name: CONFIG_INODE_NAME.to_string(),
+            attr: RefCell::new(InodeAttr::default().set_perm(0o400).set_full()),
+        });
+        let trash_inode: InternalNode = InternalNode(Entry {
+            inode: MAX_INTERNAL_INODE,
+            name: TRASH_INODE_NAME.to_string(),
+            attr: RefCell::new(
+                InodeAttr::default()
+                    .set_perm(0o555)
+                    .set_kind(fuser::FileType::Directory)
+                    .set_nlink(2)
+                    .set_uid(UID_GID.0)
+                    .set_gid(UID_GID.1)
+                    .set_full(),
+            ),
+        });
+        map.insert(LOG_INODE_NAME, log_inode);
+        map.insert(CONTROL_INODE_NAME, control_inode);
+        map.insert(STATS_INODE_NAME, stats_inode);
+        map.insert(CONFIG_INODE_NAME, config_inode);
+        map.insert(TRASH_INODE_NAME, trash_inode);
+        Self { nodes: map }
+    }
+}
+
+impl PreInternalNodes {
+    pub fn get_internal_node_by_name(&self, name: &str) -> Option<&InternalNode> {
+        self.nodes.get(name)
+    }
+    pub fn get_mut_internal_node_by_name(&mut self, name: &str) -> Option<&mut InternalNode> {
+        self.nodes.get_mut(name)
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Attr {
+pub struct InodeAttr {
     pub inner: FileAttr,
     pub parent: Ino,
     pub full: bool, // the attributes are completed or not
 }
 
-impl Attr {
+impl InodeAttr {
     pub fn default() -> Self {
         let now = SystemTime::now();
         Self {
@@ -130,7 +193,7 @@ impl Attr {
                 blksize: 0,
                 flags: 0,
             },
-            parent: 0,
+            parent: ZERO_INO,
             full: false,
         }
     }
@@ -165,18 +228,26 @@ impl Attr {
 pub struct Entry {
     pub inode: Ino,
     pub name: String,
-    pub attr: Attr,
+    pub attr: RefCell<InodeAttr>,
 }
 
 impl Entry {
-    pub fn new(inode: Ino, name: String, attr: Attr) -> Self {
-        Self { inode, name, attr }
+    pub fn new(inode: Ino, name: String, attr: InodeAttr) -> Self {
+        Self {
+            inode,
+            name,
+            attr: RefCell::new(attr),
+        }
     }
     pub fn is_filetype(&self, ft: FileType) -> bool {
-        return self.attr.inner.kind == ft;
+        return self.attr.borrow().inner.kind == ft;
+    }
+    pub fn is_special_inode(&self) -> bool {
+        self.inode.is_special()
     }
 }
 
+#[derive(Debug)]
 pub struct InternalNode(Entry);
 
 impl From<InternalNode> for Entry {
@@ -192,9 +263,14 @@ impl Deref for InternalNode {
         &self.0
     }
 }
+impl DerefMut for InternalNode {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 pub struct OpenFile {
-    pub attr: Attr,
+    pub attr: InodeAttr,
     pub reference_count: usize,
     pub last_check: SystemTime,
     pub chunks: HashMap<u32, Vec<Slice>>,

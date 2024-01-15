@@ -6,9 +6,7 @@ pub const KISEKI: &str = "kiseki";
 use crate::common;
 use crate::fs::config::FsConfig;
 use crate::meta::config::MetaConfig;
-use crate::meta::types::{
-    get_internal_node_by_name, Entry, Ino, CONTROL_INODE, CONTROL_INODE_NAME,
-};
+use crate::meta::types::{Entry, Ino, InodeAttr, PreInternalNodes, CONTROL_INODE_NAME};
 use crate::meta::Meta;
 use fuser::{Filesystem, KernelConfig, ReplyEntry, Request, FUSE_ROOT_ID};
 use libc::c_int;
@@ -17,6 +15,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, info};
 
 #[derive(Debug, Snafu)]
@@ -69,6 +68,7 @@ impl From<FsError> for common::err::Error {
 pub struct KisekiFS {
     config: FsConfig,
     meta: Meta,
+    internal_nodes: PreInternalNodes,
 }
 
 impl Display for KisekiFS {
@@ -86,16 +86,41 @@ impl KisekiFS {
         Ok(Self {
             config: fs_config,
             meta,
+            internal_nodes: PreInternalNodes::default(),
         })
     }
-    fn reply_entry(&self, reply: ReplyEntry, entry: &Entry) {
+    fn reply_entry(&self, ctx: &mut FuseContext, reply: ReplyEntry, entry: &Entry) {
         let ttl = if entry.is_filetype(fuser::FileType::Directory) {
             &self.config.dir_entry_timeout
         } else {
             &self.config.entry_timeout
         };
 
-        reply.entry(&ttl, &entry.attr.inner, 1)
+        if entry.is_special_inode() {
+        } else if entry.is_filetype(fuser::FileType::RegularFile)
+            && self.modified_since(entry.inode, ctx.start_at)
+        {
+            debug!("refresh attr for {:?}", entry.inode);
+            // TODO: introduce another type to avoid messing up with fuse's methods.
+            // self.getattr()
+        }
+
+        reply.entry(&ttl, &entry.attr.borrow().inner, 1)
+    }
+    fn modified_since(&self, ino: Ino, since: SystemTime) -> bool {
+        todo!()
+    }
+}
+
+struct FuseContext {
+    start_at: SystemTime,
+}
+
+impl FuseContext {
+    fn new() -> Self {
+        Self {
+            start_at: SystemTime::now(),
+        }
     }
 }
 
@@ -108,6 +133,7 @@ impl Filesystem for KisekiFS {
         Ok(())
     }
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        let mut ctx = FuseContext::new();
         let name = match name.to_str().ok_or_else(|| InodeError::InvalidFileName {
             name: name.to_owned(),
         }) {
@@ -119,13 +145,15 @@ impl Filesystem for KisekiFS {
         };
 
         if parent == FUSE_ROOT_ID || name.eq(CONTROL_INODE_NAME) {
-            if let Some(n) = get_internal_node_by_name(name) {
-                self.reply_entry(reply, &n);
+            if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
+                self.reply_entry(&mut ctx, reply, n);
                 return;
             }
         }
     }
 }
+
+fn update_length(entry: &mut Entry) {}
 
 // #[cfg(test)]
 // mod tests {

@@ -2,7 +2,7 @@ pub mod config;
 pub mod types;
 
 use crate::common::err::Result;
-use crate::meta::types::{InternalNode, OpenFiles};
+use crate::meta::types::{InternalNode, OpenFiles, PreInternalNodes};
 use config::{Format, MetaConfig};
 
 use opendal::Operator;
@@ -43,7 +43,7 @@ impl Meta {
         let m = Meta {
             config: config.clone(),
             format: None,
-            root: 0,
+            root: 0.into(),
             operator: op,
             sub_trash: None,
             open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
