@@ -7,5 +7,5 @@ pub struct FuseConfig {
     pub mount_options: Vec<fuser::MountOption>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FsConfig {}

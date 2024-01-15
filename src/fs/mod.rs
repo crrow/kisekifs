@@ -4,7 +4,7 @@ pub mod null;
 pub const KISEKI: &str = "kiseki";
 
 use crate::common;
-use crate::fs::config::FsConfig;
+use crate::fs::config::{FsConfig, FuseConfig};
 use crate::meta::config::MetaConfig;
 use crate::meta::Meta;
 use fuser::{
@@ -59,7 +59,7 @@ impl Display for KisekiFS {
 }
 
 impl KisekiFS {
-    pub(crate) fn new(fs_config: FsConfig, meta_config: MetaConfig) -> Result<Self, Whatever> {
+    pub fn create(fs_config: FsConfig, meta_config: MetaConfig) -> Result<Self, Whatever> {
         let meta = meta_config
             .new_meta()
             .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
@@ -69,40 +69,6 @@ impl KisekiFS {
             meta,
         })
     }
-
-    // pub fn mount(mut self) -> common::err::Result<BackgroundSession> {
-    //     let mountpoint = self.get_mount_point();
-    //     std::fs::create_dir_all(&mountpoint).context(ErrPrepareMountPointDirFailedSnafu {
-    //         mount_point: mountpoint.clone(),
-    //     })?;
-    //     let options = [
-    //         MountOption::FSName(String::from(KISEKI)),
-    //         MountOption::AutoUnmount,
-    //     ];
-    //
-    //     info!("try to mounted to {:?}", &mountpoint);
-    //     let session = spawn_mount2(self, &mountpoint, &options).context(ErrMountFailedSnafu {
-    //         mount_point: mountpoint,
-    //     })?;
-    //     Ok(session)
-    // }
-    //
-    // pub fn block_mount(mut self) -> common::err::Result<()> {
-    //     let mountpoint = self.get_mount_point();
-    //     std::fs::create_dir_all(&mountpoint).context(ErrPrepareMountPointDirFailedSnafu {
-    //         mount_point: mountpoint.clone(),
-    //     })?;
-    //     let options = [
-    //         MountOption::FSName(String::from(KISEKI)),
-    //         MountOption::AllowRoot,
-    //     ];
-    //
-    //     info!("Mounted to {:?}", &mountpoint);
-    //     mount2(self, &mountpoint, &options).context(ErrMountFailedSnafu {
-    //         mount_point: mountpoint,
-    //     })?;
-    //     Ok(())
-    // }
 }
 
 impl Filesystem for KisekiFS {

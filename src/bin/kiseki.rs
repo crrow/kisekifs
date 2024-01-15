@@ -14,17 +14,19 @@
  * limitations under the License.
  */
 
-use clap::{Parser, Subcommand};
-use fuser::{BackgroundSession, MountOption};
+use clap::{Parser, Subcommand, ValueEnum};
+use fuser::MountOption;
 use kisekifs::fs::config::{FsConfig, FuseConfig};
 use kisekifs::fs::KISEKI;
 use kisekifs::meta::config::MetaConfig;
 use kisekifs::{build_info, fs};
 use snafu::{whatever, ResultExt, Whatever};
 use std::path::{Path, PathBuf};
-use tracing::{error, info};
+use std::str::FromStr;
+use tracing::info;
 const MOUNT_OPTIONS_HEADER: &str = "Mount options";
 const LOGGING_OPTIONS_HEADER: &str = "Logging options";
+const META_OPTIONS_HEADER: &str = "Meta options";
 
 #[derive(Debug, Parser)]
 #[clap(
@@ -73,8 +75,6 @@ impl UmountArgs {
 }
 
 #[derive(Debug, Parser, Clone)]
-#[clap(name = "kiseki", about= "mount client for kiseki-fs",author = build_info::AUTHOR, version = build_info::FULL_VERSION)]
-// #[command(name, author, version, about, long_about = None)]
 struct MountArgs {
     #[clap(
         help = "Directory to mount the fs at",
@@ -90,7 +90,12 @@ struct MountArgs {
     )]
     pub read_only: bool,
 
-    #[clap(long, help = "Automatically unmount on exit", help_heading = MOUNT_OPTIONS_HEADER)]
+    #[clap(
+    long,
+    help = "Automatically unmount on exit",
+    help_heading = MOUNT_OPTIONS_HEADER,
+    default_value = "true",
+    )]
     pub auto_unmount: bool,
 
     #[clap(long, help = "Allow root user to access file system", help_heading = MOUNT_OPTIONS_HEADER)]
@@ -100,7 +105,8 @@ struct MountArgs {
     long,
     help = "Allow other users, including root, to access file system",
     help_heading = MOUNT_OPTIONS_HEADER,
-    conflicts_with = "allow_root"
+    conflicts_with = "allow_root",
+    default_value = "true",
     )]
     pub allow_other: bool,
 
@@ -113,7 +119,14 @@ struct MountArgs {
     )]
     pub log_directory: Option<PathBuf>,
 
-    #[clap(short, long, help = "Enable debug logging for Mountpoint", help_heading = LOGGING_OPTIONS_HEADER)]
+    #[clap(
+    short,
+    long,
+    help = "Enable debug logging for Mountpoint", 
+    help_heading = LOGGING_OPTIONS_HEADER,
+    value_name = "bool",
+    default_value = "true"
+    )]
     pub debug: bool,
 
     #[clap(
@@ -131,8 +144,29 @@ struct MountArgs {
         default_value = "true"
     )]
     pub foreground: bool,
+
+    #[clap(flatten)]
+    pub meta_args: MetaArgs,
 }
 
+#[derive(Debug, Clone, Parser)]
+struct MetaArgs {
+    #[arg(
+    long,
+    help = "Specify the scheme of the meta store",
+    help_heading = META_OPTIONS_HEADER,
+    default_value_t = opendal::Scheme::Sled.to_string(),
+    )]
+    pub scheme: String, // FIXME
+
+    #[clap(
+    long,
+    help = "Specify the address of the meta store",
+    help_heading = META_OPTIONS_HEADER,
+    default_value = "/tmp/kiseki-meta",
+    )]
+    pub data_dir: PathBuf,
+}
 impl MountArgs {
     fn fuse_config(&self) -> FuseConfig {
         let mut options = vec![
@@ -157,20 +191,25 @@ impl MountArgs {
             mount_options: options,
         }
     }
-    fn meta_config(&self) -> MetaConfig {
-        todo!()
+    fn meta_config(&self) -> Result<MetaConfig, Whatever> {
+        let mut mc = MetaConfig::default();
+        mc.scheme = opendal::Scheme::from_str(&self.meta_args.scheme)
+            .with_whatever_context(|_| format!("invalid scheme {}", &self.meta_args.scheme))?;
+        mc.scheme_config.insert(
+            "datadir".to_string(),
+            self.meta_args.data_dir.to_string_lossy().to_string(),
+        );
+        Ok(mc)
     }
     fn fs_config(&self) -> FsConfig {
-        todo!()
+        FsConfig::default()
     }
 
     fn run(self) -> Result<(), Whatever> {
         let successful_mount_msg =
             format!("{} is mounted at {}", KISEKI, self.mount_point.display());
         if self.foreground {
-            let session = mount(self)?;
-            println!("{successful_mount_msg}");
-            session.join();
+            mount(self)?;
         }
         return Ok(());
     }
@@ -186,15 +225,25 @@ fn main() -> Result<(), Whatever> {
     };
 }
 
-fn mount(args: MountArgs) -> Result<BackgroundSession, Whatever> {
+fn mount(args: MountArgs) -> Result<(), Whatever> {
     info!("try to mount kiseki on {:?}", &args.mount_point);
     validate_mount_point(&args.mount_point)?;
 
     let fuse_config = args.fuse_config();
-    let meta_config = args.meta_config();
+    let meta_config = args.meta_config()?;
     let fs_config = args.fs_config();
 
-    todo!()
+    let fs = fs::KisekiFS::create(fs_config, meta_config)?;
+    fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(
+        |e| {
+            format!(
+                "failed to mount kiseki on {}; {}",
+                args.mount_point.display(),
+                e
+            )
+        },
+    )?;
+    Ok(())
 }
 
 fn validate_mount_point(path: impl AsRef<Path>) -> Result<(), Whatever> {

@@ -38,10 +38,10 @@ alias t := test
     cargo run --color=always --bin kiseki help mount
 
 @mount:
-    cargo run --color=always --bin kiseki mount /tmp/hello
+    cargo run --color=always --bin kiseki mount
 
 @help-umount:
     cargo run --color=always --bin kiseki help umount
 
 @umount:
-    cargo run --color=always --bin kiseki umount /tmp/hello
+    cargo run --color=always --bin kiseki umount

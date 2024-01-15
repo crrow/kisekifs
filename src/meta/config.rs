@@ -3,12 +3,15 @@ use std::path::PathBuf;
 use std::str::FromStr;
 // Config for clients.
 use crate::common;
-use crate::common::err::Result;
 use crate::meta::Meta;
+use common::err::Result;
 use opendal::Scheme;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::__private::de::IdentifierDeserializer;
+use serde::de::Error;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::{ResultExt, Snafu};
 use std::time::Duration;
+use tracing::info;
 
 #[derive(Debug, Snafu)]
 pub enum ConfigError {
@@ -32,11 +35,12 @@ impl From<ConfigError> for common::err::Error {
         }
     }
 }
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct MetaConfig {
     // connect info
-    pub scheme: String,
+    #[serde(serialize_with = "serialize_scheme")]
+    #[serde(deserialize_with = "deserialize_scheme")]
+    pub scheme: Scheme,
     pub scheme_config: HashMap<String, String>,
     // update ctime
     pub strict: bool,
@@ -58,10 +62,26 @@ pub struct MetaConfig {
     pub skip_dir_mtime: Duration,
 }
 
+fn serialize_scheme<S>(s: &Scheme, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&s.to_string())
+}
+
+fn deserialize_scheme<'de, D>(deserializer: D) -> std::result::Result<Scheme, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Scheme::from_str(&s)
+        .map_err(|e| D::Error::custom(format!("failed to parse scheme: {}: {}", s, e.to_string())))
+}
+
 impl Default for MetaConfig {
     fn default() -> Self {
         Self {
-            scheme: Scheme::Sled.to_string(),
+            scheme: Scheme::Sled,
             scheme_config: {
                 let mut map = HashMap::new();
                 map.insert("datadir".to_string(), "/tmp/kiseki-meta".to_string());
@@ -91,13 +111,12 @@ impl MetaConfig {
         todo!()
     }
     pub(crate) fn new_meta(&self) -> Result<Meta> {
-        let op = opendal::Operator::via_map(
-            Scheme::from_str(&self.scheme).context(FailedToParseSchemeSnafu {
-                got: self.scheme.clone(),
-            })?,
-            self.scheme_config.clone(),
-        )
-        .context(FailedToOpenOperatorSnafu)?;
+        info!(
+            "try to open meta on {:?}, {:?}",
+            self.scheme, &self.scheme_config
+        );
+        let op = opendal::Operator::via_map(self.scheme, self.scheme_config.clone())
+            .context(FailedToOpenOperatorSnafu)?;
         let m = Meta {
             config: self.clone(),
             format: None,
@@ -134,4 +153,17 @@ pub struct Format {
     pub min_client_version: String,
     pub max_client_version: String,
     pub dir_stats: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codec_config() {
+        let c = MetaConfig::default();
+        let json_str = serde_json::to_string(&c).unwrap();
+        let c2: MetaConfig = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(c, c2)
+    }
 }
