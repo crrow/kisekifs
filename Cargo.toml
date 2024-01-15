@@ -2,19 +2,33 @@
 name = "kisekifs"
 version = "0.1.0"
 edition = "2021"
+authors = ["Ryan Tan"]
+license = "Apache-2.0"
 description = "A fuse filesystem"
 
-[workspace]
-members = ["fs"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[bin]]
+name = "kiseki"
+path = "src/bin/kiseki.rs"
 
-[workspace.dependencies]
+[dependencies]
 fuser = "0.14.0"
 snafu = "0.8.0"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
-[dependencies]
+serde = "1.0.195"
+serde_json = "1.0.111"
+features = "0.10.0"
+opendal = { version ="0.44.1", features = ["services-sled"]}
+clap = { version = "4.4.16", features = ["derive"]}
+libc = "0.2.152"
+ctrlc = "3.4.2"
+sys-mount = "2.1.1"
+const_format = "0.2.32"
+procfs = "0.16.0"
+
+[build-dependencies]
+built = {version = "0.7.1", features= ["git2"]}
 
 
 
