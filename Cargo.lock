@@ -811,6 +811,7 @@ dependencies = [
  "clap",
  "features",
  "fuser",
+ "libc",
  "opendal",
  "serde",
  "serde_json",
