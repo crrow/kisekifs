@@ -1,17 +1,11 @@
-use crate::common::err::Result;
-use crate::fs::KisekiFS;
-use crate::meta;
-use serde::{Deserialize, Serialize};
-use snafu::Snafu;
+use std::path::PathBuf;
 
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct Config {
-    meta_config: meta::config::Config,
+/// Configuration for a FUSE background session.
+#[derive(Debug, Clone)]
+pub struct FuseConfig {
+    pub mount_point: PathBuf,
+    pub mount_options: Vec<fuser::MountOption>,
 }
 
-impl Config {
-    pub fn open(mut self) -> Result<KisekiFS> {
-        let meta = self.meta_config.open()?;
-        Ok(KisekiFS::new(meta))
-    }
-}
+#[derive(Debug, Clone)]
+pub struct FsConfig {}

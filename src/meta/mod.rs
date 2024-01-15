@@ -1,13 +1,13 @@
 pub mod config;
 
 use crate::common::Ino;
-use config::{Config, Format};
+use config::{Format, MetaConfig};
 use opendal::Operator;
 use std::fmt::{Debug, Formatter};
 
 /// Trait `Meta` describes a meta service for file system.
 pub(crate) struct Meta {
-    pub(crate) config: Config,
+    pub(crate) config: MetaConfig,
     format: Option<Format>,
     root: Ino,
     operator: Operator,

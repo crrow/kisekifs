@@ -1,9 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 // Config for clients.
 use crate::common;
 use crate::common::err::Result;
-use crate::meta::config::ConfigError::FailedToParseScheme;
 use crate::meta::Meta;
 use opendal::Scheme;
 use serde::{Deserialize, Serialize, Serializer};
@@ -33,8 +33,8 @@ impl From<ConfigError> for common::err::Error {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Config {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MetaConfig {
     // connect info
     pub scheme: String,
     pub scheme_config: HashMap<String, String>,
@@ -51,14 +51,14 @@ pub struct Config {
     // max number of files to cache (soft limit)
     pub open_cache_limit: usize,
     pub heartbeat: Duration,
-    pub mount_point: String,
-    pub sub_dir: String,
+    pub mount_point: PathBuf,
+    pub sub_dir: PathBuf,
     pub atime_mode: common::AccessTimeMode,
     pub dir_stat_flush_period: Duration,
     pub skip_dir_mtime: Duration,
 }
 
-impl Default for Config {
+impl Default for MetaConfig {
     fn default() -> Self {
         Self {
             scheme: Scheme::Sled.to_string(),
@@ -77,8 +77,8 @@ impl Default for Config {
             open_cache: Default::default(),
             open_cache_limit: 0,
             heartbeat: Duration::from_secs(12),
-            mount_point: "".to_string(),
-            sub_dir: "".to_string(),
+            mount_point: PathBuf::new(),
+            sub_dir: PathBuf::new(),
             atime_mode: Default::default(),
             dir_stat_flush_period: Duration::from_secs(1),
             skip_dir_mtime: Default::default(),
@@ -86,11 +86,11 @@ impl Default for Config {
     }
 }
 
-impl Config {
+impl MetaConfig {
     pub(crate) fn verify(&mut self) -> Result<()> {
         todo!()
     }
-    pub fn open(mut self) -> Result<Meta> {
+    pub(crate) fn new_meta(&self) -> Result<Meta> {
         let op = opendal::Operator::via_map(
             Scheme::from_str(&self.scheme).context(FailedToParseSchemeSnafu {
                 got: self.scheme.clone(),
@@ -99,7 +99,7 @@ impl Config {
         )
         .context(FailedToOpenOperatorSnafu)?;
         let m = Meta {
-            config: self,
+            config: self.clone(),
             format: None,
             root: 0,
             operator: op,

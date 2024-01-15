@@ -28,13 +28,20 @@ alias t := test
 # Applications:
 
 @build-fs:
-    cargo build --bin kisekifs
+    cargo build --bin kiseki
 
 @run-fs-help:
-    cargo run --bin kisekifs help
+    cargo run --bin kiseki help
+    #cargo run --bin kiseki
+
+@help-mount:
+    cargo run --color=always --bin kiseki help mount
 
 @mount:
-    cargo run --color=always --bin kisekifs mount --target /tmp/hello
+    cargo run --color=always --bin kiseki mount /tmp/hello
 
-@unmount:
-    cargo run --color=always --bin kisekifs unmount --target /tmp/hello
+@help-umount:
+    cargo run --color=always --bin kiseki help umount
+
+@umount:
+    cargo run --color=always --bin kiseki umount /tmp/hello
