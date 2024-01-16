@@ -151,41 +151,41 @@ pub struct PreInternalNodes {
     nodes: HashMap<&'static str, InternalNode>,
 }
 
-impl Default for PreInternalNodes {
-    fn default() -> Self {
+impl PreInternalNodes {
+    pub fn new(ttl: (Duration, Duration)) -> Self {
         let mut map = HashMap::new();
         let control_inode: InternalNode = InternalNode(Entry {
             inode: CONTROL_INODE,
             name: CONTROL_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o666).set_full()),
+            attr: InodeAttr::default().set_perm(0o666).set_full(),
+            ttl: Default::default(),
         });
         let log_inode: InternalNode = InternalNode(Entry {
             inode: LOG_INODE,
             name: LOG_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o400).set_full()),
+            attr: InodeAttr::default().set_perm(0o400).set_full(),
+            ttl: Default::default(),
         });
         let stats_inode: InternalNode = InternalNode(Entry {
             inode: STATS_INODE,
             name: STATS_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o400).set_full()),
+            attr: InodeAttr::default().set_perm(0o400).set_full(),
         });
         let config_inode: InternalNode = InternalNode(Entry {
             inode: CONFIG_INODE,
             name: CONFIG_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o400).set_full()),
+            attr: InodeAttr::default().set_perm(0o400).set_full(),
         });
         let trash_inode: InternalNode = InternalNode(Entry {
             inode: MAX_INTERNAL_INODE,
             name: TRASH_INODE_NAME.to_string(),
-            attr: Some(
-                InodeAttr::default()
-                    .set_perm(0o555)
-                    .set_kind(fuser::FileType::Directory)
-                    .set_nlink(2)
-                    .set_uid(UID_GID.0)
-                    .set_gid(UID_GID.1)
-                    .set_full(),
-            ),
+            attr: InodeAttr::default()
+                .set_perm(0o555)
+                .set_kind(fuser::FileType::Directory)
+                .set_nlink(2)
+                .set_uid(UID_GID.0)
+                .set_gid(UID_GID.1)
+                .set_full(),
         });
         map.insert(LOG_INODE_NAME, log_inode);
         map.insert(CONTROL_INODE_NAME, control_inode);
@@ -352,16 +352,14 @@ impl Default for InodeAttr {
 pub struct Entry {
     pub inode: Ino,
     pub name: String,
-    pub attr: Option<InodeAttr>,
+    pub attr: InodeAttr,
+    pub ttl: Duration,
 }
 
 impl Entry {
     pub fn new(inode: Ino, name: String, attr: InodeAttr) -> Self {
-        Self {
-            inode,
-            name,
-            attr: Some(attr),
-        }
+        // Self { inode, name, attr,  }
+        todo!()
     }
     pub fn is_special_inode(&self) -> bool {
         self.inode.is_special()

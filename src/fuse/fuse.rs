@@ -14,13 +14,16 @@ use tracing::{debug, info};
 #[derive(Debug, Snafu)]
 pub enum FuseError {
     #[snafu(display("invalid file name {:?}", name))]
-    InvalidFileName { name: OsString },
+    ErrInvalidFileName { name: OsString },
+    #[snafu(display("file name too long {:?}", name))]
+    ErrFilenameTooLong { name: OsString },
 }
 
 impl ToErrno for FuseError {
     fn to_errno(&self) -> c_int {
         match self {
-            FuseError::InvalidFileName { .. } => libc::EINVAL,
+            FuseError::ErrInvalidFileName { .. } => libc::EINVAL,
+            FuseError::ErrFilenameTooLong { .. } => libc::ENAMETOOLONG,
         }
     }
 }
@@ -84,7 +87,7 @@ impl Filesystem for KisekiFuse {
     }
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = MetaContext::default();
-        let name = match name.to_str().ok_or_else(|| FuseError::InvalidFileName {
+        let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
             name: name.to_owned(),
         }) {
             Ok(n) => n,
@@ -95,11 +98,16 @@ impl Filesystem for KisekiFuse {
         };
 
         if name.len() > MAX_NAME_LENGTH {
-            reply.error(libc::ENAMETOOLONG);
+            reply.error(
+                FuseError::ErrFilenameTooLong {
+                    name: OsString::from(name),
+                }
+                .to_errno(),
+            );
             return;
         }
 
-        match self
+        let entry = match self
             .runtime
             .block_on(self.vfs.lookup(&ctx, Ino::from(parent), name))
         {
