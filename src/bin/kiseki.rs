@@ -16,14 +16,16 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use fuser::MountOption;
-use kisekifs::fs::config::{FsConfig, FuseConfig};
+use kisekifs::fs::config::FuseConfig;
 use kisekifs::fs::KISEKI;
 use kisekifs::meta::config::MetaConfig;
-use kisekifs::{build_info, fs};
+use kisekifs::vfs::config::VFSConfig;
+use kisekifs::{build_info, fs, vfs};
 use snafu::{whatever, ResultExt, Whatever};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tracing::info;
+
 const MOUNT_OPTIONS_HEADER: &str = "Mount options";
 const LOGGING_OPTIONS_HEADER: &str = "Logging options";
 const META_OPTIONS_HEADER: &str = "Meta options";
@@ -201,8 +203,8 @@ impl MountArgs {
         );
         Ok(mc)
     }
-    fn fs_config(&self) -> FsConfig {
-        FsConfig::default()
+    fn vfs_config(&self) -> VFSConfig {
+        VFSConfig::default()
     }
 
     fn run(self) -> Result<(), Whatever> {
@@ -231,9 +233,10 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
 
     let fuse_config = args.fuse_config();
     let meta_config = args.meta_config()?;
-    let fs_config = args.fs_config();
+    let fs_config = args.vfs_config();
 
-    let fs = fs::KisekiFS::create(fs_config, meta_config)?;
+    let file_system = vfs::KisekiVFS::create(fs_config, meta_config)?;
+    let fs = fs::KisekiFuse::create(file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(
         |e| {
             format!(

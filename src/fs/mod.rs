@@ -4,10 +4,11 @@ pub mod null;
 pub const KISEKI: &str = "kiseki";
 
 use crate::common;
-use crate::fs::config::FsConfig;
+use crate::fs::config::FuseConfig;
 use crate::meta::config::MetaConfig;
 use crate::meta::types::{Entry, Ino, InodeAttr, PreInternalNodes, CONTROL_INODE_NAME};
 use crate::meta::Meta;
+use crate::vfs::KisekiVFS;
 use fuser::{Filesystem, KernelConfig, ReplyEntry, Request, FUSE_ROOT_ID};
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
@@ -65,51 +66,35 @@ impl From<FsError> for common::err::Error {
 }
 
 #[derive(Debug)]
-pub struct KisekiFS {
-    config: FsConfig,
-    meta: Meta,
-    internal_nodes: PreInternalNodes,
+pub struct KisekiFuse {
+    vfs: KisekiVFS,
 }
 
-impl Display for KisekiFS {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "KisekiFS based on {}", self.meta.config.scheme)
+impl KisekiFuse {
+    pub fn create(vfs: KisekiVFS) -> Result<Self, Whatever> {
+        Ok(Self { vfs })
     }
-}
-
-impl KisekiFS {
-    pub fn create(fs_config: FsConfig, meta_config: MetaConfig) -> Result<Self, Whatever> {
-        let meta = meta_config
-            .open()
-            .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
-
-        Ok(Self {
-            config: fs_config,
-            meta,
-            internal_nodes: PreInternalNodes::default(),
-        })
-    }
-    fn reply_entry(&self, ctx: &mut FuseContext, reply: ReplyEntry, entry: &Entry) {
-        let ttl = if entry.is_filetype(fuser::FileType::Directory) {
-            &self.config.dir_entry_timeout
-        } else {
-            &self.config.entry_timeout
-        };
-
-        if entry.is_special_inode() {
-        } else if entry.is_filetype(fuser::FileType::RegularFile)
-            && self.modified_since(entry.inode, ctx.start_at)
-        {
-            debug!("refresh attr for {:?}", entry.inode);
-            // TODO: introduce another type to avoid messing up with fuse's methods.
-            // self.getattr()
-        }
-
-        reply.entry(&ttl, &entry.attr.borrow().inner, 1)
-    }
-    fn modified_since(&self, ino: Ino, since: SystemTime) -> bool {
-        todo!()
-    }
+    // fn reply_entry(&self, ctx: &mut FuseContext, reply: ReplyEntry, entry: &Entry) {
+    //     let ttl = if entry.is_filetype(fuser::FileType::Directory) {
+    //         &self.config.dir_entry_timeout
+    //     } else {
+    //         &self.config.entry_timeout
+    //     };
+    //
+    //     if entry.is_special_inode() {
+    //     } else if entry.is_filetype(fuser::FileType::RegularFile)
+    //         && self.modified_since(entry.inode, ctx.start_at)
+    //     {
+    //         debug!("refresh attr for {:?}", entry.inode);
+    //         // TODO: introduce another type to avoid messing up with fuse's methods.
+    //         // self.getattr()
+    //     }
+    //
+    //     reply.entry(&ttl, &entry.attr.borrow().inner, 1)
+    // }
+    // fn modified_since(&self, ino: Ino, since: SystemTime) -> bool {
+    //     todo!()
+    // }
 }
 
 struct FuseContext {
@@ -124,7 +109,7 @@ impl FuseContext {
     }
 }
 
-impl Filesystem for KisekiFS {
+impl Filesystem for KisekiFuse {
     /// Initialize filesystem.
     /// Called before any other filesystem method.
     /// The kernel module connection can be configured using the KernelConfig object
@@ -133,23 +118,23 @@ impl Filesystem for KisekiFS {
         Ok(())
     }
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let mut ctx = FuseContext::new();
-        let name = match name.to_str().ok_or_else(|| InodeError::InvalidFileName {
-            name: name.to_owned(),
-        }) {
-            Ok(n) => n,
-            Err(e) => {
-                reply.error(e.to_errno());
-                return;
-            }
-        };
-
-        if parent == FUSE_ROOT_ID || name.eq(CONTROL_INODE_NAME) {
-            if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
-                self.reply_entry(&mut ctx, reply, n);
-                return;
-            }
-        }
+        // let mut ctx = FuseContext::new();
+        // let name = match name.to_str().ok_or_else(|| InodeError::InvalidFileName {
+        //     name: name.to_owned(),
+        // }) {
+        //     Ok(n) => n,
+        //     Err(e) => {
+        //         reply.error(e.to_errno());
+        //         return;
+        //     }
+        // };
+        //
+        // if parent == FUSE_ROOT_ID || name.eq(CONTROL_INODE_NAME) {
+        //     if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
+        //         self.reply_entry(&mut ctx, reply, n);
+        //         return;
+        //     }
+        // }
     }
 }
 

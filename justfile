@@ -45,3 +45,6 @@ alias t := test
 
 @umount:
     cargo run --color=always --bin kiseki umount
+
+@cloc:
+    cloc . --exclude-dir=vendor,docs,tests,examples,build,scripts,tools,target
