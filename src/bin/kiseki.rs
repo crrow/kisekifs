@@ -16,11 +16,11 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use fuser::MountOption;
-use kisekifs::fs::config::FuseConfig;
-use kisekifs::fs::KISEKI;
+use kisekifs::fuse::config::FuseConfig;
+use kisekifs::fuse::KISEKI;
 use kisekifs::meta::config::MetaConfig;
 use kisekifs::vfs::config::VFSConfig;
-use kisekifs::{build_info, fs, vfs};
+use kisekifs::{build_info, fuse, vfs};
 use snafu::{whatever, ResultExt, Whatever};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -236,7 +236,7 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
     let fs_config = args.vfs_config();
 
     let file_system = vfs::KisekiVFS::create(fs_config, meta_config)?;
-    let fs = fs::KisekiFuse::create(file_system)?;
+    let fs = fuse::KisekiFuse::create(file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(
         |e| {
             format!(

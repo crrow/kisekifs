@@ -4,7 +4,7 @@ pub mod null;
 pub const KISEKI: &str = "kiseki";
 
 use crate::common;
-use crate::fs::config::FuseConfig;
+use crate::fuse::config::FuseConfig;
 use crate::meta::config::MetaConfig;
 use crate::meta::types::{Entry, Ino, InodeAttr, PreInternalNodes, CONTROL_INODE_NAME};
 use crate::meta::Meta;
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, info};
 
 #[derive(Debug, Snafu)]
-pub enum FsError {
+pub enum FuseError {
     #[snafu(display("failed to mount kiseki on {:?}, {:?}", mount_point, source))]
     ErrMountFailed {
         mount_point: PathBuf,
@@ -56,8 +56,8 @@ pub enum InodeError {
     InvalidFileName { name: OsString },
 }
 
-impl From<FsError> for common::err::Error {
-    fn from(value: FsError) -> Self {
+impl From<FuseError> for common::err::Error {
+    fn from(value: FuseError) -> Self {
         Self::GenericError {
             component: "kiseki-fs",
             source: Box::new(value),
@@ -144,7 +144,7 @@ fn update_length(entry: &mut Entry) {}
 // mod tests {
 //     use super::*;
 //     use crate::common::err::Result;
-//     use crate::fs::config::FsConfig;
+//     use crate::fuse::config::FsConfig;
 //
 //     #[test]
 //     fn test_unmount() {
@@ -152,8 +152,8 @@ fn update_length(entry: &mut Entry) {}
 //         // When mounting, a file system will be selected from this.
 //         let supported = sys_mount::SupportedFilesystems::new().unwrap();
 //         println!("is supported {:?}", supported.is_supported("kiseki"));
-//         for fs in supported.nodev_file_systems() {
-//             println!("Supported file systems: {:?}", fs);
+//         for fuse in supported.nodev_file_systems() {
+//             println!("Supported file systems: {:?}", fuse);
 //         }
 //
 //         let path = PathBuf::from("/tmp/kiseki");

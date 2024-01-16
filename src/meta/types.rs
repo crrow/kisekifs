@@ -1,4 +1,4 @@
-use crate::fs::InodeError;
+use crate::fuse::InodeError;
 use fuser::{FileAttr, FileType, ReplyEntry};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
