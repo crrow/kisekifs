@@ -4,10 +4,11 @@ pub mod null;
 pub const KISEKI: &str = "kiseki";
 
 use crate::common;
+use crate::common::err::ToErrno;
 use crate::fuse::config::FuseConfig;
 use crate::meta::config::MetaConfig;
 use crate::meta::types::{Entry, Ino, InodeAttr, PreInternalNodes, CONTROL_INODE_NAME};
-use crate::meta::Meta;
+use crate::meta::{MetaContext, MetaEngine, MAX_NAME_LENGTH};
 use crate::vfs::KisekiVFS;
 use fuser::{Filesystem, KernelConfig, ReplyEntry, Request, FUSE_ROOT_ID};
 use libc::c_int;
@@ -17,6 +18,7 @@ use std::fmt::{Display, Formatter};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::runtime;
 use tracing::{debug, info};
 
 #[derive(Debug, Snafu)]
@@ -38,24 +40,6 @@ pub enum FuseError {
     },
 }
 
-/// Errors that can be converted to a raw OS error (errno)
-pub trait ToErrno {
-    fn to_errno(&self) -> libc::c_int;
-}
-
-impl ToErrno for InodeError {
-    fn to_errno(&self) -> c_int {
-        match self {
-            InodeError::InvalidFileName { .. } => libc::EINVAL,
-        }
-    }
-}
-#[derive(Debug, Snafu)]
-pub enum InodeError {
-    #[snafu(display("invalid file name {:?}", name))]
-    InvalidFileName { name: OsString },
-}
-
 impl From<FuseError> for common::err::Error {
     fn from(value: FuseError) -> Self {
         Self::GenericError {
@@ -65,14 +49,45 @@ impl From<FuseError> for common::err::Error {
     }
 }
 
+#[derive(Debug, Snafu)]
+pub enum InodeError {
+    #[snafu(display("invalid file name {:?}", name))]
+    InvalidFileName { name: OsString },
+}
+
+impl ToErrno for InodeError {
+    fn to_errno(&self) -> c_int {
+        match self {
+            InodeError::InvalidFileName { .. } => libc::EINVAL,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct KisekiFuse {
+    config: FuseConfig,
     vfs: KisekiVFS,
+    runtime: runtime::Runtime,
 }
 
 impl KisekiFuse {
-    pub fn create(vfs: KisekiVFS) -> Result<Self, Whatever> {
-        Ok(Self { vfs })
+    pub fn create(fuse_config: FuseConfig, vfs: KisekiVFS) -> Result<Self, Whatever> {
+        let runtime = runtime::Builder::new_multi_thread()
+            .worker_threads(fuse_config.async_work_threads)
+            .thread_name("kiseki-fuse-async-runtime")
+            .thread_stack_size(3 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .with_whatever_context(|e| format!("unable to built tokio runtime {e} "))?;
+        info!(
+            "build tokio runtime with {} working threads",
+            fuse_config.async_work_threads
+        );
+        Ok(Self {
+            config: fuse_config,
+            vfs,
+            runtime,
+        })
     }
     // fn reply_entry(&self, ctx: &mut FuseContext, reply: ReplyEntry, entry: &Entry) {
     //     let ttl = if entry.is_filetype(fuser::FileType::Directory) {
@@ -97,18 +112,6 @@ impl KisekiFuse {
     // }
 }
 
-struct FuseContext {
-    start_at: SystemTime,
-}
-
-impl FuseContext {
-    fn new() -> Self {
-        Self {
-            start_at: SystemTime::now(),
-        }
-    }
-}
-
 impl Filesystem for KisekiFuse {
     /// Initialize filesystem.
     /// Called before any other filesystem method.
@@ -118,23 +121,33 @@ impl Filesystem for KisekiFuse {
         Ok(())
     }
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        // let mut ctx = FuseContext::new();
-        // let name = match name.to_str().ok_or_else(|| InodeError::InvalidFileName {
-        //     name: name.to_owned(),
-        // }) {
-        //     Ok(n) => n,
-        //     Err(e) => {
-        //         reply.error(e.to_errno());
-        //         return;
-        //     }
-        // };
-        //
-        // if parent == FUSE_ROOT_ID || name.eq(CONTROL_INODE_NAME) {
-        //     if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
-        //         self.reply_entry(&mut ctx, reply, n);
-        //         return;
-        //     }
-        // }
+        let ctx = MetaContext::default();
+        let name = match name.to_str().ok_or_else(|| InodeError::InvalidFileName {
+            name: name.to_owned(),
+        }) {
+            Ok(n) => n,
+            Err(e) => {
+                reply.error(e.to_errno());
+                return;
+            }
+        };
+
+        if name.len() > MAX_NAME_LENGTH {
+            reply.error(libc::ENAMETOOLONG);
+            return;
+        }
+
+        match self
+            .runtime
+            .block_on(self.vfs.lookup(&ctx, Ino::from(parent), name))
+        {
+            Ok(n) => n,
+            Err(e) => {
+                // TODO: handle this error
+                return;
+            }
+        };
+        todo!()
     }
 }
 

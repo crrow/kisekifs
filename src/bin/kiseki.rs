@@ -112,6 +112,14 @@ struct MountArgs {
     )]
     pub allow_other: bool,
 
+    #[arg(
+    long,
+    help = "Number of threads to use for tokio async runtime",
+    help_heading = MOUNT_OPTIONS_HEADER,
+    default_value = "4",
+    )]
+    pub async_work_threads: usize,
+
     #[clap(
     short,
     long,
@@ -191,6 +199,7 @@ impl MountArgs {
         FuseConfig {
             mount_point: self.mount_point.clone(),
             mount_options: options,
+            async_work_threads: self.async_work_threads,
         }
     }
     fn meta_config(&self) -> Result<MetaConfig, Whatever> {
@@ -235,8 +244,13 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
     let meta_config = args.meta_config()?;
     let fs_config = args.vfs_config();
 
-    let file_system = vfs::KisekiVFS::create(fs_config, meta_config)?;
-    let fs = fuse::KisekiFuse::create(file_system)?;
+    let meta = meta_config
+        .open()
+        .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
+
+    let file_system = vfs::KisekiVFS::create(fs_config, meta)
+        .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
+    let fs = fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(
         |e| {
             format!(

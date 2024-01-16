@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 // Config for clients.
 use crate::common;
-use crate::meta::{types, Meta};
+use crate::meta::{types, MetaEngine};
 use common::err::Result;
 use opendal::Scheme;
 use serde::__private::de::IdentifierDeserializer;
@@ -89,7 +89,7 @@ impl Default for MetaConfig {
             case_insensitive: false,
             read_only: false,
             no_bg_job: false,
-            open_cache: Default::default(),
+            open_cache: Duration::default(),
             open_cache_limit: 0,
             heartbeat: Duration::from_secs(12),
             mount_point: PathBuf::new(),
@@ -105,12 +105,12 @@ impl MetaConfig {
     pub(crate) fn verify(&mut self) -> Result<()> {
         todo!()
     }
-    pub(crate) fn open(self) -> Result<Meta> {
+    pub fn open(self) -> Result<MetaEngine> {
         info!(
             "try to open meta on {:?}, {:?}",
             self.scheme, &self.scheme_config
         );
-        let m = Meta::open(self)?;
+        let m = MetaEngine::open(self)?;
         info!("open {} successfully.", &m.info());
         Ok(m)
     }
