@@ -27,6 +27,10 @@ sys-mount = "2.1.1"
 const_format = "0.2.32"
 procfs = "0.16.0"
 lazy_static = "1.4.0"
+dashmap = "5.5.3"
+byteorder = "1.5.0"
+bincode = "1.3.3"
+tokio = { version = "1.35.1", features = ["rt-multi-thread"]}
 
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}

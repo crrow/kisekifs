@@ -16,14 +16,16 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use fuser::MountOption;
-use kisekifs::fs::config::{FsConfig, FuseConfig};
-use kisekifs::fs::KISEKI;
+use kisekifs::fuse::config::FuseConfig;
+use kisekifs::fuse::KISEKI;
 use kisekifs::meta::config::MetaConfig;
-use kisekifs::{build_info, fs};
+use kisekifs::vfs::config::VFSConfig;
+use kisekifs::{build_info, fuse, vfs};
 use snafu::{whatever, ResultExt, Whatever};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tracing::info;
+
 const MOUNT_OPTIONS_HEADER: &str = "Mount options";
 const LOGGING_OPTIONS_HEADER: &str = "Logging options";
 const META_OPTIONS_HEADER: &str = "Meta options";
@@ -110,6 +112,14 @@ struct MountArgs {
     )]
     pub allow_other: bool,
 
+    #[arg(
+    long,
+    help = "Number of threads to use for tokio async runtime",
+    help_heading = MOUNT_OPTIONS_HEADER,
+    default_value = "4",
+    )]
+    pub async_work_threads: usize,
+
     #[clap(
     short,
     long,
@@ -189,6 +199,7 @@ impl MountArgs {
         FuseConfig {
             mount_point: self.mount_point.clone(),
             mount_options: options,
+            async_work_threads: self.async_work_threads,
         }
     }
     fn meta_config(&self) -> Result<MetaConfig, Whatever> {
@@ -201,8 +212,8 @@ impl MountArgs {
         );
         Ok(mc)
     }
-    fn fs_config(&self) -> FsConfig {
-        FsConfig::default()
+    fn vfs_config(&self) -> VFSConfig {
+        VFSConfig::default()
     }
 
     fn run(self) -> Result<(), Whatever> {
@@ -231,9 +242,15 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
 
     let fuse_config = args.fuse_config();
     let meta_config = args.meta_config()?;
-    let fs_config = args.fs_config();
+    let fs_config = args.vfs_config();
 
-    let fs = fs::KisekiFS::create(fs_config, meta_config)?;
+    let meta = meta_config
+        .open()
+        .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
+
+    let file_system = vfs::KisekiVFS::create(fs_config, meta)
+        .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
+    let fs = fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(
         |e| {
             format!(

@@ -4,10 +4,12 @@ pub mod null;
 pub const KISEKI: &str = "kiseki";
 
 use crate::common;
-use crate::fs::config::FsConfig;
+use crate::common::err::ToErrno;
+use crate::fuse::config::FuseConfig;
 use crate::meta::config::MetaConfig;
 use crate::meta::types::{Entry, Ino, InodeAttr, PreInternalNodes, CONTROL_INODE_NAME};
-use crate::meta::Meta;
+use crate::meta::{MetaContext, MetaEngine, MAX_NAME_LENGTH};
+use crate::vfs::KisekiVFS;
 use fuser::{Filesystem, KernelConfig, ReplyEntry, Request, FUSE_ROOT_ID};
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
@@ -16,10 +18,11 @@ use std::fmt::{Display, Formatter};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::runtime;
 use tracing::{debug, info};
 
 #[derive(Debug, Snafu)]
-pub enum FsError {
+pub enum FuseError {
     #[snafu(display("failed to mount kiseki on {:?}, {:?}", mount_point, source))]
     ErrMountFailed {
         mount_point: PathBuf,
@@ -37,9 +40,19 @@ pub enum FsError {
     },
 }
 
-/// Errors that can be converted to a raw OS error (errno)
-pub trait ToErrno {
-    fn to_errno(&self) -> libc::c_int;
+impl From<FuseError> for common::err::Error {
+    fn from(value: FuseError) -> Self {
+        Self::GenericError {
+            component: "kiseki-fs",
+            source: Box::new(value),
+        }
+    }
+}
+
+#[derive(Debug, Snafu)]
+pub enum InodeError {
+    #[snafu(display("invalid file name {:?}", name))]
+    InvalidFileName { name: OsString },
 }
 
 impl ToErrno for InodeError {
@@ -49,82 +62,57 @@ impl ToErrno for InodeError {
         }
     }
 }
-#[derive(Debug, Snafu)]
-pub enum InodeError {
-    #[snafu(display("invalid file name {:?}", name))]
-    InvalidFileName { name: OsString },
-}
-
-impl From<FsError> for common::err::Error {
-    fn from(value: FsError) -> Self {
-        Self::GenericError {
-            component: "kiseki-fs",
-            source: Box::new(value),
-        }
-    }
-}
 
 #[derive(Debug)]
-pub struct KisekiFS {
-    config: FsConfig,
-    meta: Meta,
-    internal_nodes: PreInternalNodes,
+pub struct KisekiFuse {
+    config: FuseConfig,
+    vfs: KisekiVFS,
+    runtime: runtime::Runtime,
 }
 
-impl Display for KisekiFS {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "KisekiFS based on {}", self.meta.config.scheme)
-    }
-}
-
-impl KisekiFS {
-    pub fn create(fs_config: FsConfig, meta_config: MetaConfig) -> Result<Self, Whatever> {
-        let meta = meta_config
-            .open()
-            .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
-
+impl KisekiFuse {
+    pub fn create(fuse_config: FuseConfig, vfs: KisekiVFS) -> Result<Self, Whatever> {
+        let runtime = runtime::Builder::new_multi_thread()
+            .worker_threads(fuse_config.async_work_threads)
+            .thread_name("kiseki-fuse-async-runtime")
+            .thread_stack_size(3 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .with_whatever_context(|e| format!("unable to built tokio runtime {e} "))?;
+        info!(
+            "build tokio runtime with {} working threads",
+            fuse_config.async_work_threads
+        );
         Ok(Self {
-            config: fs_config,
-            meta,
-            internal_nodes: PreInternalNodes::default(),
+            config: fuse_config,
+            vfs,
+            runtime,
         })
     }
-    fn reply_entry(&self, ctx: &mut FuseContext, reply: ReplyEntry, entry: &Entry) {
-        let ttl = if entry.is_filetype(fuser::FileType::Directory) {
-            &self.config.dir_entry_timeout
-        } else {
-            &self.config.entry_timeout
-        };
-
-        if entry.is_special_inode() {
-        } else if entry.is_filetype(fuser::FileType::RegularFile)
-            && self.modified_since(entry.inode, ctx.start_at)
-        {
-            debug!("refresh attr for {:?}", entry.inode);
-            // TODO: introduce another type to avoid messing up with fuse's methods.
-            // self.getattr()
-        }
-
-        reply.entry(&ttl, &entry.attr.borrow().inner, 1)
-    }
-    fn modified_since(&self, ino: Ino, since: SystemTime) -> bool {
-        todo!()
-    }
+    // fn reply_entry(&self, ctx: &mut FuseContext, reply: ReplyEntry, entry: &Entry) {
+    //     let ttl = if entry.is_filetype(fuser::FileType::Directory) {
+    //         &self.config.dir_entry_timeout
+    //     } else {
+    //         &self.config.entry_timeout
+    //     };
+    //
+    //     if entry.is_special_inode() {
+    //     } else if entry.is_filetype(fuser::FileType::RegularFile)
+    //         && self.modified_since(entry.inode, ctx.start_at)
+    //     {
+    //         debug!("refresh attr for {:?}", entry.inode);
+    //         // TODO: introduce another type to avoid messing up with fuse's methods.
+    //         // self.getattr()
+    //     }
+    //
+    //     reply.entry(&ttl, &entry.attr.borrow().inner, 1)
+    // }
+    // fn modified_since(&self, ino: Ino, since: SystemTime) -> bool {
+    //     todo!()
+    // }
 }
 
-struct FuseContext {
-    start_at: SystemTime,
-}
-
-impl FuseContext {
-    fn new() -> Self {
-        Self {
-            start_at: SystemTime::now(),
-        }
-    }
-}
-
-impl Filesystem for KisekiFS {
+impl Filesystem for KisekiFuse {
     /// Initialize filesystem.
     /// Called before any other filesystem method.
     /// The kernel module connection can be configured using the KernelConfig object
@@ -133,7 +121,7 @@ impl Filesystem for KisekiFS {
         Ok(())
     }
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let mut ctx = FuseContext::new();
+        let ctx = MetaContext::default();
         let name = match name.to_str().ok_or_else(|| InodeError::InvalidFileName {
             name: name.to_owned(),
         }) {
@@ -144,12 +132,22 @@ impl Filesystem for KisekiFS {
             }
         };
 
-        if parent == FUSE_ROOT_ID || name.eq(CONTROL_INODE_NAME) {
-            if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
-                self.reply_entry(&mut ctx, reply, n);
+        if name.len() > MAX_NAME_LENGTH {
+            reply.error(libc::ENAMETOOLONG);
+            return;
+        }
+
+        match self
+            .runtime
+            .block_on(self.vfs.lookup(&ctx, Ino::from(parent), name))
+        {
+            Ok(n) => n,
+            Err(e) => {
+                // TODO: handle this error
                 return;
             }
-        }
+        };
+        todo!()
     }
 }
 
@@ -159,7 +157,7 @@ fn update_length(entry: &mut Entry) {}
 // mod tests {
 //     use super::*;
 //     use crate::common::err::Result;
-//     use crate::fs::config::FsConfig;
+//     use crate::fuse::config::FsConfig;
 //
 //     #[test]
 //     fn test_unmount() {
@@ -167,8 +165,8 @@ fn update_length(entry: &mut Entry) {}
 //         // When mounting, a file system will be selected from this.
 //         let supported = sys_mount::SupportedFilesystems::new().unwrap();
 //         println!("is supported {:?}", supported.is_supported("kiseki"));
-//         for fs in supported.nodev_file_systems() {
-//             println!("Supported file systems: {:?}", fs);
+//         for fuse in supported.nodev_file_systems() {
+//             println!("Supported file systems: {:?}", fuse);
 //         }
 //
 //         let path = PathBuf::from("/tmp/kiseki");
