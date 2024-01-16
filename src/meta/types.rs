@@ -1,4 +1,4 @@
-use crate::fuse::InodeError;
+use crate::fuse::FuseError;
 use byteorder::{LittleEndian, WriteBytesExt};
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;

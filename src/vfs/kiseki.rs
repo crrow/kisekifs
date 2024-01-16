@@ -1,22 +1,25 @@
 use crate::common;
-use crate::common::err::Result;
-use crate::meta::config::MetaConfig;
+use crate::common::err::ToErrno;
 use crate::meta::types::*;
 use crate::meta::{MetaContext, MetaEngine};
 use crate::vfs::config::VFSConfig;
+use common::err::Result;
+use libc::c_int;
 use snafu::prelude::*;
-use snafu::ResultExt;
 use std::fmt::{Display, Formatter};
-use std::fs;
 
 #[derive(Debug, Snafu)]
-pub enum VFSError {
-    IOError { source: std::io::Error },
-}
+pub enum VFSError {}
 
 impl From<VFSError> for common::err::Error {
     fn from(value: VFSError) -> Self {
-        Self::VFSError { source: value }
+        common::err::Error::VFSError { source: value }
+    }
+}
+
+impl ToErrno for VFSError {
+    fn to_errno(&self) -> c_int {
+        todo!()
     }
 }
 
@@ -35,7 +38,6 @@ impl Display for KisekiVFS {
 
 impl KisekiVFS {
     pub fn create(vfs_config: VFSConfig, meta: MetaEngine) -> Result<Self> {
-        fs::create_dir_all("/tmp").context(IOSnafu)?;
         Ok(Self {
             config: vfs_config,
             meta,

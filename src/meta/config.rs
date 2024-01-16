@@ -13,23 +13,6 @@ use snafu::{ResultExt, Snafu};
 use std::time::Duration;
 use tracing::info;
 
-#[derive(Debug, Snafu)]
-pub enum ConfigError {}
-
-impl ConfigError {
-    fn name(&self) -> &'static str {
-        "meta-config"
-    }
-}
-
-impl From<ConfigError> for common::err::Error {
-    fn from(value: ConfigError) -> Self {
-        Self::GenericError {
-            component: value.name(),
-            source: Box::new(value),
-        }
-    }
-}
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct MetaConfig {
     // connect info

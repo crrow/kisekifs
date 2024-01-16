@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{arg, Parser, Subcommand, ValueEnum};
 use fuser::MountOption;
 use kisekifs::fuse::config::FuseConfig;
-use kisekifs::fuse::KISEKI;
+use kisekifs::fuse::{null, KISEKI};
 use kisekifs::meta::config::MetaConfig;
 use kisekifs::vfs::config::VFSConfig;
 use kisekifs::{build_info, fuse, vfs};
@@ -296,6 +296,8 @@ fn validate_mount_point(path: impl AsRef<Path>) -> Result<(), Whatever> {
             whatever!("mount point {} is already mounted", path.as_ref().display());
         }
     }
+
+    null::mount_check(path)?;
 
     Ok(())
 }
