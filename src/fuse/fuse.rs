@@ -98,7 +98,7 @@ impl Filesystem for KisekiFuse {
         debug!("init kiseki...");
         Ok(())
     }
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = MetaContext::default();
         let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
@@ -133,6 +133,8 @@ impl Filesystem for KisekiFuse {
                 return;
             }
         };
+
+        debug!("lookup {:?} {:?}", parent, entry);
 
         self.reply_entry(&ctx, reply, entry);
     }

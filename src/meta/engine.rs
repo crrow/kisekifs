@@ -14,17 +14,18 @@ use crate::meta::{
 use dashmap::DashMap;
 use fuser::FileType;
 use fuser::FileType::Directory;
-use futures::stream::TryStreamExt;
 use futures::TryStream;
 use libc::c_int;
 use opendal::Operator;
 use snafu::{ResultExt, Snafu};
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 use tokio::time::{timeout, Duration, Timeout};
 use tracing::{trace, warn};
 
 #[derive(Debug, Snafu)]
 pub enum MetaError {
+    #[snafu(display("invalid format version"))]
+    ErrInvalidFormatVersion,
     #[snafu(display("failed to parse scheme: {}: {}", got, source))]
     FailedToParseScheme { source: opendal::Error, got: String },
     #[snafu(display("failed to open operator: {}", source))]
@@ -61,6 +62,7 @@ impl ToErrno for MetaError {
             MetaError::ErrBincodeDeserializeFailed { .. } => libc::EIO,
             MetaError::ErrOpendalRead { .. } => libc::ENOENT,
             MetaError::ErrOpendalList { .. } => libc::EIO,
+            MetaError::ErrInvalidFormatVersion => libc::EBADF, // TODO: review
         }
     }
 }
@@ -97,6 +99,26 @@ impl MetaEngine {
     }
     pub fn info(&self) -> String {
         format!("meta-{}", self.config.scheme)
+    }
+
+    /// Load loads the existing setting of a formatted volume from meta service.
+    pub fn load_format(&self, check_version: bool) -> Result<Format> {
+        let format_key_str = Format::format_key_str();
+        let format_buf =
+            self.operator
+                .blocking()
+                .read(&format_key_str)
+                .context(ErrOpendalReadSnafu {
+                    key: format_key_str,
+                })?;
+
+        let format = Format::parse_from(&format_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        if check_version {
+            format.check_version()?;
+        }
+        let mut guard = self.format.write().unwrap();
+        *guard = format.clone();
+        Ok(format)
     }
 
     /// StatFS returns summary statistics of a volume.
@@ -157,7 +179,7 @@ impl MetaEngine {
         inodes = max(inodes, 0);
         let iused = inodes as u64;
 
-        let format = self.format.read().await;
+        let format = self.format.read().unwrap();
 
         let total_space = if format.capacity > 0 {
             min(format.capacity, used_space as u64)

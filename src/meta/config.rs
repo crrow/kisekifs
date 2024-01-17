@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::str::FromStr;
 // Config for clients.
 use crate::common;
-use crate::meta::{types, MetaEngine};
+use crate::meta::{types, MetaEngine, MetaError::ErrInvalidFormatVersion};
 use common::err::Result;
 use opendal::Scheme;
 use serde::__private::de::IdentifierDeserializer;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, Whatever};
 use std::time::Duration;
 use tracing::info;
 
@@ -99,7 +99,7 @@ impl MetaConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Format {
     pub name: String,
     pub uuid: String,
@@ -125,6 +125,22 @@ pub struct Format {
     pub min_client_version: String,
     pub max_client_version: String,
     pub dir_stats: bool,
+}
+
+impl Format {
+    #[inline]
+    pub fn format_key_str() -> String {
+        String::from("format")
+    }
+
+    pub fn parse_from<R: AsRef<[u8]>>(r: R) -> std::result::Result<Self, bincode::Error> {
+        let format: Format = bincode::deserialize(r.as_ref())?;
+        Ok(format)
+    }
+
+    pub fn check_version(&self) -> std::result::Result<(), crate::meta::MetaError> {
+        return Ok(());
+    }
 }
 
 #[cfg(test)]

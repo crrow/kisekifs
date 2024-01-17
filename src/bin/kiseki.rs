@@ -277,6 +277,12 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
         .open()
         .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
 
+    let format = meta
+        .load_format(false)
+        .with_whatever_context(|e| format!("failed to load meta format, {:?}", e))?;
+
+    // TODO: handle the meta format
+
     let file_system = vfs::KisekiVFS::create(fs_config, meta)
         .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
     let fs = fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
