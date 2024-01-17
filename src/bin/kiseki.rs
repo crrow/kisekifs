@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{arg, Parser, Subcommand, ValueEnum};
 use fuser::MountOption;
 use kisekifs::fuse::config::FuseConfig;
-use kisekifs::fuse::KISEKI;
+use kisekifs::fuse::{null, KISEKI};
+use kisekifs::logging::LoggingConfig;
 use kisekifs::meta::config::MetaConfig;
 use kisekifs::vfs::config::VFSConfig;
 use kisekifs::{build_info, fuse, vfs};
@@ -129,6 +130,9 @@ struct MountArgs {
     )]
     pub log_directory: Option<PathBuf>,
 
+    #[clap(long, help = "Enable logging of summarized performance metrics", help_heading = LOGGING_OPTIONS_HEADER)]
+    pub log_metrics: bool,
+
     #[clap(
     short,
     long,
@@ -212,14 +216,40 @@ impl MountArgs {
         );
         Ok(mc)
     }
+
+    fn logging_config(&self) -> LoggingConfig {
+        let default_filter = if self.no_log {
+            String::from("off")
+        } else {
+            let mut filter = if self.debug {
+                String::from("debug")
+            } else {
+                String::from("warn")
+            };
+            if self.log_metrics {
+                // TODO: metrices
+                filter.push_str(&format!(",{}=info", kisekifs::metrics::TARGET_NAME));
+            }
+            filter
+        };
+        LoggingConfig {
+            log_directory: self.log_directory.clone(),
+            log_to_stdout: self.foreground,
+            default_filter,
+        }
+    }
+
     fn vfs_config(&self) -> VFSConfig {
         VFSConfig::default()
     }
 
     fn run(self) -> Result<(), Whatever> {
+        let logging_config = self.logging_config();
         let successful_mount_msg =
             format!("{} is mounted at {}", KISEKI, self.mount_point.display());
         if self.foreground {
+            logging_config.init_tracing_subscriber()?;
+            let _metrics = kisekifs::metrics::install();
             mount(self)?;
         }
         return Ok(());
@@ -228,7 +258,6 @@ impl MountArgs {
 
 // TODO: handle logging
 fn main() -> Result<(), Whatever> {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     return match cli.commands {
         Commands::Mount { mount_args } => mount_args.run(),
@@ -247,6 +276,12 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
     let meta = meta_config
         .open()
         .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
+
+    let format = meta
+        .load_format(false)
+        .with_whatever_context(|e| format!("failed to load meta format, {:?}", e))?;
+
+    // TODO: handle the meta format
 
     let file_system = vfs::KisekiVFS::create(fs_config, meta)
         .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
@@ -296,6 +331,8 @@ fn validate_mount_point(path: impl AsRef<Path>) -> Result<(), Whatever> {
             whatever!("mount point {} is already mounted", path.as_ref().display());
         }
     }
+
+    null::mount_check(path)?;
 
     Ok(())
 }

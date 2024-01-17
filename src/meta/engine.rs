@@ -1,23 +1,31 @@
-use crate::meta::config::{Format, MetaConfig};
-use crate::meta::types::{Ino, InternalNode, OpenFiles};
-
-use opendal::Operator;
-use snafu::{ResultExt, Snafu};
+use std::cmp::{max, min};
+use std::fmt::{Debug, Formatter};
+use std::sync::atomic::Ordering::Acquire;
 
 use crate::common::err::ToErrno;
+use crate::meta::config::{Format, MetaConfig};
+use crate::meta::types::{Ino, InternalNode, OpenFiles};
 use crate::meta::util::*;
 use crate::meta::{
-    EntryInfo, InodeAttr, MetaContext, DOT, DOT_DOT, ROOT_INO, TRASH_INODE, TRASH_INODE_NAME,
+    Counter, Entry, EntryInfo, FSStates, FSStatesInner, InodeAttr, MetaContext, DOT, DOT_DOT,
+    ROOT_INO, TRASH_INODE, TRASH_INODE_NAME,
 };
+
 use dashmap::DashMap;
 use fuser::FileType;
+use fuser::FileType::Directory;
+use futures::TryStream;
 use libc::c_int;
-use std::fmt::{Debug, Formatter};
-use std::time::Duration;
-use tokio::time::timeout;
+use opendal::Operator;
+use snafu::{ResultExt, Snafu};
+use std::sync::RwLock;
+use tokio::time::{timeout, Duration, Timeout};
+use tracing::{trace, warn};
 
 #[derive(Debug, Snafu)]
 pub enum MetaError {
+    #[snafu(display("invalid format version"))]
+    ErrInvalidFormatVersion,
     #[snafu(display("failed to parse scheme: {}: {}", got, source))]
     FailedToParseScheme { source: opendal::Error, got: String },
     #[snafu(display("failed to open operator: {}", source))]
@@ -32,6 +40,8 @@ pub enum MetaError {
     ErrBincodeDeserializeFailed { source: bincode::Error },
     #[snafu(display("failed to read {key} from opendal: {source}"))]
     ErrOpendalRead { key: String, source: opendal::Error },
+    #[snafu(display("failed to list by opendal: {source}"))]
+    ErrOpendalList { source: opendal::Error },
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -51,6 +61,8 @@ impl ToErrno for MetaError {
             MetaError::ErrLookupFailed { .. } => libc::ENOENT,
             MetaError::ErrBincodeDeserializeFailed { .. } => libc::EIO,
             MetaError::ErrOpendalRead { .. } => libc::ENOENT,
+            MetaError::ErrOpendalList { .. } => libc::EIO,
+            MetaError::ErrInvalidFormatVersion => libc::EBADF, // TODO: review
         }
     }
 }
@@ -60,12 +72,13 @@ pub type Result<T> = std::result::Result<T, MetaError>;
 /// MetaEngine describes a meta service for file system.
 pub struct MetaEngine {
     pub config: MetaConfig,
-    format: Option<Format>,
+    format: RwLock<Format>,
     root: Ino,
     operator: Operator,
     sub_trash: Option<InternalNode>,
     open_files: OpenFiles,
     dir_parents: DashMap<Ino, Ino>,
+    fs_states: FSStatesInner,
 }
 
 impl MetaEngine {
@@ -74,12 +87,13 @@ impl MetaEngine {
             .context(FailedToOpenOperatorSnafu)?;
         let m = MetaEngine {
             config: config.clone(),
-            format: None,
+            format: RwLock::new(Format::default()),
             root: ROOT_INO,
             operator: op,
             sub_trash: None,
             open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
             dir_parents: DashMap::new(),
+            fs_states: Default::default(),
         };
         Ok(m)
     }
@@ -87,7 +101,136 @@ impl MetaEngine {
         format!("meta-{}", self.config.scheme)
     }
 
-    // Lookup returns the inode and attributes for the given entry in a directory.
+    /// Load loads the existing setting of a formatted volume from meta service.
+    pub fn load_format(&self, check_version: bool) -> Result<Format> {
+        let format_key_str = Format::format_key_str();
+        let format_buf =
+            self.operator
+                .blocking()
+                .read(&format_key_str)
+                .context(ErrOpendalReadSnafu {
+                    key: format_key_str,
+                })?;
+
+        let format = Format::parse_from(&format_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        if check_version {
+            format.check_version()?;
+        }
+        let mut guard = self.format.write().unwrap();
+        *guard = format.clone();
+        Ok(format)
+    }
+
+    /// StatFS returns summary statistics of a volume.
+    pub async fn stat_fs(&self, ctx: &MetaContext, inode: Ino) -> Result<FSStates> {
+        let (state, no_error) = self.stat_root_fs().await;
+        if !no_error {
+            return Ok(state);
+        }
+
+        let inode = self.check_root(inode);
+        if inode == ROOT_INO {
+            return Ok(state);
+        }
+
+        let attr = self.get_attr(inode).await?;
+        if let Err(_) = access(ctx, inode, &attr, MODE_MASK_R & MODE_MASK_X) {
+            return Ok(state);
+        }
+
+        // TODO: quota check
+        Ok(state)
+    }
+
+    async fn stat_root_fs(&self) -> (FSStates, bool) {
+        let mut no_error = true;
+        // Parallelize calls to get_counter()
+        let (mut used_space, mut inodes) = match tokio::try_join!(
+            timeout(
+                Duration::from_millis(150),
+                self.get_counter(Counter::UsedSpace),
+            ),
+            timeout(
+                Duration::from_millis(150),
+                self.get_counter(Counter::TotalInodes),
+            )
+        ) {
+            Ok((used_space, total_inodes)) => {
+                // the inner sto may return error
+                no_error = used_space.is_ok() && total_inodes.is_ok();
+                (
+                    used_space.unwrap_or(self.fs_states.used_space.load(Acquire)),
+                    total_inodes.unwrap_or(self.fs_states.used_inodes.load(Acquire)),
+                )
+            }
+            Err(_) => {
+                // timeout case
+                no_error = false;
+                (
+                    self.fs_states.used_space.load(Acquire),
+                    self.fs_states.used_inodes.load(Acquire),
+                )
+            }
+        };
+
+        used_space += self.fs_states.new_space.load(Acquire);
+        inodes += self.fs_states.new_inodes.load(Acquire);
+        used_space = max(used_space, 0);
+        inodes = max(inodes, 0);
+        let iused = inodes as u64;
+
+        let format = self.format.read().unwrap();
+
+        let total_space = if format.capacity > 0 {
+            min(format.capacity, used_space as u64)
+        } else {
+            let mut v = 1 << 50;
+            let us = used_space as u64;
+            while v * 8 < us * 10 {
+                v *= 2;
+            }
+            v
+        };
+        let avail_space = total_space - used_space as u64;
+
+        let available_inodes = if format.inodes > 0 {
+            if iused > format.inodes {
+                0
+            } else {
+                format.inodes - iused
+            }
+        } else {
+            let mut available_inodes: u64 = 10 << 20;
+            while available_inodes * 10 > (iused + available_inodes) * 8 {
+                available_inodes *= 2;
+            }
+            available_inodes
+        };
+
+        (
+            FSStates {
+                total_space,
+                avail_space,
+                used_inodes: iused,
+                available_inodes,
+            },
+            no_error,
+        )
+    }
+
+    async fn get_counter(&self, counter: Counter) -> Result<i64> {
+        let counter_key = counter.generate_kv_key_str();
+        let counter_buf = self
+            .operator
+            .read(&counter_key)
+            .await
+            .context(ErrOpendalReadSnafu { key: counter_key })?;
+        let counter: i64 =
+            bincode::deserialize(&counter_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        Ok(counter)
+    }
+
+    /// Lookup returns the inode and attributes for the given entry in a directory.
     pub async fn lookup(
         &self,
         ctx: &MetaContext,
@@ -95,6 +238,7 @@ impl MetaEngine {
         name: &str,
         check_perm: bool,
     ) -> Result<(Ino, InodeAttr)> {
+        trace!(parent=?parent, ?name, "lookup");
         let parent = self.check_root(parent);
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
@@ -157,6 +301,7 @@ impl MetaEngine {
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
+        trace!("get_attr with inode {:?}", inode);
         let inode = self.check_root(inode);
         // check cache
         if let Some(attr) = self.open_files.check(inode) {
@@ -226,6 +371,97 @@ impl MetaEngine {
 
     fn resolve_case(&self, ctx: &MetaContext, parent: Ino, name: &str) {
         todo!()
+    }
+
+    // Readdir returns all entries for given directory, which include attributes if plus is true.
+    pub async fn read_dir(&self, ctx: &MetaContext, inode: Ino, plus: bool) -> Result<Vec<Entry>> {
+        trace!(dir=?inode, "readdir");
+        match self.read_dir_inner(ctx, inode, plus).await {
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        todo!()
+    }
+
+    async fn read_dir_inner(
+        &self,
+        ctx: &MetaContext,
+        inode: Ino,
+        plus: bool,
+    ) -> Result<Vec<Entry>> {
+        let inode = self.check_root(inode);
+        let mut attr = self.get_attr(inode).await?;
+        let mmask = if plus {
+            MODE_MASK_R | MODE_MASK_X
+        } else {
+            MODE_MASK_X
+        };
+
+        access(ctx, inode, &attr, mmask)?;
+
+        if inode == self.root {
+            attr.parent = self.root;
+        }
+
+        let mut basic_entries = vec![
+            Entry::new(inode, DOT, Directory),
+            Entry::new(attr.parent, DOT_DOT, Directory),
+        ];
+
+        if let Err(e) = self.do_read_dir(inode, plus, &mut basic_entries, -1).await {
+            if let MetaError::ErrOpendalRead { source, key } = e {
+                if source.kind() == opendal::ErrorKind::NotFound && inode.is_trash() {
+                    return Ok(basic_entries);
+                }
+            }
+        }
+
+        Ok(basic_entries)
+    }
+    async fn do_read_dir(
+        &self,
+        inode: Ino,
+        plus: bool,
+        basic_entries: &mut Vec<Entry>,
+        limit: i64,
+    ) -> Result<()> {
+        let entry_prefix = EntryInfo::generate_entry_key_str(inode, "");
+
+        let sto_entries = self
+            .operator
+            .list(&entry_prefix)
+            .await
+            .context(ErrOpendalListSnafu)?;
+        for sto_entry in &sto_entries {
+            let name = sto_entry.name();
+            if name.len() == 0 {
+                warn!("empty entry name under {:?}", inode);
+                continue;
+            }
+            let entry_info_key = sto_entry.path();
+            let entry_info_buf =
+                self.operator
+                    .read(entry_info_key)
+                    .await
+                    .context(ErrOpendalReadSnafu {
+                        key: entry_info_key.to_string(),
+                    })?;
+            let entry_info =
+                EntryInfo::parse_from(&entry_info_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+            basic_entries.push(Entry::new(entry_info.inode, name, entry_info.typ));
+        }
+
+        if plus && basic_entries.len() != 0 {
+            todo!()
+            // let mut entries = Vec::with_capacity(basic_entries.len());
+            // for entry in basic_entries {
+            //     let attr = self.get_attr(entry.inode).await?;
+            //     entry.attr = attr;
+            //     entries.push(entry.clone());
+            // }
+            // *basic_entries = entries;
+        }
+        Ok(())
     }
 }
 

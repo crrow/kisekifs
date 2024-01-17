@@ -1,20 +1,15 @@
-use crate::fuse::InodeError;
 use byteorder::{LittleEndian, WriteBytesExt};
-use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
 use fuser::{FileAttr, FileType, ReplyEntry};
 use lazy_static::lazy_static;
-use libc::open;
 use serde::{Deserialize, Serialize};
-use std::cell::{RefCell, UnsafeCell};
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+
+use std::collections::HashMap;
 use std::convert::Into;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::ops::{Add, AddAssign, Deref, DerefMut};
-use std::sync::{Mutex, RwLock};
-use std::time;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Atime (Access Time):
@@ -47,8 +42,27 @@ impl Default for AccessTimeMode {
     }
 }
 
+pub const MAX_NAME_LENGTH: usize = 255;
+pub const DOT: &'static str = ".";
+pub const DOT_DOT: &'static str = "..";
+
 pub const ZERO_INO: Ino = Ino(0);
 pub const ROOT_INO: Ino = Ino(1);
+
+pub const MIN_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF00000000);
+
+pub const LOG_INODE: Ino = Ino(0x7FFFFFFF00000001);
+pub const CONTROL_INODE: Ino = Ino(0x7FFFFFFF00000002);
+pub const STATS_INODE: Ino = Ino(0x7FFFFFFF00000003);
+pub const CONFIG_INODE: Ino = Ino(0x7FFFFFFF00000004);
+pub const MAX_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF10000000);
+pub const TRASH_INODE: Ino = MAX_INTERNAL_INODE;
+
+pub const LOG_INODE_NAME: &'static str = ".accesslog";
+pub const CONTROL_INODE_NAME: &'static str = ".control";
+pub const STATS_INODE_NAME: &'static str = ".stats";
+pub const CONFIG_INODE_NAME: &'static str = ".config";
+pub const TRASH_INODE_NAME: &'static str = ".trash";
 
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
@@ -121,20 +135,6 @@ impl Ino {
         self.generate_key().into_iter().map(|x| x as char).collect()
     }
 }
-pub const MIN_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF00000000);
-
-pub const LOG_INODE: Ino = Ino(0x7FFFFFFF00000001);
-pub const CONTROL_INODE: Ino = Ino(0x7FFFFFFF00000002);
-pub const STATS_INODE: Ino = Ino(0x7FFFFFFF00000003);
-pub const CONFIG_INODE: Ino = Ino(0x7FFFFFFF00000004);
-pub const MAX_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF10000000);
-pub const TRASH_INODE: Ino = MAX_INTERNAL_INODE;
-
-pub const LOG_INODE_NAME: &'static str = ".accesslog";
-pub const CONTROL_INODE_NAME: &'static str = ".control";
-pub const STATS_INODE_NAME: &'static str = ".stats";
-pub const CONFIG_INODE_NAME: &'static str = ".config";
-pub const TRASH_INODE_NAME: &'static str = ".trash";
 
 lazy_static! {
     pub static ref UID_GID: (u32, u32) = get_current_uid_gid();
@@ -151,41 +151,49 @@ pub struct PreInternalNodes {
     nodes: HashMap<&'static str, InternalNode>,
 }
 
-impl Default for PreInternalNodes {
-    fn default() -> Self {
+impl PreInternalNodes {
+    pub fn new(entry_timeout: (Duration, Duration)) -> Self {
         let mut map = HashMap::new();
         let control_inode: InternalNode = InternalNode(Entry {
             inode: CONTROL_INODE,
             name: CONTROL_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o666).set_full()),
+            attr: InodeAttr::default().set_perm(0o666).set_full(),
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let log_inode: InternalNode = InternalNode(Entry {
             inode: LOG_INODE,
             name: LOG_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o400).set_full()),
+            attr: InodeAttr::default().set_perm(0o400).set_full(),
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let stats_inode: InternalNode = InternalNode(Entry {
             inode: STATS_INODE,
             name: STATS_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o400).set_full()),
+            attr: InodeAttr::default().set_perm(0o400).set_full(),
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let config_inode: InternalNode = InternalNode(Entry {
             inode: CONFIG_INODE,
             name: CONFIG_INODE_NAME.to_string(),
-            attr: Some(InodeAttr::default().set_perm(0o400).set_full()),
+            attr: InodeAttr::default().set_perm(0o400).set_full(),
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let trash_inode: InternalNode = InternalNode(Entry {
             inode: MAX_INTERNAL_INODE,
             name: TRASH_INODE_NAME.to_string(),
-            attr: Some(
-                InodeAttr::default()
-                    .set_perm(0o555)
-                    .set_kind(fuser::FileType::Directory)
-                    .set_nlink(2)
-                    .set_uid(UID_GID.0)
-                    .set_gid(UID_GID.1)
-                    .set_full(),
-            ),
+            attr: InodeAttr::default()
+                .set_perm(0o555)
+                .set_kind(fuser::FileType::Directory)
+                .set_nlink(2)
+                .set_uid(UID_GID.0)
+                .set_gid(UID_GID.1)
+                .set_full(),
+            ttl: Some(entry_timeout.1),
+            generation: Some(1),
         });
         map.insert(LOG_INODE_NAME, log_inode);
         map.insert(CONTROL_INODE_NAME, control_inode);
@@ -248,6 +256,9 @@ impl InodeAttr {
     }
     pub fn is_filetype(&self, typ: FileType) -> bool {
         self.kind == typ
+    }
+    pub fn is_dir(&self) -> bool {
+        self.kind == FileType::Directory
     }
     /// Providing default values guarantees for some critical inode,
     /// makes them always available, even under slow or unreliable conditions.
@@ -322,6 +333,41 @@ impl InodeAttr {
         // returns other permissions by masking mode with 7.
         perm as u8 & 7
     }
+    pub fn to_fuse_attr<I: Into<u64>>(&self, ino: I) -> fuser::FileAttr {
+        let mut fa = FileAttr {
+            ino: ino.into(),
+            size: 0,
+            blocks: 0,
+            atime: self.atime,
+            mtime: self.mtime,
+            ctime: self.ctime,
+            crtime: self.crtime,
+            kind: self.kind,
+            // TODO juice combine the file type and file perm together.
+            perm: self.perm,
+            nlink: self.nlink,
+            uid: self.uid,
+            gid: self.gid,
+            rdev: self.rdev,
+            blksize: 0x10000,
+            flags: self.flags,
+        };
+
+        match fa.kind {
+            FileType::Directory | FileType::Symlink | FileType::RegularFile => {
+                fa.size = self.length;
+                fa.blocks = (fa.size + 511) / 512;
+            }
+            FileType::BlockDevice | FileType::CharDevice => {
+                fa.rdev = self.rdev;
+            }
+            _ => {
+                // Handle other types if needed
+            }
+        }
+
+        fa
+    }
 }
 
 impl Default for InodeAttr {
@@ -337,8 +383,8 @@ impl Default for InodeAttr {
             nlink: 1,
             length: 0,
             parent: Default::default(),
-            uid: 0,
-            gid: 0,
+            uid: UID_GID.0,
+            gid: UID_GID.1,
             rdev: 0,
             flags: 0,
             full: false,
@@ -352,19 +398,53 @@ impl Default for InodeAttr {
 pub struct Entry {
     pub inode: Ino,
     pub name: String,
-    pub attr: Option<InodeAttr>,
+    pub attr: InodeAttr,
+    // entry timeout
+    pub ttl: Option<Duration>,
+    pub generation: Option<u64>,
 }
 
 impl Entry {
-    pub fn new(inode: Ino, name: String, attr: InodeAttr) -> Self {
+    pub fn new<N: Into<String>>(inode: Ino, name: N, typ: FileType) -> Self {
         Self {
             inode,
-            name,
-            attr: Some(attr),
+            name: name.into(),
+            attr: InodeAttr::default().set_kind(typ),
+            ttl: None,
+            generation: None,
         }
+    }
+    pub fn new_with_attr<N: Into<String>>(inode: Ino, name: N, attr: InodeAttr) -> Self {
+        Self {
+            inode,
+            name: name.into(),
+            attr,
+            ttl: None,
+            generation: None,
+        }
+    }
+    pub fn set_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+    pub fn set_generation(mut self, generation: u64) -> Self {
+        self.generation = Some(generation);
+        self
     }
     pub fn is_special_inode(&self) -> bool {
         self.inode.is_special()
+    }
+
+    pub fn to_fuse_attr(&self) -> fuser::FileAttr {
+        self.attr.to_fuse_attr(self.inode)
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.attr.kind == FileType::RegularFile
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.attr.kind == FileType::Directory
     }
 }
 
@@ -378,13 +458,14 @@ impl EntryInfo {
     pub fn new(inode: Ino, typ: FileType) -> Self {
         Self { inode, typ }
     }
-    // key: AiiiiiiiiD{name}
-    // key-len: 10 + name.len()
+    // key: AiiiiiiiiD/{name}
+    // key-len: 11 + name.len()
     pub fn generate_entry_key(parent: Ino, name: &str) -> Vec<u8> {
-        let mut buf = vec![0u8; 10 + name.len()];
+        let mut buf = vec![0u8; 11 + name.len()];
         buf.write_u8('A' as u8).unwrap();
         buf.write_u64::<LittleEndian>(parent.0).unwrap();
         buf.write_u8('D' as u8).unwrap();
+        buf.write_u8('/' as u8).unwrap();
         buf.extend_from_slice(name.as_bytes());
         buf
     }
@@ -405,17 +486,6 @@ impl EntryInfo {
 #[derive(Debug)]
 pub struct InternalNode(Entry);
 
-// impl From<InternalNode> for Entry {
-//     fn from(value: InternalNode) -> Self {
-//         value.0
-//     }
-// }
-// impl<'a> Into<&'a Entry> for &'a InternalNode {
-//     fn into(self) -> &'a Entry {
-//         &self.0
-//     }
-// }
-//
 impl Into<Entry> for InternalNode {
     fn into(self) -> Entry {
         self.0
@@ -427,19 +497,6 @@ impl Into<Entry> for &'_ InternalNode {
         self.0.clone()
     }
 }
-
-// impl Deref for InternalNode {
-//     type Target = Entry;
-//
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-// impl DerefMut for InternalNode {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.0
-//     }
-// }
 
 pub struct OpenFile {
     pub attr: InodeAttr,
@@ -500,9 +557,46 @@ pub struct Slice {
     len: u32,
 }
 
-pub const MAX_NAME_LENGTH: usize = 255;
-pub const DOT: &'static str = ".";
-pub const DOT_DOT: &'static str = "..";
+#[derive(Debug, Default)]
+pub struct FSStates {
+    /// Represents the total amount of storage space in bytes allocated for the file system.
+    pub total_space: u64,
+    /// Represents the amount of free storage space in bytes available for new data.
+    pub avail_space: u64,
+    /// Represents the used of inodes.
+    pub used_inodes: u64,
+    /// Represents the number of available inodes that can be used for new files or directories.
+    pub available_inodes: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FSStatesInner {
+    pub(crate) new_space: AtomicI64,
+    pub(crate) new_inodes: AtomicI64,
+    pub(crate) used_space: AtomicI64,
+    pub(crate) used_inodes: AtomicI64,
+}
+
+const COUNTER_STRINGS: [&str; 3] = ["used_space", "total_inodes", "legacy_sessions"];
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+pub enum Counter {
+    UsedSpace,
+    TotalInodes,
+    LegacySessions,
+}
+
+impl Counter {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Counter::UsedSpace => COUNTER_STRINGS[0],
+            Counter::TotalInodes => COUNTER_STRINGS[1],
+            Counter::LegacySessions => COUNTER_STRINGS[2],
+        }
+    }
+    pub fn generate_kv_key_str(&self) -> String {
+        format!("C{}", self.to_str())
+    }
+}
 
 #[cfg(test)]
 mod tests {
