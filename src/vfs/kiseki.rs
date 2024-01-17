@@ -7,6 +7,7 @@ use crate::vfs::reader::DataReader;
 use crate::vfs::writer::DataWriter;
 use common::err::Result;
 use dashmap::DashMap;
+use fuser::FileType;
 use libc::c_int;
 use snafu::prelude::*;
 use std::fmt::{Display, Formatter};
@@ -57,6 +58,13 @@ impl KisekiVFS {
             reader: DataReader::default(),
             modified_at: DashMap::new(),
         })
+    }
+
+    pub async fn stat_fs<I: Into<Ino>>(&self, ctx: &MetaContext, ino: I) -> Result<FSStates> {
+        let ino = ino.into();
+        trace!("fs:stat_fs with ino {:?}", ino);
+        let r = self.meta.stat_fs(ctx, ino).await?;
+        Ok(r)
     }
 
     pub async fn lookup(&self, ctx: &MetaContext, parent: Ino, name: &str) -> Result<Entry> {
@@ -111,5 +119,13 @@ impl KisekiVFS {
         trace!("vfs:get_attr with inode {:?}", inode);
         let attr = self.meta.get_attr(inode).await?;
         Ok(attr)
+    }
+
+    pub fn get_ttl(&self, kind: FileType) -> time::Duration {
+        if kind == FileType::Directory {
+            self.config.dir_entry_timeout
+        } else {
+            self.config.entry_timeout
+        }
     }
 }

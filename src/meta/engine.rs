@@ -1,5 +1,6 @@
 use crate::meta::config::{Format, MetaConfig};
 use crate::meta::types::{Ino, InternalNode, OpenFiles};
+use std::cmp::{max, min};
 
 use opendal::Operator;
 use snafu::{ResultExt, Snafu};
@@ -7,14 +8,16 @@ use snafu::{ResultExt, Snafu};
 use crate::common::err::ToErrno;
 use crate::meta::util::*;
 use crate::meta::{
-    EntryInfo, InodeAttr, MetaContext, DOT, DOT_DOT, ROOT_INO, TRASH_INODE, TRASH_INODE_NAME,
+    Counter, EntryInfo, FSStates, FSStatesInner, InodeAttr, MetaContext, DOT, DOT_DOT, ROOT_INO,
+    TRASH_INODE, TRASH_INODE_NAME,
 };
 use dashmap::DashMap;
 use fuser::FileType;
 use libc::c_int;
 use std::fmt::{Debug, Formatter};
-use std::time::Duration;
-use tokio::time::timeout;
+use std::sync::atomic::Ordering::Acquire;
+use tokio::sync::RwLock;
+use tokio::time::{timeout, Duration, Timeout};
 use tracing::trace;
 
 #[derive(Debug, Snafu)]
@@ -61,12 +64,13 @@ pub type Result<T> = std::result::Result<T, MetaError>;
 /// MetaEngine describes a meta service for file system.
 pub struct MetaEngine {
     pub config: MetaConfig,
-    format: Option<Format>,
+    format: RwLock<Format>,
     root: Ino,
     operator: Operator,
     sub_trash: Option<InternalNode>,
     open_files: OpenFiles,
     dir_parents: DashMap<Ino, Ino>,
+    fs_states: FSStatesInner,
 }
 
 impl MetaEngine {
@@ -75,12 +79,13 @@ impl MetaEngine {
             .context(FailedToOpenOperatorSnafu)?;
         let m = MetaEngine {
             config: config.clone(),
-            format: None,
+            format: RwLock::new(Format::default()),
             root: ROOT_INO,
             operator: op,
             sub_trash: None,
             open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
             dir_parents: DashMap::new(),
+            fs_states: Default::default(),
         };
         Ok(m)
     }
@@ -88,7 +93,116 @@ impl MetaEngine {
         format!("meta-{}", self.config.scheme)
     }
 
-    // Lookup returns the inode and attributes for the given entry in a directory.
+    /// StatFS returns summary statistics of a volume.
+    pub async fn stat_fs(&self, ctx: &MetaContext, inode: Ino) -> Result<FSStates> {
+        let (state, no_error) = self.stat_root_fs().await;
+        if !no_error {
+            return Ok(state);
+        }
+
+        let inode = self.check_root(inode);
+        if inode == ROOT_INO {
+            return Ok(state);
+        }
+
+        let attr = self.get_attr(inode).await?;
+        if let Err(_) = access(ctx, inode, &attr, MODE_MASK_R & MODE_MASK_X) {
+            return Ok(state);
+        }
+
+        // TODO: quota check
+        Ok(state)
+    }
+
+    async fn stat_root_fs(&self) -> (FSStates, bool) {
+        let mut no_error = true;
+        // Parallelize calls to get_counter()
+        let (mut used_space, mut inodes) = match tokio::try_join!(
+            timeout(
+                Duration::from_millis(150),
+                self.get_counter(Counter::UsedSpace),
+            ),
+            timeout(
+                Duration::from_millis(150),
+                self.get_counter(Counter::TotalInodes),
+            )
+        ) {
+            Ok((used_space, total_inodes)) => {
+                // the inner sto may return error
+                no_error = used_space.is_ok() && total_inodes.is_ok();
+                (
+                    used_space.unwrap_or(self.fs_states.used_space.load(Acquire)),
+                    total_inodes.unwrap_or(self.fs_states.used_inodes.load(Acquire)),
+                )
+            }
+            Err(_) => {
+                // timeout case
+                no_error = false;
+                (
+                    self.fs_states.used_space.load(Acquire),
+                    self.fs_states.used_inodes.load(Acquire),
+                )
+            }
+        };
+
+        used_space += self.fs_states.new_space.load(Acquire);
+        inodes += self.fs_states.new_inodes.load(Acquire);
+        used_space = max(used_space, 0);
+        inodes = max(inodes, 0);
+        let iused = inodes as u64;
+
+        let format = self.format.read().await;
+
+        let total_space = if format.capacity > 0 {
+            min(format.capacity, used_space as u64)
+        } else {
+            let mut v = 1 << 50;
+            let us = used_space as u64;
+            while v * 8 < us * 10 {
+                v *= 2;
+            }
+            v
+        };
+        let avail_space = total_space - used_space as u64;
+
+        let available_inodes = if format.inodes > 0 {
+            if iused > format.inodes {
+                0
+            } else {
+                format.inodes - iused
+            }
+        } else {
+            let mut available_inodes: u64 = 10 << 20;
+            while available_inodes * 10 > (iused + available_inodes) * 8 {
+                available_inodes *= 2;
+            }
+            available_inodes
+        };
+
+        (
+            FSStates {
+                total_space,
+                avail_space,
+                used_inodes: iused,
+                available_inodes,
+            },
+            no_error,
+        )
+    }
+
+    async fn get_counter(&self, counter: Counter) -> Result<i64> {
+        let counter_key = counter.generate_kv_key_str();
+        let counter_buf = self
+            .operator
+            .read(&counter_key)
+            .await
+            .context(ErrOpendalReadSnafu { key: counter_key })?;
+        let counter: i64 =
+            bincode::deserialize(&counter_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        Ok(counter)
+    }
+
+    /// Lookup returns the inode and attributes for the given entry in a directory.
     pub async fn lookup(
         &self,
         ctx: &MetaContext,

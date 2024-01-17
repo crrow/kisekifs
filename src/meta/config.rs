@@ -99,7 +99,7 @@ impl MetaConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Format {
     pub name: String,
     pub uuid: String,

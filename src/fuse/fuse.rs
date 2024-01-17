@@ -3,13 +3,15 @@ use crate::fuse::config::FuseConfig;
 use crate::meta::types::{Entry, Ino};
 use crate::meta::{MetaContext, MAX_NAME_LENGTH};
 use crate::vfs::KisekiVFS;
-use fuser::{Filesystem, KernelConfig, ReplyEntry, Request};
+use fuser::{Filesystem, KernelConfig, ReplyAttr, ReplyEntry, ReplyStatfs, Request};
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use tokio::runtime;
-use tracing::{debug, info, instrument, Instrument};
+use tracing::{debug, field, info, instrument, Instrument};
+
+const BLOCK_SIZE: u32 = 512;
 
 #[derive(Debug, Snafu)]
 pub enum FuseError {
@@ -88,7 +90,7 @@ impl Filesystem for KisekiFuse {
         debug!("init kiseki...");
         Ok(())
     }
-    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = MetaContext::default();
         let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
@@ -125,5 +127,51 @@ impl Filesystem for KisekiFuse {
         };
 
         self.reply_entry(&ctx, reply, entry);
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, name=field::Empty))]
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
+        match self
+            .runtime
+            .block_on(self.vfs.get_attr(Ino::from(ino)).in_current_span())
+        {
+            Ok(attr) => reply.attr(&self.vfs.get_ttl(attr.kind), &attr.to_fuse_attr(ino)),
+            Err(e) => reply.error(e.to_errno()),
+        };
+    }
+
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        let ctx = MetaContext::default();
+        // FIXME: use a better way
+        let state = self
+            .runtime
+            .block_on(self.vfs.stat_fs(&ctx, _ino).in_current_span())
+            .unwrap();
+
+        reply.statfs(
+            // BLOCKS: Number of free blocks available for use.
+            /* blocks:*/
+            state.total_space / (BLOCK_SIZE as u64)
+                + if state.total_space % (BLOCK_SIZE as u64) > 0 {
+                    1
+                } else {
+                    0
+                },
+            // bfree: Number of free blocks available for use.
+            state.avail_space / BLOCK_SIZE as u64,
+            // bavail: Number of blocks available to unprivileged users.
+            state.avail_space / BLOCK_SIZE as u64,
+            // files: Total number of inodes (file system objects) in the file system.
+            state.used_inodes + state.available_inodes,
+            // ffree: Number of free inodes available for creating new files.
+            state.available_inodes,
+            // bsize: Fundamental block size of the file system (in bytes).
+            BLOCK_SIZE,
+            // namelen: Maximum length of a filename.
+            MAX_NAME_LENGTH as u32,
+            // frsize: Fragment size (if file system supports fragmentation).
+            BLOCK_SIZE,
+        );
     }
 }
