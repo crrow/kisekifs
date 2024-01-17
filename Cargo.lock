@@ -1012,6 +1012,7 @@ dependencies = [
  "fuser",
  "lazy_static",
  "libc",
+ "log",
  "opendal",
  "procfs",
  "serde",
@@ -1020,6 +1021,7 @@ dependencies = [
  "sys-mount",
  "tokio",
  "tracing",
+ "tracing-attributes",
  "tracing-subscriber",
 ]
 

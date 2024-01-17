@@ -9,7 +9,7 @@ use snafu::{ResultExt, Snafu, Whatever};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use tokio::runtime;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument, Instrument};
 
 #[derive(Debug, Snafu)]
 pub enum FuseError {
@@ -54,27 +54,27 @@ impl KisekiFuse {
             runtime,
         })
     }
-    // fn reply_entry(&self, ctx: &mut FuseContext, reply: ReplyEntry, entry: &Entry) {
-    //     let ttl = if entry.is_filetype(fuser::FileType::Directory) {
-    //         &self.config.dir_entry_timeout
-    //     } else {
-    //         &self.config.entry_timeout
-    //     };
-    //
-    //     if entry.is_special_inode() {
-    //     } else if entry.is_filetype(fuser::FileType::RegularFile)
-    //         && self.modified_since(entry.inode, ctx.start_at)
-    //     {
-    //         debug!("refresh attr for {:?}", entry.inode);
-    //         // TODO: introduce another type to avoid messing up with fuse's methods.
-    //         // self.getattr()
-    //     }
-    //
-    //     reply.entry(&ttl, &entry.attr.borrow().inner, 1)
-    // }
-    // fn modified_since(&self, ino: Ino, since: SystemTime) -> bool {
-    //     todo!()
-    // }
+
+    fn reply_entry(&self, ctx: &MetaContext, reply: ReplyEntry, mut entry: Entry) {
+        if !entry.is_special_inode()
+            && entry.is_file()
+            && self.vfs.modified_since(entry.inode, ctx.start_at)
+        {
+            debug!("refresh attr for {:?}", entry.inode);
+            match self.vfs.get_attr(entry.inode).await {
+                Ok(new_attr) => {
+                    debug!("refresh attr for {:?} to {:?}", entry.inode, new_attr);
+                    entry.attr = new_attr;
+                }
+                Err(e) => {
+                    debug!("failed to refresh attr for {:?} {:?}", entry.inode, e);
+                }
+            }
+        }
+
+        self.vfs.update_length(&mut entry);
+        reply.entry(&entry.ttl, &entry.to_fuse_attr(), entry.generation);
+    }
 }
 
 impl Filesystem for KisekiFuse {
@@ -85,6 +85,7 @@ impl Filesystem for KisekiFuse {
         debug!("init kiseki...");
         Ok(())
     }
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = MetaContext::default();
         let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
@@ -107,10 +108,11 @@ impl Filesystem for KisekiFuse {
             return;
         }
 
-        let entry = match self
-            .runtime
-            .block_on(self.vfs.lookup(&ctx, Ino::from(parent), name))
-        {
+        let mut entry = match self.runtime.block_on(
+            self.vfs
+                .lookup(&ctx, Ino::from(parent), name)
+                .in_current_span(),
+        ) {
             Ok(n) => n,
             Err(e) => {
                 // TODO: handle this error
@@ -118,10 +120,10 @@ impl Filesystem for KisekiFuse {
                 return;
             }
         };
+
+        self.reply_entry(&ctx, reply, entry);
     }
 }
-
-fn update_length(entry: &mut Entry) {}
 
 // #[cfg(test)]
 // mod tests {

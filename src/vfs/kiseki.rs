@@ -3,10 +3,14 @@ use crate::common::err::ToErrno;
 use crate::meta::types::*;
 use crate::meta::{MetaContext, MetaEngine};
 use crate::vfs::config::VFSConfig;
+use crate::vfs::reader::DataReader;
+use crate::vfs::writer::DataWriter;
 use common::err::Result;
 use libc::c_int;
 use snafu::prelude::*;
 use std::fmt::{Display, Formatter};
+use std::time;
+use tracing::trace;
 
 #[derive(Debug, Snafu)]
 pub enum VFSError {}
@@ -28,6 +32,8 @@ pub struct KisekiVFS {
     config: VFSConfig,
     meta: MetaEngine,
     internal_nodes: PreInternalNodes,
+    writer: DataWriter,
+    reader: DataReader,
 }
 
 impl Display for KisekiVFS {
@@ -39,13 +45,19 @@ impl Display for KisekiVFS {
 impl KisekiVFS {
     pub fn create(vfs_config: VFSConfig, meta: MetaEngine) -> Result<Self> {
         Ok(Self {
+            internal_nodes: PreInternalNodes::new((
+                vfs_config.entry_timeout,
+                vfs_config.dir_entry_timeout,
+            )),
             config: vfs_config,
             meta,
-            internal_nodes: PreInternalNodes::default(),
+            writer: DataWriter::default(),
+            reader: DataReader::default(),
         })
     }
 
     pub async fn lookup(&self, ctx: &MetaContext, parent: Ino, name: &str) -> Result<Entry> {
+        trace!("fs:lookup with parent {:?} name {:?}", parent, name);
         // TODO: handle the special case
         if parent == ROOT_INO || name.eq(CONTROL_INODE_NAME) {
             if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
@@ -61,7 +73,36 @@ impl KisekiVFS {
         Ok(Entry {
             inode,
             name: name.to_string(),
-            attr: Some(attr),
+            ttl: self.get_entry_ttl(&attr),
+            attr,
+            generation: 1,
         })
+    }
+
+    pub fn get_entry_ttl(&self, attr: &InodeAttr) -> time::Duration {
+        if attr.is_dir() {
+            self.config.dir_entry_timeout
+        } else {
+            self.config.entry_timeout
+        }
+    }
+
+    pub fn update_length(&self, entry: &mut Entry) {
+        if entry.attr.full && entry.is_file() {
+            let len = self.writer.get_length(entry.inode);
+            if len > entry.attr.length {
+                entry.attr.length = len;
+            }
+            self.reader.truncate(entry.inode, entry.attr.length);
+        }
+    }
+
+    pub fn modified_since(&self, inode: Ino, since: time::Instant) -> bool {
+        todo!()
+    }
+
+    pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
+        trace!("vfs:get_attr with inode {:?}", inode);
+        self.meta.get_attr(inode)
     }
 }

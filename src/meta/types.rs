@@ -1,20 +1,14 @@
-use crate::fuse::FuseError;
 use byteorder::{LittleEndian, WriteBytesExt};
-use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
 use fuser::{FileAttr, FileType, ReplyEntry};
 use lazy_static::lazy_static;
-use libc::open;
 use serde::{Deserialize, Serialize};
-use std::cell::{RefCell, UnsafeCell};
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+
+use std::collections::HashMap;
 use std::convert::Into;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::ops::{Add, AddAssign, Deref, DerefMut};
-use std::sync::{Mutex, RwLock};
-use std::time;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Atime (Access Time):
@@ -152,29 +146,35 @@ pub struct PreInternalNodes {
 }
 
 impl PreInternalNodes {
-    pub fn new(ttl: (Duration, Duration)) -> Self {
+    pub fn new(entry_timeout: (Duration, Duration)) -> Self {
         let mut map = HashMap::new();
         let control_inode: InternalNode = InternalNode(Entry {
             inode: CONTROL_INODE,
             name: CONTROL_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o666).set_full(),
-            ttl: Default::default(),
+            ttl: entry_timeout.0,
+            generation: 1,
         });
         let log_inode: InternalNode = InternalNode(Entry {
             inode: LOG_INODE,
             name: LOG_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o400).set_full(),
-            ttl: Default::default(),
+            ttl: entry_timeout.0,
+            generation: 1,
         });
         let stats_inode: InternalNode = InternalNode(Entry {
             inode: STATS_INODE,
             name: STATS_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o400).set_full(),
+            ttl: entry_timeout.0,
+            generation: 1,
         });
         let config_inode: InternalNode = InternalNode(Entry {
             inode: CONFIG_INODE,
             name: CONFIG_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o400).set_full(),
+            ttl: entry_timeout.0,
+            generation: 1,
         });
         let trash_inode: InternalNode = InternalNode(Entry {
             inode: MAX_INTERNAL_INODE,
@@ -186,6 +186,8 @@ impl PreInternalNodes {
                 .set_uid(UID_GID.0)
                 .set_gid(UID_GID.1)
                 .set_full(),
+            ttl: entry_timeout.1,
+            generation: 1,
         });
         map.insert(LOG_INODE_NAME, log_inode);
         map.insert(CONTROL_INODE_NAME, control_inode);
@@ -248,6 +250,9 @@ impl InodeAttr {
     }
     pub fn is_filetype(&self, typ: FileType) -> bool {
         self.kind == typ
+    }
+    pub fn is_dir(&self) -> bool {
+        self.kind == FileType::Directory
     }
     /// Providing default values guarantees for some critical inode,
     /// makes them always available, even under slow or unreliable conditions.
@@ -322,6 +327,41 @@ impl InodeAttr {
         // returns other permissions by masking mode with 7.
         perm as u8 & 7
     }
+    pub fn to_fuse_attr(&self, ino: Ino) -> fuser::FileAttr {
+        let mut fa = FileAttr {
+            ino: ino.0,
+            size: 0,
+            blocks: 0,
+            atime: self.atime,
+            mtime: self.mtime,
+            ctime: self.ctime,
+            crtime: self.crtime,
+            kind: self.kind,
+            // TODO juice combine the file type and file perm together.
+            perm: self.perm,
+            nlink: self.nlink,
+            uid: self.uid,
+            gid: self.gid,
+            rdev: self.rdev,
+            blksize: 0x10000,
+            flags: self.flags,
+        };
+
+        match fa.kind {
+            FileType::Directory | FileType::Symlink | FileType::RegularFile => {
+                fa.size = self.length;
+                fa.blocks = (fa.size + 511) / 512;
+            }
+            FileType::BlockDevice | FileType::CharDevice => {
+                fa.rdev = self.rdev;
+            }
+            _ => {
+                // Handle other types if needed
+            }
+        }
+
+        fa
+    }
 }
 
 impl Default for InodeAttr {
@@ -353,7 +393,9 @@ pub struct Entry {
     pub inode: Ino,
     pub name: String,
     pub attr: InodeAttr,
+    // entry timeout
     pub ttl: Duration,
+    pub generation: u64,
 }
 
 impl Entry {
@@ -363,6 +405,18 @@ impl Entry {
     }
     pub fn is_special_inode(&self) -> bool {
         self.inode.is_special()
+    }
+
+    pub fn to_fuse_attr(&self) -> fuser::FileAttr {
+        self.attr.to_fuse_attr(self.inode)
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.attr.kind == FileType::RegularFile
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.attr.kind == FileType::Directory
     }
 }
 

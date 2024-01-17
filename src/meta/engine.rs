@@ -15,6 +15,7 @@ use libc::c_int;
 use std::fmt::{Debug, Formatter};
 use std::time::Duration;
 use tokio::time::timeout;
+use tracing::trace;
 
 #[derive(Debug, Snafu)]
 pub enum MetaError {
@@ -95,6 +96,7 @@ impl MetaEngine {
         name: &str,
         check_perm: bool,
     ) -> Result<(Ino, InodeAttr)> {
+        trace!(parent=?parent, ?name, "lookup");
         let parent = self.check_root(parent);
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
