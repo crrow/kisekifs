@@ -6,6 +6,7 @@ use crate::vfs::config::VFSConfig;
 use crate::vfs::reader::DataReader;
 use crate::vfs::writer::DataWriter;
 use common::err::Result;
+use dashmap::DashMap;
 use libc::c_int;
 use snafu::prelude::*;
 use std::fmt::{Display, Formatter};
@@ -34,6 +35,7 @@ pub struct KisekiVFS {
     internal_nodes: PreInternalNodes,
     writer: DataWriter,
     reader: DataReader,
+    modified_at: DashMap<Ino, time::Instant>,
 }
 
 impl Display for KisekiVFS {
@@ -53,6 +55,7 @@ impl KisekiVFS {
             meta,
             writer: DataWriter::default(),
             reader: DataReader::default(),
+            modified_at: DashMap::new(),
         })
     }
 
@@ -97,12 +100,16 @@ impl KisekiVFS {
         }
     }
 
-    pub fn modified_since(&self, inode: Ino, since: time::Instant) -> bool {
-        todo!()
+    pub fn modified_since(&self, inode: Ino, start_at: time::Instant) -> bool {
+        match self.modified_at.get(&inode) {
+            Some(v) => v.value() > &start_at,
+            None => false,
+        }
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
         trace!("vfs:get_attr with inode {:?}", inode);
-        self.meta.get_attr(inode)
+        let attr = self.meta.get_attr(inode).await?;
+        Ok(attr)
     }
 }

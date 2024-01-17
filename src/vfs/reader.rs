@@ -1,10 +1,11 @@
 use crate::meta::Ino;
+use tracing::debug;
 
 #[derive(Debug, Default)]
 pub struct DataReader {}
 
 impl DataReader {
     pub fn truncate(&self, inode: Ino, length: u64) {
-        todo!()
+        debug!("reader truncate do nothing")
     }
 }

@@ -61,7 +61,10 @@ impl KisekiFuse {
             && self.vfs.modified_since(entry.inode, ctx.start_at)
         {
             debug!("refresh attr for {:?}", entry.inode);
-            match self.vfs.get_attr(entry.inode).await {
+            match self
+                .runtime
+                .block_on(self.vfs.get_attr(entry.inode).in_current_span())
+            {
                 Ok(new_attr) => {
                     debug!("refresh attr for {:?} to {:?}", entry.inode, new_attr);
                     entry.attr = new_attr;
@@ -85,7 +88,7 @@ impl Filesystem for KisekiFuse {
         debug!("init kiseki...");
         Ok(())
     }
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = MetaContext::default();
         let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
@@ -108,7 +111,7 @@ impl Filesystem for KisekiFuse {
             return;
         }
 
-        let mut entry = match self.runtime.block_on(
+        let entry = match self.runtime.block_on(
             self.vfs
                 .lookup(&ctx, Ino::from(parent), name)
                 .in_current_span(),
@@ -124,34 +127,3 @@ impl Filesystem for KisekiFuse {
         self.reply_entry(&ctx, reply, entry);
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::common::err::Result;
-//     use crate::fuse::config::FsConfig;
-//
-//     #[test]
-//     fn test_unmount() {
-//         // Fetch a list of supported file systems.
-//         // When mounting, a file system will be selected from this.
-//         let supported = sys_mount::SupportedFilesystems::new().unwrap();
-//         println!("is supported {:?}", supported.is_supported("kiseki"));
-//         for fuse in supported.nodev_file_systems() {
-//             println!("Supported file systems: {:?}", fuse);
-//         }
-//
-//         let path = PathBuf::from("/tmp/kiseki");
-//         unmount(&path).unwrap();
-//     }
-//
-//     #[test]
-//     fn mount() -> Result<()> {
-//         let path = PathBuf::from("/tmp/kiseki");
-//         unmount(&path)?;
-//         let kfs = FsConfig::default().mount_point(&path).open()?;
-//         let session = kfs.mount()?;
-//         session.join();
-//         Ok(())
-//     }
-// }

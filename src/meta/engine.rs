@@ -159,6 +159,7 @@ impl MetaEngine {
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
+        trace!("get_attr with inode {:?}", inode);
         let inode = self.check_root(inode);
         // check cache
         if let Some(attr) = self.open_files.check(inode) {

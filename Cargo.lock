@@ -1021,7 +1021,6 @@ dependencies = [
  "sys-mount",
  "tokio",
  "tracing",
- "tracing-attributes",
  "tracing-subscriber",
 ]
 
