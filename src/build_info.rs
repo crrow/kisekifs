@@ -22,7 +22,7 @@ pub const AUTHOR: &str = built::PKG_AUTHORS;
 
 /// Valid SemVer version constructed using declared Cargo version and short commit hash if needed.
 pub const FULL_VERSION: &str = {
-    if is_official_aws_release() {
+    if is_official_release() {
         built::PKG_VERSION
     } else {
         // A little hacky so we can pull out the hash as a const
@@ -42,6 +42,6 @@ pub const FULL_VERSION: &str = {
         const_format::concatcp!(built::PKG_VERSION, UNOFFICIAL_SUFFIX)
     }
 };
-const fn is_official_aws_release() -> bool {
+const fn is_official_release() -> bool {
     option_env!("KISEKI_RELEASE").is_some()
 }
