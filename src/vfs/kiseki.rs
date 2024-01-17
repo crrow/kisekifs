@@ -8,6 +8,7 @@ use crate::vfs::config::VFSConfig;
 use crate::vfs::handle::Handle;
 use crate::vfs::reader::DataReader;
 use crate::vfs::writer::DataWriter;
+use crate::vfs::VFSError::ErrBadFileHandle;
 use common::err::Result;
 use dashmap::DashMap;
 use fuser::FileType;
@@ -15,11 +16,17 @@ use libc::c_int;
 use snafu::prelude::*;
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::trace;
 
 #[derive(Debug, Snafu)]
-pub enum VFSError {}
+pub enum VFSError {
+    #[snafu(display("bad file handle: inode {:?} fh {:?}", inode, fh))]
+    ErrBadFileHandle { inode: Ino, fh: u64 },
+}
 
 impl From<VFSError> for common::err::Error {
     fn from(value: VFSError) -> Self {
@@ -29,7 +36,9 @@ impl From<VFSError> for common::err::Error {
 
 impl ToErrno for VFSError {
     fn to_errno(&self) -> c_int {
-        todo!()
+        match self {
+            ErrBadFileHandle { .. } => libc::EBADF,
+        }
     }
 }
 
@@ -42,7 +51,7 @@ pub struct KisekiVFS {
     reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     _next_fh: AtomicU64,
-    handles: DashMap<Ino, Vec<Handle>>,
+    handles: DashMap<Ino, DashMap<u64, Arc<Mutex<Handle>>>>,
 }
 
 impl Display for KisekiVFS {
@@ -89,13 +98,11 @@ impl KisekiVFS {
             }
         }
         let (inode, attr) = self.meta.lookup(ctx, parent, name, true).await?;
-        Ok(Entry {
-            inode,
-            name: name.to_string(),
-            ttl: self.get_entry_ttl(&attr),
-            attr,
-            generation: 1,
-        })
+        let ttl = self.get_entry_ttl(&attr);
+        let e = Entry::new_with_attr(inode, name, attr)
+            .set_ttl(ttl)
+            .set_generation(1);
+        Ok(e)
     }
 
     pub fn get_entry_ttl(&self, attr: &InodeAttr) -> time::Duration {
@@ -161,14 +168,16 @@ impl KisekiVFS {
 
     fn new_handle(&self, inode: Ino) -> u64 {
         let fh = self.next_fh();
-        let h = Handle::new(fh, inode);
+        let h = Arc::new(Mutex::new(Handle::new(fh, inode)));
         match self.handles.get_mut(&inode) {
             None => {
-                self.handles.insert(inode, vec![h]);
+                let fh_handle_map = DashMap::new();
+                fh_handle_map.insert(fh, h);
+                self.handles.insert(inode, fh_handle_map);
             }
-            Some(mut list) => {
-                let l = list.value_mut();
-                l.push(h)
+            Some(mut fh_handle_map) => {
+                let l = fh_handle_map.value_mut();
+                l.insert(fh, h);
             }
         };
         fh
@@ -177,5 +186,39 @@ impl KisekiVFS {
     fn next_fh(&self) -> u64 {
         self._next_fh
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub async fn read_dir<I: Into<Ino>>(
+        &self,
+        ctx: &MetaContext,
+        inode: I,
+        fh: u64,
+        offset: i64,
+    ) -> Result<Vec<Entry>> {
+        let inode = inode.into();
+        trace!(
+            "fs:readdir with ino {:?} fh {:?} offset {:?}",
+            inode,
+            fh,
+            offset
+        );
+
+        let h = self
+            .find_handle(inode, fh)
+            .ok_or_else(|| ErrBadFileHandle { inode, fh })?;
+
+        let mut h = h.lock().await;
+        if h.children.is_empty() || offset == 0 {
+            h.read_at = Some(Instant::now());
+            let entries = self.meta.read_dir(ctx, inode, true).await?;
+        }
+
+        todo!()
+    }
+
+    fn find_handle(&self, ino: Ino, fh: u64) -> Option<Arc<Mutex<Handle>>> {
+        let list = self.handles.get(&ino).unwrap();
+        let l = list.value();
+        return l.get(&fh).map(|h| h.value().clone());
     }
 }

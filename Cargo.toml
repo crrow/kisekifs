@@ -18,7 +18,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 serde = "1.0.195"
 serde_json = "1.0.111"
-features = "0.10.0"
+features = { version = "0.10.0"}
 opendal = { version ="0.44.1", features = ["services-sled"]}
 clap = { version = "4.4.16", features = ["derive"]}
 libc = "0.2.152"
@@ -37,6 +37,7 @@ async-channel = "2.1.1"
 async-lock = "3.3.0"
 hdrhistogram = { version = "7.5.2", default-features = false }
 supports-color = "2.1.0"
+futures = "0.3.30"
 
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}

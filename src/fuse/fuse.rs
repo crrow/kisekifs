@@ -13,7 +13,7 @@ use std::cmp::max;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use tokio::runtime;
-use tracing::{debug, field, info, instrument, Instrument};
+use tracing::{debug, field, info, instrument, trace, Instrument};
 
 const BLOCK_SIZE: u32 = 4096;
 
@@ -82,7 +82,11 @@ impl KisekiFuse {
         }
 
         self.vfs.update_length(&mut entry);
-        reply.entry(&entry.ttl, &entry.to_fuse_attr(), entry.generation);
+        reply.entry(
+            &entry.ttl.unwrap(),
+            &entry.to_fuse_attr(),
+            entry.generation.unwrap(),
+        );
     }
 }
 
@@ -198,8 +202,26 @@ impl Filesystem for KisekiFuse {
         ino: u64,
         fh: u64,
         offset: i64,
-        reply: ReplyDirectory,
+        mut reply: ReplyDirectory,
     ) {
-        todo!()
+        let ctx = MetaContext::default();
+        let mut entries = match self
+            .runtime
+            .block_on(self.vfs.read_dir(&ctx, ino, fh, offset).in_current_span())
+        {
+            Ok(n) => n,
+            Err(e) => {
+                reply.error(e.to_errno());
+                return;
+            }
+        };
+
+        for entry in entries.drain(..) {
+            todo!()
+            // if !reply.add(entry.inode.into(), entry.offset, entry.kind, entry.name) {
+            //     break;
+            // }
+        }
+        reply.ok();
     }
 }

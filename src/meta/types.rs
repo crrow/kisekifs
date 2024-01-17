@@ -158,29 +158,29 @@ impl PreInternalNodes {
             inode: CONTROL_INODE,
             name: CONTROL_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o666).set_full(),
-            ttl: entry_timeout.0,
-            generation: 1,
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let log_inode: InternalNode = InternalNode(Entry {
             inode: LOG_INODE,
             name: LOG_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o400).set_full(),
-            ttl: entry_timeout.0,
-            generation: 1,
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let stats_inode: InternalNode = InternalNode(Entry {
             inode: STATS_INODE,
             name: STATS_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o400).set_full(),
-            ttl: entry_timeout.0,
-            generation: 1,
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let config_inode: InternalNode = InternalNode(Entry {
             inode: CONFIG_INODE,
             name: CONFIG_INODE_NAME.to_string(),
             attr: InodeAttr::default().set_perm(0o400).set_full(),
-            ttl: entry_timeout.0,
-            generation: 1,
+            ttl: Some(entry_timeout.0),
+            generation: Some(1),
         });
         let trash_inode: InternalNode = InternalNode(Entry {
             inode: MAX_INTERNAL_INODE,
@@ -192,8 +192,8 @@ impl PreInternalNodes {
                 .set_uid(UID_GID.0)
                 .set_gid(UID_GID.1)
                 .set_full(),
-            ttl: entry_timeout.1,
-            generation: 1,
+            ttl: Some(entry_timeout.1),
+            generation: Some(1),
         });
         map.insert(LOG_INODE_NAME, log_inode);
         map.insert(CONTROL_INODE_NAME, control_inode);
@@ -400,14 +400,36 @@ pub struct Entry {
     pub name: String,
     pub attr: InodeAttr,
     // entry timeout
-    pub ttl: Duration,
-    pub generation: u64,
+    pub ttl: Option<Duration>,
+    pub generation: Option<u64>,
 }
 
 impl Entry {
-    pub fn new(inode: Ino, name: String, attr: InodeAttr) -> Self {
-        // Self { inode, name, attr,  }
-        todo!()
+    pub fn new<N: Into<String>>(inode: Ino, name: N, typ: FileType) -> Self {
+        Self {
+            inode,
+            name: name.into(),
+            attr: InodeAttr::default().set_kind(typ),
+            ttl: None,
+            generation: None,
+        }
+    }
+    pub fn new_with_attr<N: Into<String>>(inode: Ino, name: N, attr: InodeAttr) -> Self {
+        Self {
+            inode,
+            name: name.into(),
+            attr,
+            ttl: None,
+            generation: None,
+        }
+    }
+    pub fn set_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+    pub fn set_generation(mut self, generation: u64) -> Self {
+        self.generation = Some(generation);
+        self
     }
     pub fn is_special_inode(&self) -> bool {
         self.inode.is_special()
@@ -436,13 +458,14 @@ impl EntryInfo {
     pub fn new(inode: Ino, typ: FileType) -> Self {
         Self { inode, typ }
     }
-    // key: AiiiiiiiiD{name}
-    // key-len: 10 + name.len()
+    // key: AiiiiiiiiD/{name}
+    // key-len: 11 + name.len()
     pub fn generate_entry_key(parent: Ino, name: &str) -> Vec<u8> {
-        let mut buf = vec![0u8; 10 + name.len()];
+        let mut buf = vec![0u8; 11 + name.len()];
         buf.write_u8('A' as u8).unwrap();
         buf.write_u64::<LittleEndian>(parent.0).unwrap();
         buf.write_u8('D' as u8).unwrap();
+        buf.write_u8('/' as u8).unwrap();
         buf.extend_from_slice(name.as_bytes());
         buf
     }

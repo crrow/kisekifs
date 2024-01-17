@@ -1,24 +1,27 @@
-use crate::meta::config::{Format, MetaConfig};
-use crate::meta::types::{Ino, InternalNode, OpenFiles};
 use std::cmp::{max, min};
-
-use opendal::Operator;
-use snafu::{ResultExt, Snafu};
-
-use crate::common::err::ToErrno;
-use crate::meta::util::*;
-use crate::meta::{
-    Counter, EntryInfo, FSStates, FSStatesInner, InodeAttr, MetaContext, DOT, DOT_DOT, ROOT_INO,
-    TRASH_INODE, TRASH_INODE_NAME,
-};
-use dashmap::DashMap;
-use fuser::FileType;
-use libc::c_int;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::Ordering::Acquire;
+
+use crate::common::err::ToErrno;
+use crate::meta::config::{Format, MetaConfig};
+use crate::meta::types::{Ino, InternalNode, OpenFiles};
+use crate::meta::util::*;
+use crate::meta::{
+    Counter, Entry, EntryInfo, FSStates, FSStatesInner, InodeAttr, MetaContext, DOT, DOT_DOT,
+    ROOT_INO, TRASH_INODE, TRASH_INODE_NAME,
+};
+
+use dashmap::DashMap;
+use fuser::FileType;
+use fuser::FileType::Directory;
+use futures::stream::TryStreamExt;
+use futures::TryStream;
+use libc::c_int;
+use opendal::Operator;
+use snafu::{ResultExt, Snafu};
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration, Timeout};
-use tracing::trace;
+use tracing::{trace, warn};
 
 #[derive(Debug, Snafu)]
 pub enum MetaError {
@@ -36,6 +39,8 @@ pub enum MetaError {
     ErrBincodeDeserializeFailed { source: bincode::Error },
     #[snafu(display("failed to read {key} from opendal: {source}"))]
     ErrOpendalRead { key: String, source: opendal::Error },
+    #[snafu(display("failed to list by opendal: {source}"))]
+    ErrOpendalList { source: opendal::Error },
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -55,6 +60,7 @@ impl ToErrno for MetaError {
             MetaError::ErrLookupFailed { .. } => libc::ENOENT,
             MetaError::ErrBincodeDeserializeFailed { .. } => libc::EIO,
             MetaError::ErrOpendalRead { .. } => libc::ENOENT,
+            MetaError::ErrOpendalList { .. } => libc::EIO,
         }
     }
 }
@@ -343,6 +349,97 @@ impl MetaEngine {
 
     fn resolve_case(&self, ctx: &MetaContext, parent: Ino, name: &str) {
         todo!()
+    }
+
+    // Readdir returns all entries for given directory, which include attributes if plus is true.
+    pub async fn read_dir(&self, ctx: &MetaContext, inode: Ino, plus: bool) -> Result<Vec<Entry>> {
+        trace!(dir=?inode, "readdir");
+        match self.read_dir_inner(ctx, inode, plus).await {
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        todo!()
+    }
+
+    async fn read_dir_inner(
+        &self,
+        ctx: &MetaContext,
+        inode: Ino,
+        plus: bool,
+    ) -> Result<Vec<Entry>> {
+        let inode = self.check_root(inode);
+        let mut attr = self.get_attr(inode).await?;
+        let mmask = if plus {
+            MODE_MASK_R | MODE_MASK_X
+        } else {
+            MODE_MASK_X
+        };
+
+        access(ctx, inode, &attr, mmask)?;
+
+        if inode == self.root {
+            attr.parent = self.root;
+        }
+
+        let mut basic_entries = vec![
+            Entry::new(inode, DOT, Directory),
+            Entry::new(attr.parent, DOT_DOT, Directory),
+        ];
+
+        if let Err(e) = self.do_read_dir(inode, plus, &mut basic_entries, -1).await {
+            if let MetaError::ErrOpendalRead { source, key } = e {
+                if source.kind() == opendal::ErrorKind::NotFound && inode.is_trash() {
+                    return Ok(basic_entries);
+                }
+            }
+        }
+
+        Ok(basic_entries)
+    }
+    async fn do_read_dir(
+        &self,
+        inode: Ino,
+        plus: bool,
+        basic_entries: &mut Vec<Entry>,
+        limit: i64,
+    ) -> Result<()> {
+        let entry_prefix = EntryInfo::generate_entry_key_str(inode, "");
+
+        let sto_entries = self
+            .operator
+            .list(&entry_prefix)
+            .await
+            .context(ErrOpendalListSnafu)?;
+        for sto_entry in &sto_entries {
+            let name = sto_entry.name();
+            if name.len() == 0 {
+                warn!("empty entry name under {:?}", inode);
+                continue;
+            }
+            let entry_info_key = sto_entry.path();
+            let entry_info_buf =
+                self.operator
+                    .read(entry_info_key)
+                    .await
+                    .context(ErrOpendalReadSnafu {
+                        key: entry_info_key.to_string(),
+                    })?;
+            let entry_info =
+                EntryInfo::parse_from(&entry_info_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+            basic_entries.push(Entry::new(entry_info.inode, name, entry_info.typ));
+        }
+
+        if plus && basic_entries.len() != 0 {
+            todo!()
+            // let mut entries = Vec::with_capacity(basic_entries.len());
+            // for entry in basic_entries {
+            //     let attr = self.get_attr(entry.inode).await?;
+            //     entry.attr = attr;
+            //     entries.push(entry.clone());
+            // }
+            // *basic_entries = entries;
+        }
+        Ok(())
     }
 }
 
