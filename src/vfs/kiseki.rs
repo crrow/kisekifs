@@ -1,8 +1,11 @@
 use crate::common;
 use crate::common::err::ToErrno;
+use crate::meta::engine::access;
 use crate::meta::types::*;
+use crate::meta::util::*;
 use crate::meta::{MetaContext, MetaEngine};
 use crate::vfs::config::VFSConfig;
+use crate::vfs::handle::Handle;
 use crate::vfs::reader::DataReader;
 use crate::vfs::writer::DataWriter;
 use common::err::Result;
@@ -11,6 +14,7 @@ use fuser::FileType;
 use libc::c_int;
 use snafu::prelude::*;
 use std::fmt::{Display, Formatter};
+use std::sync::atomic::AtomicU64;
 use std::time;
 use tracing::trace;
 
@@ -37,6 +41,8 @@ pub struct KisekiVFS {
     writer: DataWriter,
     reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
+    _next_fh: AtomicU64,
+    handles: DashMap<Ino, Vec<Handle>>,
 }
 
 impl Display for KisekiVFS {
@@ -57,6 +63,8 @@ impl KisekiVFS {
             writer: DataWriter::default(),
             reader: DataReader::default(),
             modified_at: DashMap::new(),
+            _next_fh: AtomicU64::new(1),
+            handles: DashMap::new(),
         })
     }
 
@@ -127,5 +135,47 @@ impl KisekiVFS {
         } else {
             self.config.entry_timeout
         }
+    }
+
+    pub async fn open_dir<I: Into<Ino>>(
+        &self,
+        ctx: &MetaContext,
+        inode: I,
+        flags: i32,
+    ) -> Result<u64> {
+        let inode = inode.into();
+        trace!("vfs:open_dir with inode {:?}", inode);
+        if ctx.check_permission {
+            let mmask =
+                match flags as libc::c_int & (libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR) {
+                    libc::O_RDONLY => MODE_MASK_R,
+                    libc::O_WRONLY => MODE_MASK_W,
+                    libc::O_RDWR => MODE_MASK_R | MODE_MASK_W,
+                    _ => 0, // do nothing, // Handle unexpected flags
+                };
+            let attr = self.meta.get_attr(inode).await?;
+            access(ctx, inode, &attr, mmask)?;
+        }
+        Ok(self.new_handle(inode))
+    }
+
+    fn new_handle(&self, inode: Ino) -> u64 {
+        let fh = self.next_fh();
+        let h = Handle::new(fh, inode);
+        match self.handles.get_mut(&inode) {
+            None => {
+                self.handles.insert(inode, vec![h]);
+            }
+            Some(mut list) => {
+                let l = list.value_mut();
+                l.push(h)
+            }
+        };
+        fh
+    }
+
+    fn next_fh(&self) -> u64 {
+        self._next_fh
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 }

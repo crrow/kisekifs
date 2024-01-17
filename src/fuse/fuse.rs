@@ -3,15 +3,19 @@ use crate::fuse::config::FuseConfig;
 use crate::meta::types::{Entry, Ino};
 use crate::meta::{MetaContext, MAX_NAME_LENGTH};
 use crate::vfs::KisekiVFS;
-use fuser::{Filesystem, KernelConfig, ReplyAttr, ReplyEntry, ReplyStatfs, Request};
+use fuser::{
+    Filesystem, KernelConfig, ReplyAttr, ReplyDirectory, ReplyEntry, ReplyOpen, ReplyStatfs,
+    Request,
+};
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
+use std::cmp::max;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use tokio::runtime;
 use tracing::{debug, field, info, instrument, Instrument};
 
-const BLOCK_SIZE: u32 = 512;
+const BLOCK_SIZE: u32 = 4096;
 
 #[derive(Debug, Snafu)]
 pub enum FuseError {
@@ -152,12 +156,7 @@ impl Filesystem for KisekiFuse {
         reply.statfs(
             // BLOCKS: Number of free blocks available for use.
             /* blocks:*/
-            state.total_space / (BLOCK_SIZE as u64)
-                + if state.total_space % (BLOCK_SIZE as u64) > 0 {
-                    1
-                } else {
-                    0
-                },
+            max(state.total_space / BLOCK_SIZE as u64, 1),
             // bfree: Number of free blocks available for use.
             state.avail_space / BLOCK_SIZE as u64,
             // bavail: Number of blocks available to unprivileged users.
@@ -173,5 +172,34 @@ impl Filesystem for KisekiFuse {
             // frsize: Fragment size (if file system supports fragmentation).
             BLOCK_SIZE,
         );
+    }
+
+    // Open directory.
+    // Unless the 'default_permissions' mount option is given,
+    // this method should check if opendir is permitted for this directory.
+    // Optionally opendir may also return an arbitrary filehandle in the fuse_file_info structure,
+    // which will be passed to readdir, releasedir and fsyncdir.
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
+    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
+        let ctx = MetaContext::default();
+        match self
+            .runtime
+            .block_on(self.vfs.open_dir(&ctx, _ino, _flags).in_current_span())
+        {
+            Ok(fh) => reply.opened(fh, _flags as u32),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset))]
+    fn readdir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        reply: ReplyDirectory,
+    ) {
+        todo!()
     }
 }
