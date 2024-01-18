@@ -161,28 +161,28 @@ impl PreInternalNodes {
         let control_inode: InternalNode = InternalNode(Entry {
             inode: CONTROL_INODE,
             name: CONTROL_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o666).set_full(),
+            attr: InodeAttr::default().set_perm(0o666).set_full().to_owned(),
             ttl: Some(entry_timeout.0),
             generation: Some(1),
         });
         let log_inode: InternalNode = InternalNode(Entry {
             inode: LOG_INODE,
             name: LOG_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).set_full(),
+            attr: InodeAttr::default().set_perm(0o400).set_full().to_owned(),
             ttl: Some(entry_timeout.0),
             generation: Some(1),
         });
         let stats_inode: InternalNode = InternalNode(Entry {
             inode: STATS_INODE,
             name: STATS_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).set_full(),
+            attr: InodeAttr::default().set_perm(0o400).set_full().to_owned(),
             ttl: Some(entry_timeout.0),
             generation: Some(1),
         });
         let config_inode: InternalNode = InternalNode(Entry {
             inode: CONFIG_INODE,
             name: CONFIG_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).set_full(),
+            attr: InodeAttr::default().set_perm(0o400).set_full().to_owned(),
             ttl: Some(entry_timeout.0),
             generation: Some(1),
         });
@@ -195,7 +195,8 @@ impl PreInternalNodes {
                 .set_nlink(2)
                 .set_uid(UID_GID.0)
                 .set_gid(UID_GID.1)
-                .set_full(),
+                .set_full()
+                .to_owned(),
             ttl: Some(entry_timeout.1),
             generation: Some(1),
         });
@@ -285,28 +286,40 @@ impl InodeAttr {
             keep_cache: false,
         }
     }
-    pub fn set_perm(mut self, perm: u16) -> Self {
+    pub fn set_perm(&mut self, perm: u16) -> &mut Self {
         self.perm = perm;
         self
     }
-    pub fn set_kind(mut self, kind: fuser::FileType) -> Self {
+    pub fn set_kind(&mut self, kind: fuser::FileType) -> &mut Self {
         self.kind = kind;
         self
     }
-    pub fn set_nlink(mut self, nlink: u32) -> Self {
+    pub fn set_nlink(&mut self, nlink: u32) -> &mut Self {
         self.nlink = nlink;
         self
     }
-    pub fn set_gid(mut self, gid: u32) -> Self {
+    pub fn set_length(&mut self, length: u64) -> &mut Self {
+        self.length = length;
+        self
+    }
+    pub fn set_rdev(&mut self, rdev: u32) -> &mut Self {
+        self.rdev = rdev;
+        self
+    }
+    pub fn set_gid(&mut self, gid: u32) -> &mut Self {
         self.gid = gid;
         self
     }
-    pub fn set_uid(mut self, uid: u32) -> Self {
+    pub fn set_uid(&mut self, uid: u32) -> &mut Self {
         self.uid = uid;
         self
     }
-    pub fn set_full(mut self) -> Self {
+    pub fn set_full(&mut self) -> &mut Self {
         self.full = true;
+        self
+    }
+    pub fn set_parent(&mut self, parent: Ino) -> &mut Self {
+        self.parent = parent;
         self
     }
 
@@ -413,7 +426,7 @@ impl Entry {
         Self {
             inode,
             name: name.into(),
-            attr: InodeAttr::default().set_kind(typ),
+            attr: InodeAttr::default().set_kind(typ).to_owned(),
             ttl: None,
             generation: None,
         }
@@ -773,5 +786,22 @@ mod tests {
 
         let v = counter.load(op.clone()).await.unwrap();
         assert_eq!(v, 3);
+    }
+
+    #[test]
+    fn attr_modify() {
+        let mut attr = InodeAttr::default()
+            .set_perm(0o777)
+            .set_kind(FileType::Directory)
+            .set_gid(11)
+            .set_uid(22);
+        attr.set_parent(Ino::from(1)).set_full();
+
+        assert_eq!(attr.perm, 0o777);
+        assert_eq!(attr.kind, FileType::Directory);
+        assert_eq!(attr.gid, 11);
+        assert_eq!(attr.uid, 22);
+        assert_eq!(attr.parent, Ino::from(1));
+        assert_eq!(attr.full, true);
     }
 }

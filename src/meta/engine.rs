@@ -580,6 +580,26 @@ impl MetaEngine {
                     .context(ErrFailedToDoCounterSnafu)?,
             )
         };
+
+        let mut attr = InodeAttr::default()
+            .set_perm(mode & !cumask)
+            .set_kind(typ)
+            .set_gid(ctx.gid)
+            .set_uid(ctx.uid)
+            .set_parent(parent)
+            .set_full()
+            .to_owned();
+        if typ == FileType::Directory {
+            attr.set_nlink(2).set_length(4 << 10);
+        } else {
+            attr.set_nlink(1);
+            if typ == FileType::Symlink {
+                attr.set_length(path.len() as u64);
+            } else {
+                attr.set_length(0).set_rdev(rdev);
+            }
+        };
+
         todo!()
     }
 }
