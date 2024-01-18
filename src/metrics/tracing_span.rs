@@ -1,34 +1,34 @@
-/*
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use std::time::Instant;
 
 use metrics::histogram;
-use tracing::span::Attributes;
-use tracing::{Id, Level, Subscriber};
-use tracing_subscriber::filter::Targets;
-use tracing_subscriber::layer::Context;
-use tracing_subscriber::registry::{LookupSpan, SpanRef};
-use tracing_subscriber::Layer;
+use tracing::{span::Attributes, Id, Level, Subscriber};
+use tracing_subscriber::{
+    filter::Targets,
+    layer::Context,
+    registry::{LookupSpan, SpanRef},
+    Layer,
+};
 
-/// A [tracing::Layer] that publishes metrics about important [Span]s (mostly the root span of FUSE
-/// requests) into the aggregate metrics.
+/// A [tracing::Layer] that publishes metrics about important [Span]s (mostly
+/// the root span of FUSE requests) into the aggregate metrics.
 ///
-/// This layer "knows about" some of our Span targets and names, and uses them to decide when and
-/// how to emit metrics. If those names change, this needs to change as well.
+/// This layer "knows about" some of our Span targets and names, and uses them
+/// to decide when and how to emit metrics. If those names change, this needs to
+/// change as well.
 #[derive(Debug)]
 struct MetricsTracingSpanLayer;
 

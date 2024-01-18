@@ -1,5 +1,6 @@
-use crate::meta::{Entry, Ino};
 use tokio::time::Instant;
+
+use crate::meta::types::{Entry, Ino};
 
 #[derive(Debug)]
 pub(crate) struct Handle {

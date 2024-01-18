@@ -1,5 +1,6 @@
-use crate::meta::Ino;
 use tracing::debug;
+
+use crate::meta::types::Ino;
 
 #[derive(Debug, Default)]
 pub(crate) struct DataWriter {}

@@ -1,18 +1,46 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::str::FromStr;
-// Config for clients.
-use crate::common;
-use crate::meta::{types, MetaEngine, MetaError::ErrInvalidFormatVersion};
-use common::err::Result;
+use std::{collections::HashMap, path::PathBuf, str::FromStr, time::Duration};
+
 use opendal::Scheme;
-use serde::__private::de::IdentifierDeserializer;
-use serde::de::Error;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use snafu::{ResultExt, Snafu, Whatever};
-use std::time::Duration;
+use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+use snafu::ResultExt;
 use tracing::info;
 
+use crate::meta::{
+    engine::MetaEngine,
+    err::{MetaError, Result},
+};
+
+/// Atime (Access Time):
+/// Every file has three timestamps:
+/// atime (access time): The last time the file was read or accessed.
+/// mtime (modification time): The last time the file's content was modified.
+/// ctime (change time): The last time the file's metadata (e.g., permissions,
+/// owner) was changed.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum AccessTimeMode {
+    /// Disables atime updates entirely.
+    /// Reading a file doesn't update its atime timestamp.
+    /// Improves performance, especially for frequently accessed files.
+    /// Can make it difficult to determine when a file was last accessed.
+    Never,
+    /// Default atime mode on many Linux systems.
+    /// Updates atime only if:
+    /// The file's atime is older than its mtime or ctime.
+    /// The file has been accessed more than a certain time threshold (usually 1
+    /// day). Balances performance and access time tracking.
+    Relative,
+    /// Always updates atime whenever a file is read.
+    /// Accurately tracks file access times.
+    /// Can impact performance, especially on storage systems with slow write
+    /// speeds.
+    Everytime,
+}
+
+impl Default for AccessTimeMode {
+    fn default() -> Self {
+        Self::Never
+    }
+}
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct MetaConfig {
     // connect info
@@ -35,7 +63,7 @@ pub struct MetaConfig {
     pub heartbeat: Duration,
     pub mount_point: PathBuf,
     pub sub_dir: PathBuf,
-    pub atime_mode: types::AccessTimeMode,
+    pub atime_mode: AccessTimeMode,
     pub dir_stat_flush_period: Duration,
     pub skip_dir_mtime: Duration,
 }
@@ -138,7 +166,7 @@ impl Format {
         Ok(format)
     }
 
-    pub fn check_version(&self) -> std::result::Result<(), crate::meta::MetaError> {
+    pub fn check_version(&self) -> std::result::Result<(), MetaError> {
         return Ok(());
     }
 }

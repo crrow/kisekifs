@@ -1,30 +1,33 @@
-/*
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use clap::{arg, Parser, Subcommand, ValueEnum};
 use fuser::MountOption;
-use kisekifs::fuse::config::FuseConfig;
-use kisekifs::fuse::{null, KISEKI};
-use kisekifs::logging::LoggingConfig;
-use kisekifs::meta::config::MetaConfig;
-use kisekifs::vfs::config::VFSConfig;
-use kisekifs::{build_info, fuse, vfs};
+use kisekifs::{
+    build_info, fuse,
+    fuse::{config::FuseConfig, null, KISEKI},
+    logging::LoggingConfig,
+    meta::MetaConfig,
+    vfs,
+    vfs::config::VFSConfig,
+};
 use snafu::{whatever, ResultExt, Whatever};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use tracing::info;
 
 const MOUNT_OPTIONS_HEADER: &str = "Mount options";
@@ -277,12 +280,6 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
         .open()
         .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
 
-    let format = meta
-        .load_format(false)
-        .with_whatever_context(|e| format!("failed to load meta format, {:?}", e))?;
-
-    // TODO: handle the meta format
-
     let file_system = vfs::KisekiVFS::create(fs_config, meta)
         .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
     let fs = fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
@@ -312,8 +309,8 @@ fn validate_mount_point(path: impl AsRef<Path>) -> Result<(), Whatever> {
     {
         use procfs::process::Process;
 
-        // This is a best-effort validation, so don't fail if we can't read /proc/self/mountinfo for
-        // some reason.
+        // This is a best-effort validation, so don't fail if we can't read
+        // /proc/self/mountinfo for some reason.
         let mounts = match Process::myself().and_then(|me| me.mountinfo()) {
             Ok(mounts) => mounts,
             Err(e) => {

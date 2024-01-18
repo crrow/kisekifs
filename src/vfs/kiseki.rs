@@ -1,26 +1,31 @@
-use crate::common;
-use crate::common::err::ToErrno;
-use crate::meta::engine::access;
-use crate::meta::types::*;
-use crate::meta::util::*;
-use crate::meta::{MetaContext, MetaEngine};
-use crate::vfs::config::VFSConfig;
-use crate::vfs::handle::Handle;
-use crate::vfs::reader::DataReader;
-use crate::vfs::writer::DataWriter;
-use crate::vfs::VFSError::ErrBadFileHandle;
+use std::{
+    fmt::{Display, Formatter},
+    sync::{atomic::AtomicU64, Arc},
+    time,
+};
+
 use common::err::Result;
 use dashmap::DashMap;
 use fuser::FileType;
 use libc::c_int;
 use snafu::prelude::*;
-use std::fmt::{Display, Formatter};
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-use std::time;
-use tokio::sync::Mutex;
-use tokio::time::Instant;
+use tokio::{sync::Mutex, time::Instant};
 use tracing::trace;
+
+use crate::{
+    common,
+    common::err::ToErrno,
+    meta::{
+        engine::{access, MetaEngine},
+        internal_nodes::{PreInternalNodes, CONTROL_INODE_NAME},
+        types::*,
+        MetaContext, MODE_MASK_R, MODE_MASK_W,
+    },
+    vfs::{
+        config::VFSConfig, handle::Handle, reader::DataReader, writer::DataWriter,
+        VFSError::ErrBadFileHandle,
+    },
+};
 
 #[derive(Debug, Snafu)]
 pub enum VFSError {
@@ -75,6 +80,13 @@ impl KisekiVFS {
             _next_fh: AtomicU64::new(1),
             handles: DashMap::new(),
         })
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        let format = self.meta.load_format(false).await?;
+
+        // TODO: handle the meta format
+        Ok(())
     }
 
     pub async fn stat_fs<I: Into<Ino>>(&self, ctx: &MetaContext, ino: I) -> Result<FSStates> {
