@@ -1,9 +1,11 @@
-use byteorder::{LittleEndian, WriteBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::{FileAttr, FileType, ReplyEntry};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 
+use opendal::{ErrorKind, Operator};
+use snafu::ResultExt;
 use std::collections::HashMap;
 use std::convert::Into;
 use std::fmt::{Display, Formatter};
@@ -11,6 +13,7 @@ use std::io::{Read, Write};
 use std::ops::{Add, AddAssign, Deref, DerefMut};
 use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::{Mutex, RwLock};
 
 /// Atime (Access Time):
 /// Every file has three timestamps:
@@ -577,12 +580,34 @@ pub(crate) struct FSStatesInner {
     pub(crate) used_inodes: AtomicI64,
 }
 
-const COUNTER_STRINGS: [&str; 3] = ["used_space", "total_inodes", "legacy_sessions"];
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+lazy_static! {
+    pub static ref COUNTER_LOCKERS: DashMap<Counter, RwLock<()>> = {
+        let mut map = DashMap::new();
+        for counter in COUNTER_ENUMS.iter() {
+            map.insert(counter.clone(), RwLock::new(()));
+        }
+        map
+    };
+}
+
+const COUNTER_ENUMS: [Counter; 4] = [
+    Counter::UsedSpace,
+    Counter::TotalInodes,
+    Counter::LegacySessions,
+    Counter::NextTrash,
+];
+const COUNTER_STRINGS: [&str; 4] = [
+    "used_space",
+    "total_inodes",
+    "legacy_sessions",
+    "next_trash",
+];
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub enum Counter {
     UsedSpace,
     TotalInodes,
     LegacySessions,
+    NextTrash,
 }
 
 impl Counter {
@@ -591,16 +616,93 @@ impl Counter {
             Counter::UsedSpace => COUNTER_STRINGS[0],
             Counter::TotalInodes => COUNTER_STRINGS[1],
             Counter::LegacySessions => COUNTER_STRINGS[2],
+            Counter::NextTrash => COUNTER_STRINGS[3],
         }
+    }
+    // FIXME: do we actually need it ?
+    async fn get_counter_with_lock(&self, operator: &Operator) -> Result<i64, opendal::Error> {
+        let counter_key = self.generate_kv_key_str();
+        let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
+        let locker_ref = locker_ref.value();
+        let guard = locker_ref.read().await;
+        let counter = match operator.read(&counter_key).await {
+            Ok(ref buf) => buf
+                .as_slice()
+                .read_i64::<LittleEndian>()
+                .expect("read counter error"),
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    0
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        Ok(counter)
+    }
+    pub async fn load(&self, operator: &Operator) -> Result<i64, opendal::Error> {
+        let counter_key = self.generate_kv_key_str();
+        let counter = match operator.read(&counter_key).await {
+            Ok(ref buf) => {
+                let v = buf
+                    .as_slice()
+                    .read_i64::<LittleEndian>()
+                    .expect("read counter error");
+                v
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    0
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        Ok(counter)
     }
     pub fn generate_kv_key_str(&self) -> String {
         format!("C{}", self.to_str())
     }
+    pub async fn increment(&self, operator: &Operator) -> Result<i64, opendal::Error> {
+        self.increment_by(operator, 1).await
+    }
+    pub async fn increment_by(&self, operator: &Operator, by: i64) -> Result<i64, opendal::Error> {
+        let counter_key = self.generate_kv_key_str();
+        let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
+        let locker_ref = locker_ref.value();
+        let guard = locker_ref.write().await;
+        let counter = match operator.read(&counter_key).await {
+            Ok(ref buf) => {
+                let v: i64 = buf
+                    .as_slice()
+                    .read_i64::<LittleEndian>()
+                    .expect("read counter error");
+                v
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    0
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        let counter = counter + by;
+        let mut buf = vec![0u8; 8];
+        buf.as_mut_slice()
+            .write_i64::<LittleEndian>(counter)
+            .unwrap();
+        operator.write(&counter_key, buf).await?;
+        Ok(counter)
+    }
+
+    pub async fn load_counter(&self) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[test]
     fn ino() {
@@ -631,5 +733,26 @@ mod tests {
 
         let entry2 = EntryInfo::parse_from(&buf).unwrap();
         assert_eq!(entry, entry2)
+    }
+
+    #[tokio::test]
+    async fn counter() {
+        let mut builder = opendal::services::Memory::default();
+        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir_path = tempdir.as_ref().to_str().unwrap();
+        builder.root(tempdir_path);
+
+        let op: Operator = Operator::new(builder).unwrap().finish();
+        let counter = Counter::UsedSpace;
+        let v = counter.get_counter_with_lock(&op).await.unwrap();
+        assert_eq!(v, 0);
+        let v = counter.increment(&op).await.unwrap();
+        assert_eq!(v, 1);
+
+        let (first, sec) = tokio::join!(counter.increment(&op), counter.increment(&op),);
+        println!("{}, {}", first.unwrap(), sec.unwrap());
+
+        let v = counter.load(&op).await.unwrap();
+        assert_eq!(v, 3);
     }
 }

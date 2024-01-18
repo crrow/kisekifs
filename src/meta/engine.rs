@@ -1,5 +1,7 @@
 use std::cmp::{max, min};
 use std::fmt::{Debug, Formatter};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path};
 use std::sync::atomic::Ordering::Acquire;
 
 use crate::common::err::ToErrno;
@@ -13,14 +15,13 @@ use crate::meta::{
 
 use dashmap::DashMap;
 use fuser::FileType;
-use fuser::FileType::Directory;
 use futures::TryStream;
 use libc::c_int;
-use opendal::Operator;
+use opendal::{ErrorKind, Operator};
 use snafu::{ResultExt, Snafu};
 use std::sync::RwLock;
-use tokio::time::{timeout, Duration, Timeout};
-use tracing::{trace, warn};
+use tokio::time::{timeout, Duration};
+use tracing::{error, trace, warn};
 
 #[derive(Debug, Snafu)]
 pub enum MetaError {
@@ -34,14 +35,14 @@ pub enum MetaError {
     ErrBadAccessPerm { inode: Ino, want: u8, grant: u8 },
     #[snafu(display("inode {inode} is not a directory"))]
     ErrNotDir { inode: Ino },
-    #[snafu(display("look failed: {parent}-{name} doesn't exist"))]
-    ErrLookupFailed { parent: Ino, name: String },
     #[snafu(display("failed to deserialize: {source}"))]
     ErrBincodeDeserializeFailed { source: bincode::Error },
-    #[snafu(display("failed to read {key} from opendal: {source}"))]
-    ErrOpendalRead { key: String, source: opendal::Error },
+    #[snafu(display("failed to read {key} from sto: {source}"))]
+    ErrFailedToReadFromSto { key: String, source: opendal::Error },
     #[snafu(display("failed to list by opendal: {source}"))]
     ErrOpendalList { source: opendal::Error },
+    #[snafu(display("failed to mknod: {kind}"))]
+    ErrMknod { kind: libc::c_int },
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -58,11 +59,17 @@ impl ToErrno for MetaError {
             MetaError::FailedToOpenOperator { .. } => libc::EIO,
             MetaError::ErrBadAccessPerm { .. } => libc::EACCES,
             MetaError::ErrNotDir { .. } => libc::ENOTDIR,
-            MetaError::ErrLookupFailed { .. } => libc::ENOENT,
             MetaError::ErrBincodeDeserializeFailed { .. } => libc::EIO,
-            MetaError::ErrOpendalRead { .. } => libc::ENOENT,
+            MetaError::ErrFailedToReadFromSto { source, .. } => match source.kind() {
+                ErrorKind::NotFound => libc::ENOENT,
+                _ => {
+                    error!("failed to read from sto: {}", source);
+                    libc::EIO
+                }
+            },
             MetaError::ErrOpendalList { .. } => libc::EIO,
             MetaError::ErrInvalidFormatVersion => libc::EBADF, // TODO: review
+            MetaError::ErrMknod { kind } => *kind,
         }
     }
 }
@@ -104,13 +111,11 @@ impl MetaEngine {
     /// Load loads the existing setting of a formatted volume from meta service.
     pub fn load_format(&self, check_version: bool) -> Result<Format> {
         let format_key_str = Format::format_key_str();
-        let format_buf =
-            self.operator
-                .blocking()
-                .read(&format_key_str)
-                .context(ErrOpendalReadSnafu {
-                    key: format_key_str,
-                })?;
+        let format_buf = self.operator.blocking().read(&format_key_str).context(
+            ErrFailedToReadFromStoSnafu {
+                key: format_key_str,
+            },
+        )?;
 
         let format = Format::parse_from(&format_buf).context(ErrBincodeDeserializeFailedSnafu)?;
         if check_version {
@@ -148,11 +153,11 @@ impl MetaEngine {
         let (mut used_space, mut inodes) = match tokio::try_join!(
             timeout(
                 Duration::from_millis(150),
-                self.get_counter(Counter::UsedSpace),
+                Counter::UsedSpace.load(&self.operator),
             ),
             timeout(
                 Duration::from_millis(150),
-                self.get_counter(Counter::TotalInodes),
+                Counter::TotalInodes.load(&self.operator),
             )
         ) {
             Ok((used_space, total_inodes)) => {
@@ -218,18 +223,6 @@ impl MetaEngine {
         )
     }
 
-    async fn get_counter(&self, counter: Counter) -> Result<i64> {
-        let counter_key = counter.generate_kv_key_str();
-        let counter_buf = self
-            .operator
-            .read(&counter_key)
-            .await
-            .context(ErrOpendalReadSnafu { key: counter_key })?;
-        let counter: i64 =
-            bincode::deserialize(&counter_buf).context(ErrBincodeDeserializeFailedSnafu)?;
-        Ok(counter)
-    }
-
     /// Lookup returns the inode and attributes for the given entry in a directory.
     pub async fn lookup(
         &self,
@@ -272,7 +265,7 @@ impl MetaEngine {
         let (inode, attr) = match self.do_lookup(parent, name).await {
             Ok(r) => r,
             Err(e) => match e {
-                MetaError::ErrLookupFailed { .. } if self.config.case_insensitive => {
+                MetaError::ErrFailedToReadFromSto { .. } if self.config.case_insensitive => {
                     // TODO: this is an optimization point
                     self.resolve_case(&ctx, parent, name);
                     return Err(e);
@@ -334,13 +327,13 @@ impl MetaEngine {
     async fn do_get_attr(&self, inode: Ino) -> Result<InodeAttr> {
         // TODO: do we need transaction ?
         let inode_key = inode.generate_key_str();
-        let attr_buf = self
-            .operator
-            .read(&inode_key)
-            .await
-            .context(ErrOpendalReadSnafu {
-                key: inode_key.to_string(),
-            })?;
+        let attr_buf =
+            self.operator
+                .read(&inode_key)
+                .await
+                .context(ErrFailedToReadFromStoSnafu {
+                    key: inode_key.to_string(),
+                })?;
         let attr: InodeAttr =
             bincode::deserialize(&attr_buf).context(ErrBincodeDeserializeFailedSnafu)?;
         Ok(attr)
@@ -352,7 +345,7 @@ impl MetaEngine {
             .operator
             .read(&entry_key)
             .await
-            .context(ErrOpendalReadSnafu { key: entry_key })?;
+            .context(ErrFailedToReadFromStoSnafu { key: entry_key })?;
 
         let entry_info =
             EntryInfo::parse_from(&entry_buf).context(ErrBincodeDeserializeFailedSnafu)?;
@@ -362,7 +355,7 @@ impl MetaEngine {
             .operator
             .read(&inode_key)
             .await
-            .context(ErrOpendalReadSnafu { key: inode_key })?;
+            .context(ErrFailedToReadFromStoSnafu { key: inode_key })?;
         // TODO: juicefs also handle the attr buf empty case, wired.
         let attr: InodeAttr =
             bincode::deserialize(&attr_buf).context(ErrBincodeDeserializeFailedSnafu)?;
@@ -404,12 +397,12 @@ impl MetaEngine {
         }
 
         let mut basic_entries = vec![
-            Entry::new(inode, DOT, Directory),
-            Entry::new(attr.parent, DOT_DOT, Directory),
+            Entry::new(inode, DOT, FileType::Directory),
+            Entry::new(attr.parent, DOT_DOT, FileType::Directory),
         ];
 
         if let Err(e) = self.do_read_dir(inode, plus, &mut basic_entries, -1).await {
-            if let MetaError::ErrOpendalRead { source, key } = e {
+            if let MetaError::ErrFailedToReadFromSto { source, key } = e {
                 if source.kind() == opendal::ErrorKind::NotFound && inode.is_trash() {
                     return Ok(basic_entries);
                 }
@@ -443,7 +436,7 @@ impl MetaEngine {
                 self.operator
                     .read(entry_info_key)
                     .await
-                    .context(ErrOpendalReadSnafu {
+                    .context(ErrFailedToReadFromStoSnafu {
                         key: entry_info_key.to_string(),
                     })?;
             let entry_info =
@@ -462,6 +455,110 @@ impl MetaEngine {
             // *basic_entries = entries;
         }
         Ok(())
+    }
+
+    // Change root to a directory specified by sub_dir
+    pub async fn chroot<P: AsRef<Path>>(&self, ctx: &MetaContext, sub_dir: P) -> Result<()> {
+        let sub_dir = sub_dir.as_ref();
+        for c in sub_dir.components() {
+            let name = match c {
+                Component::Normal(name) => {
+                    name.to_str().expect("invalid path component { sub_dir}")
+                }
+                _ => unreachable!("invalid path component: {:?}", c),
+            };
+            let (inode, attr) = match self.lookup(ctx, self.root, name, true).await {
+                Ok(r) => r,
+                Err(e) => {
+                    if e.to_errno() == libc::ENOENT {
+                        let (inode, attr) = self.mkdir(ctx, self.root, name, 0o777, 0).await?;
+                        (inode, attr)
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            if attr.get_filetype() != FileType::Directory {
+                return Err(MetaError::ErrNotDir { inode })?;
+            }
+        }
+        Ok(())
+    }
+
+    // Mkdir creates a sub-directory with given name and mode.
+    pub async fn mkdir(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: &str,
+        mode: u16,
+        cumask: u16,
+    ) -> Result<(Ino, InodeAttr)> {
+        self.mknod(
+            ctx,
+            parent,
+            name,
+            FileType::Directory,
+            mode,
+            cumask,
+            0,
+            String::new(),
+        )
+        .await
+        .and_then(|r| {
+            self.dir_parents.insert(r.0, parent);
+            Ok(r)
+        })
+    }
+
+    // Mknod creates a node in a directory with given name, type and permissions.
+    pub async fn mknod(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: &str,
+        typ: FileType,
+        mode: u16,
+        cumask: u16,
+        rdev: u32,
+        path: String,
+    ) -> Result<(Ino, InodeAttr)> {
+        if parent.is_trash() || parent.is_root() && name == TRASH_INODE_NAME {
+            return Err(MetaError::ErrMknod { kind: libc::EPERM });
+        }
+        if self.config.read_only {
+            return Err(MetaError::ErrMknod { kind: libc::EROFS });
+        }
+        if name.len() == 0 {
+            return Err(MetaError::ErrMknod { kind: libc::ENOENT });
+        }
+
+        let parent = self.check_root(parent);
+        let (space, inodes) = (align4k(0), 1i64);
+        self.check_quota(ctx, space, inodes, parent)?;
+        self.do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
+            .await
+            .and_then(|r| {
+                self.update_stats(space, inodes)?;
+                self.update_update_dir_stat(parent, 0, space, inodes)?;
+                self.update_dir_quota(parent, space, inodes)?;
+                Ok(r)
+            })
+    }
+
+    pub async fn do_mknod(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: &str,
+        typ: FileType,
+        mode: u16,
+        cumask: u16,
+        rdev: u32,
+        path: String,
+    ) -> Result<(Ino, InodeAttr)> {
+        if parent.is_trash() {}
+        todo!()
     }
 }
 
@@ -496,5 +593,19 @@ impl Debug for MetaEngine {
         f.debug_struct("Meta")
             .field("scheme", &self.config.scheme)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_components() {
+        let p = PathBuf::from("d1");
+        for c in p.components() {
+            println!("{:?}", c);
+        }
     }
 }
