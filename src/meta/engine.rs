@@ -28,9 +28,10 @@ use crate::{
     common::err::ToErrno,
     meta::{
         config::{Format, MetaConfig},
+        engine_sto::generate_sto_entry_key_str,
         err::*,
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
-        types::{Entry, EntryInfo, FSStates, Ino, InodeAttr, ROOT_INO, TRASH_INODE},
+        types::{DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, ROOT_INO, TRASH_INODE},
         util::*,
         MetaContext, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },
@@ -609,8 +610,7 @@ impl MetaEngine {
         basic_entries: &mut Vec<Entry>,
         limit: i64,
     ) -> Result<()> {
-        let entry_prefix = EntryInfo::generate_entry_key_str(inode, "");
-
+        let entry_prefix = generate_sto_entry_key_str(inode, "");
         let sto_entries = self
             .operator
             .list(&entry_prefix)
@@ -856,7 +856,7 @@ impl MetaEngine {
         if typ == FileType::Symlink {
             self.sto_set_sym(inode, path).await?;
         } else if typ == FileType::Directory {
-            self.sto_set_dir_stat(inode).await?;
+            self.sto_set_dir_stat(inode, DirStat::default()).await?;
         }
 
         todo!()

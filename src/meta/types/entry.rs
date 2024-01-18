@@ -71,23 +71,7 @@ impl EntryInfo {
     pub fn new(inode: Ino, typ: FileType) -> Self {
         Self { inode, typ }
     }
-    // key: AiiiiiiiiD/{name}
-    // key-len: 11 + name.len()
-    pub fn generate_entry_key(parent: Ino, name: &str) -> Vec<u8> {
-        let mut buf = vec![0u8; 11 + name.len()];
-        buf.write_u8('A' as u8).unwrap();
-        buf.write_u64::<LittleEndian>(parent.0).unwrap();
-        buf.write_u8('D' as u8).unwrap();
-        buf.write_u8('/' as u8).unwrap();
-        buf.extend_from_slice(name.as_bytes());
-        buf
-    }
-    pub fn generate_entry_key_str(parent: Ino, name: &str) -> String {
-        Self::generate_entry_key(parent, name)
-            .into_iter()
-            .map(|x| x as char)
-            .collect()
-    }
+
     pub fn parse_from<R: AsRef<[u8]>>(r: R) -> Result<Self, bincode::Error> {
         bincode::deserialize(r.as_ref())
     }
