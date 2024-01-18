@@ -12,6 +12,7 @@ use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::ops::{Add, AddAssign, Deref, DerefMut};
 use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
@@ -590,17 +591,20 @@ lazy_static! {
     };
 }
 
-const COUNTER_ENUMS: [Counter; 4] = [
+// FIXME: use a better way.
+const COUNTER_ENUMS: [Counter; 5] = [
     Counter::UsedSpace,
     Counter::TotalInodes,
     Counter::LegacySessions,
     Counter::NextTrash,
+    Counter::NextInode,
 ];
-const COUNTER_STRINGS: [&str; 4] = [
+const COUNTER_STRINGS: [&str; 5] = [
     "used_space",
     "total_inodes",
     "legacy_sessions",
     "next_trash",
+    "next_inode",
 ];
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub enum Counter {
@@ -608,6 +612,7 @@ pub enum Counter {
     TotalInodes,
     LegacySessions,
     NextTrash,
+    NextInode,
 }
 
 impl Counter {
@@ -617,10 +622,11 @@ impl Counter {
             Counter::TotalInodes => COUNTER_STRINGS[1],
             Counter::LegacySessions => COUNTER_STRINGS[2],
             Counter::NextTrash => COUNTER_STRINGS[3],
+            Counter::NextInode => COUNTER_STRINGS[4],
         }
     }
     // FIXME: do we actually need it ?
-    async fn get_counter_with_lock(&self, operator: &Operator) -> Result<i64, opendal::Error> {
+    async fn get_counter_with_lock(&self, operator: Arc<Operator>) -> Result<i64, opendal::Error> {
         let counter_key = self.generate_kv_key_str();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
@@ -640,13 +646,13 @@ impl Counter {
         };
         Ok(counter)
     }
-    pub async fn load(&self, operator: &Operator) -> Result<i64, opendal::Error> {
+    pub async fn load(&self, operator: Arc<Operator>) -> Result<u64, opendal::Error> {
         let counter_key = self.generate_kv_key_str();
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => {
                 let v = buf
                     .as_slice()
-                    .read_i64::<LittleEndian>()
+                    .read_u64::<LittleEndian>()
                     .expect("read counter error");
                 v
             }
@@ -663,19 +669,23 @@ impl Counter {
     pub fn generate_kv_key_str(&self) -> String {
         format!("C{}", self.to_str())
     }
-    pub async fn increment(&self, operator: &Operator) -> Result<i64, opendal::Error> {
+    pub async fn increment(&self, operator: Arc<Operator>) -> Result<u64, opendal::Error> {
         self.increment_by(operator, 1).await
     }
-    pub async fn increment_by(&self, operator: &Operator, by: i64) -> Result<i64, opendal::Error> {
+    pub async fn increment_by(
+        &self,
+        operator: Arc<Operator>,
+        by: u64,
+    ) -> Result<u64, opendal::Error> {
         let counter_key = self.generate_kv_key_str();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
         let guard = locker_ref.write().await;
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => {
-                let v: i64 = buf
+                let v: u64 = buf
                     .as_slice()
-                    .read_i64::<LittleEndian>()
+                    .read_u64::<LittleEndian>()
                     .expect("read counter error");
                 v
             }
@@ -690,7 +700,7 @@ impl Counter {
         let counter = counter + by;
         let mut buf = vec![0u8; 8];
         buf.as_mut_slice()
-            .write_i64::<LittleEndian>(counter)
+            .write_u64::<LittleEndian>(counter)
             .unwrap();
         operator.write(&counter_key, buf).await?;
         Ok(counter)
@@ -698,6 +708,14 @@ impl Counter {
 
     pub async fn load_counter(&self) {}
 }
+
+#[derive(Debug, Default)]
+pub(crate) struct FreeID {
+    pub(crate) next: u64,
+    pub(crate) max: u64,
+}
+
+pub(crate) const INODE_BATCH: u64 = 1 << 10;
 
 #[cfg(test)]
 mod tests {
@@ -742,17 +760,18 @@ mod tests {
         let tempdir_path = tempdir.as_ref().to_str().unwrap();
         builder.root(tempdir_path);
 
-        let op: Operator = Operator::new(builder).unwrap().finish();
+        let op = Arc::new(Operator::new(builder).unwrap().finish());
         let counter = Counter::UsedSpace;
-        let v = counter.get_counter_with_lock(&op).await.unwrap();
+        let v = counter.get_counter_with_lock(op.clone()).await.unwrap();
         assert_eq!(v, 0);
-        let v = counter.increment(&op).await.unwrap();
+        let v = counter.increment(op.clone()).await.unwrap();
         assert_eq!(v, 1);
 
-        let (first, sec) = tokio::join!(counter.increment(&op), counter.increment(&op),);
+        let (first, sec) =
+            tokio::join!(counter.increment(op.clone()), counter.increment(op.clone()),);
         println!("{}, {}", first.unwrap(), sec.unwrap());
 
-        let v = counter.load(&op).await.unwrap();
+        let v = counter.load(op.clone()).await.unwrap();
         assert_eq!(v, 3);
     }
 }

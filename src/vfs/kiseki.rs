@@ -77,6 +77,13 @@ impl KisekiVFS {
         })
     }
 
+    pub async fn init(&self) -> Result<()> {
+        let format = self.meta.load_format(false).await?;
+
+        // TODO: handle the meta format
+        Ok(())
+    }
+
     pub async fn stat_fs<I: Into<Ino>>(&self, ctx: &MetaContext, ino: I) -> Result<FSStates> {
         let ino = ino.into();
         trace!("fs:stat_fs with ino {:?}", ino);

@@ -96,6 +96,10 @@ impl Filesystem for KisekiFuse {
     /// The kernel module connection can be configured using the KernelConfig object
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
         debug!("init kiseki...");
+        match self.runtime.block_on(self.vfs.init().in_current_span()) {
+            Ok(_) => {}
+            Err(_) => {}
+        }
         Ok(())
     }
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]

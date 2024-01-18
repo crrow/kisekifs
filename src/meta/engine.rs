@@ -3,23 +3,25 @@ use std::fmt::{Debug, Formatter};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 use std::sync::atomic::Ordering::Acquire;
+use std::sync::Arc;
 
 use crate::common::err::ToErrno;
 use crate::meta::config::{Format, MetaConfig};
 use crate::meta::types::{Ino, InternalNode, OpenFiles};
 use crate::meta::util::*;
 use crate::meta::{
-    Counter, Entry, EntryInfo, FSStates, FSStatesInner, InodeAttr, MetaContext, DOT, DOT_DOT,
-    ROOT_INO, TRASH_INODE, TRASH_INODE_NAME,
+    Counter, Entry, EntryInfo, FSStates, FSStatesInner, FreeID, InodeAttr, MetaContext, DOT,
+    DOT_DOT, INODE_BATCH, ROOT_INO, TRASH_INODE, TRASH_INODE_NAME,
 };
 
+use crate::meta::id_table::IdTable;
 use dashmap::DashMap;
 use fuser::FileType;
 use futures::TryStream;
 use libc::c_int;
 use opendal::{ErrorKind, Operator};
 use snafu::{ResultExt, Snafu};
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 use tracing::{error, trace, warn};
 
@@ -43,6 +45,8 @@ pub enum MetaError {
     ErrOpendalList { source: opendal::Error },
     #[snafu(display("failed to mknod: {kind}"))]
     ErrMknod { kind: libc::c_int },
+    #[snafu(display("failed to do counter: {source}"))]
+    ErrFailedToDoCounter { source: opendal::Error },
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -70,6 +74,7 @@ impl ToErrno for MetaError {
             MetaError::ErrOpendalList { .. } => libc::EIO,
             MetaError::ErrInvalidFormatVersion => libc::EBADF, // TODO: review
             MetaError::ErrMknod { kind } => *kind,
+            MetaError::ErrFailedToDoCounter { .. } => libc::EIO,
         }
     }
 }
@@ -81,26 +86,30 @@ pub struct MetaEngine {
     pub config: MetaConfig,
     format: RwLock<Format>,
     root: Ino,
-    operator: Operator,
+    operator: Arc<Operator>,
     sub_trash: Option<InternalNode>,
     open_files: OpenFiles,
     dir_parents: DashMap<Ino, Ino>,
     fs_states: FSStatesInner,
+    free_inodes: IdTable,
 }
 
 impl MetaEngine {
     pub fn open(config: MetaConfig) -> Result<MetaEngine> {
-        let op = Operator::via_map(config.scheme, config.scheme_config.clone())
-            .context(FailedToOpenOperatorSnafu)?;
+        let op = Arc::new(
+            Operator::via_map(config.scheme, config.scheme_config.clone())
+                .context(FailedToOpenOperatorSnafu)?,
+        );
         let m = MetaEngine {
             config: config.clone(),
             format: RwLock::new(Format::default()),
             root: ROOT_INO,
-            operator: op,
+            operator: op.clone(),
             sub_trash: None,
             open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
             dir_parents: DashMap::new(),
             fs_states: Default::default(),
+            free_inodes: IdTable::new(op.clone(), Counter::NextInode, INODE_BATCH),
         };
         Ok(m)
     }
@@ -109,7 +118,7 @@ impl MetaEngine {
     }
 
     /// Load loads the existing setting of a formatted volume from meta service.
-    pub fn load_format(&self, check_version: bool) -> Result<Format> {
+    pub async fn load_format(&self, check_version: bool) -> Result<Format> {
         let format_key_str = Format::format_key_str();
         let format_buf = self.operator.blocking().read(&format_key_str).context(
             ErrFailedToReadFromStoSnafu {
@@ -121,7 +130,7 @@ impl MetaEngine {
         if check_version {
             format.check_version()?;
         }
-        let mut guard = self.format.write().unwrap();
+        let mut guard = self.format.write().await;
         *guard = format.clone();
         Ok(format)
     }
@@ -153,19 +162,19 @@ impl MetaEngine {
         let (mut used_space, mut inodes) = match tokio::try_join!(
             timeout(
                 Duration::from_millis(150),
-                Counter::UsedSpace.load(&self.operator),
+                Counter::UsedSpace.load(self.operator.clone()),
             ),
             timeout(
                 Duration::from_millis(150),
-                Counter::TotalInodes.load(&self.operator),
+                Counter::TotalInodes.load(self.operator.clone()),
             )
         ) {
             Ok((used_space, total_inodes)) => {
                 // the inner sto may return error
                 no_error = used_space.is_ok() && total_inodes.is_ok();
                 (
-                    used_space.unwrap_or(self.fs_states.used_space.load(Acquire)),
-                    total_inodes.unwrap_or(self.fs_states.used_inodes.load(Acquire)),
+                    used_space.map_or(self.fs_states.used_space.load(Acquire), |x| x as i64),
+                    total_inodes.map_or(self.fs_states.used_inodes.load(Acquire), |x| x as i64),
                 )
             }
             Err(_) => {
@@ -184,7 +193,7 @@ impl MetaEngine {
         inodes = max(inodes, 0);
         let iused = inodes as u64;
 
-        let format = self.format.read().unwrap();
+        let format = self.format.read().await;
 
         let total_space = if format.capacity > 0 {
             min(format.capacity, used_space as u64)
@@ -546,7 +555,7 @@ impl MetaEngine {
             })
     }
 
-    pub async fn do_mknod(
+    async fn do_mknod(
         &self,
         ctx: &MetaContext,
         parent: Ino,
@@ -557,7 +566,20 @@ impl MetaEngine {
         rdev: u32,
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
-        if parent.is_trash() {}
+        let inode = if parent.is_trash() {
+            let next = Counter::NextTrash
+                .increment(self.operator.clone())
+                .await
+                .context(ErrFailedToDoCounterSnafu)?;
+            TRASH_INODE + Ino::from(next)
+        } else {
+            Ino::from(
+                self.free_inodes
+                    .next()
+                    .await
+                    .context(ErrFailedToDoCounterSnafu)?,
+            )
+        };
         todo!()
     }
 }
