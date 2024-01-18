@@ -1,19 +1,27 @@
-use crate::common::err::ToErrno;
-use crate::fuse::config::FuseConfig;
-use crate::meta::types::{Entry, Ino};
-use crate::meta::{MetaContext, MAX_NAME_LENGTH};
-use crate::vfs::KisekiVFS;
+use std::{
+    cmp::max,
+    ffi::{OsStr, OsString},
+    fmt::Display,
+};
+
 use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyDirectory, ReplyEntry, ReplyOpen, ReplyStatfs,
     Request,
 };
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
-use std::cmp::max;
-use std::ffi::{OsStr, OsString};
-use std::fmt::Display;
 use tokio::runtime;
 use tracing::{debug, field, info, instrument, trace, Instrument};
+
+use crate::{
+    common::err::ToErrno,
+    fuse::config::FuseConfig,
+    meta::{
+        types::{Entry, Ino},
+        MetaContext, MAX_NAME_LENGTH,
+    },
+    vfs::KisekiVFS,
+};
 
 const BLOCK_SIZE: u32 = 4096;
 
@@ -93,7 +101,8 @@ impl KisekiFuse {
 impl Filesystem for KisekiFuse {
     /// Initialize filesystem.
     /// Called before any other filesystem method.
-    /// The kernel module connection can be configured using the KernelConfig object
+    /// The kernel module connection can be configured using the KernelConfig
+    /// object
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
         debug!("init kiseki...");
         match self.runtime.block_on(self.vfs.init().in_current_span()) {
@@ -165,7 +174,7 @@ impl Filesystem for KisekiFuse {
 
         reply.statfs(
             // BLOCKS: Number of free blocks available for use.
-            /* blocks:*/
+            // blocks:
             max(state.total_space / BLOCK_SIZE as u64, 1),
             // bfree: Number of free blocks available for use.
             state.avail_space / BLOCK_SIZE as u64,
@@ -187,8 +196,9 @@ impl Filesystem for KisekiFuse {
     // Open directory.
     // Unless the 'default_permissions' mount option is given,
     // this method should check if opendir is permitted for this directory.
-    // Optionally opendir may also return an arbitrary filehandle in the fuse_file_info structure,
-    // which will be passed to readdir, releasedir and fsyncdir.
+    // Optionally opendir may also return an arbitrary filehandle in the
+    // fuse_file_info structure, which will be passed to readdir, releasedir and
+    // fsyncdir.
     #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
         let ctx = MetaContext::default();
@@ -224,8 +234,8 @@ impl Filesystem for KisekiFuse {
 
         for entry in entries.drain(..) {
             todo!()
-            // if !reply.add(entry.inode.into(), entry.offset, entry.kind, entry.name) {
-            //     break;
+            // if !reply.add(entry.inode.into(), entry.offset, entry.kind,
+            // entry.name) {     break;
             // }
         }
         reply.ok();

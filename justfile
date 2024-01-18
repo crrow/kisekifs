@@ -2,6 +2,9 @@
 @help:
     just -l
 
+@fmt:
+    cargo +nightly fmt --all
+
 # Install workspace tools
 @install-tools:
     cargo install cargo-nextest

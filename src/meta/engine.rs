@@ -1,92 +1,291 @@
-use std::cmp::{max, min};
-use std::fmt::{Debug, Formatter};
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path};
-use std::sync::atomic::Ordering::Acquire;
-use std::sync::Arc;
-
-use crate::common::err::ToErrno;
-use crate::meta::config::{Format, MetaConfig};
-use crate::meta::types::{Ino, InternalNode, OpenFiles};
-use crate::meta::util::*;
-use crate::meta::{
-    Counter, Entry, EntryInfo, FSStates, FSStatesInner, FreeID, InodeAttr, MetaContext, DOT,
-    DOT_DOT, INODE_BATCH, ROOT_INO, TRASH_INODE, TRASH_INODE_NAME,
+use std::{
+    cmp::{max, min},
+    collections::HashMap,
+    fmt::{Debug, Formatter},
+    os::unix::ffi::OsStrExt,
+    path::{Component, Path},
+    sync::{
+        atomic::{AtomicI64, Ordering::Acquire},
+        Arc,
+    },
 };
 
-use crate::meta::id_table::IdTable;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
 use futures::TryStream;
+use lazy_static::lazy_static;
 use libc::c_int;
 use opendal::{ErrorKind, Operator};
 use snafu::{ResultExt, Snafu};
-use tokio::sync::RwLock;
-use tokio::time::{timeout, Duration};
+use tokio::{
+    sync::RwLock,
+    time::{timeout, Duration, Instant},
+};
 use tracing::{error, trace, warn};
 
-#[derive(Debug, Snafu)]
-pub enum MetaError {
-    #[snafu(display("invalid format version"))]
-    ErrInvalidFormatVersion,
-    #[snafu(display("failed to parse scheme: {}: {}", got, source))]
-    FailedToParseScheme { source: opendal::Error, got: String },
-    #[snafu(display("failed to open operator: {}", source))]
-    FailedToOpenOperator { source: opendal::Error },
-    #[snafu(display("bad access permission for inode:{inode}, want:{want}, grant:{grant}"))]
-    ErrBadAccessPerm { inode: Ino, want: u8, grant: u8 },
-    #[snafu(display("inode {inode} is not a directory"))]
-    ErrNotDir { inode: Ino },
-    #[snafu(display("failed to deserialize: {source}"))]
-    ErrBincodeDeserializeFailed { source: bincode::Error },
-    #[snafu(display("failed to read {key} from sto: {source}"))]
-    ErrFailedToReadFromSto { key: String, source: opendal::Error },
-    #[snafu(display("failed to list by opendal: {source}"))]
-    ErrOpendalList { source: opendal::Error },
-    #[snafu(display("failed to mknod: {kind}"))]
-    ErrMknod { kind: libc::c_int },
-    #[snafu(display("failed to do counter: {source}"))]
-    ErrFailedToDoCounter { source: opendal::Error },
+use crate::{
+    common::err::ToErrno,
+    meta::{
+        config::{Format, MetaConfig},
+        err::*,
+        internal_nodes::{InternalNode, TRASH_INODE_NAME},
+        types::{Entry, EntryInfo, FSStates, Ino, InodeAttr, ROOT_INO, TRASH_INODE},
+        util::*,
+        MetaContext, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
+    },
+};
+
+// Slice is a slice of a chunk.
+// Multiple slices could be combined together as a chunk.
+pub struct Slice {
+    id: u64,
+    size: u32,
+    off: u32,
+    len: u32,
 }
 
-impl From<MetaError> for crate::common::err::Error {
-    fn from(value: MetaError) -> Self {
-        Self::MetaError { source: value }
-    }
+pub(crate) const INODE_BATCH: u64 = 1 << 10;
+
+lazy_static! {
+    static ref COUNTER_LOCKERS: DashMap<Counter, RwLock<()>> = {
+        let mut map = DashMap::new();
+        for counter in COUNTER_ENUMS.iter() {
+            map.insert(counter.clone(), RwLock::new(()));
+        }
+        map
+    };
 }
 
-// TODO: review the errno mapping
-impl ToErrno for MetaError {
-    fn to_errno(&self) -> c_int {
+// FIXME: use a better way.
+const COUNTER_ENUMS: [Counter; 5] = [
+    Counter::UsedSpace,
+    Counter::TotalInodes,
+    Counter::LegacySessions,
+    Counter::NextTrash,
+    Counter::NextInode,
+];
+const COUNTER_STRINGS: [&str; 5] = [
+    "used_space",
+    "total_inodes",
+    "legacy_sessions",
+    "next_trash",
+    "next_inode",
+];
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
+pub(crate) enum Counter {
+    UsedSpace,
+    TotalInodes,
+    LegacySessions,
+    NextTrash,
+    NextInode,
+}
+
+impl Counter {
+    pub fn to_str(&self) -> &'static str {
         match self {
-            MetaError::FailedToParseScheme { .. } => libc::EINVAL,
-            MetaError::FailedToOpenOperator { .. } => libc::EIO,
-            MetaError::ErrBadAccessPerm { .. } => libc::EACCES,
-            MetaError::ErrNotDir { .. } => libc::ENOTDIR,
-            MetaError::ErrBincodeDeserializeFailed { .. } => libc::EIO,
-            MetaError::ErrFailedToReadFromSto { source, .. } => match source.kind() {
-                ErrorKind::NotFound => libc::ENOENT,
-                _ => {
-                    error!("failed to read from sto: {}", source);
-                    libc::EIO
-                }
-            },
-            MetaError::ErrOpendalList { .. } => libc::EIO,
-            MetaError::ErrInvalidFormatVersion => libc::EBADF, // TODO: review
-            MetaError::ErrMknod { kind } => *kind,
-            MetaError::ErrFailedToDoCounter { .. } => libc::EIO,
+            Counter::UsedSpace => COUNTER_STRINGS[0],
+            Counter::TotalInodes => COUNTER_STRINGS[1],
+            Counter::LegacySessions => COUNTER_STRINGS[2],
+            Counter::NextTrash => COUNTER_STRINGS[3],
+            Counter::NextInode => COUNTER_STRINGS[4],
         }
     }
+    // FIXME: do we actually need it ?
+    async fn get_counter_with_lock(
+        &self,
+        operator: Arc<Operator>,
+    ) -> std::result::Result<i64, opendal::Error> {
+        let counter_key = self.generate_sto_key();
+        let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
+        let locker_ref = locker_ref.value();
+        let guard = locker_ref.read().await;
+        let counter = match operator.read(&counter_key).await {
+            Ok(ref buf) => buf
+                .as_slice()
+                .read_i64::<LittleEndian>()
+                .expect("read counter error"),
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    0
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        Ok(counter)
+    }
+    pub async fn load(&self, operator: Arc<Operator>) -> std::result::Result<u64, opendal::Error> {
+        let counter_key = self.generate_sto_key();
+        let counter = match operator.read(&counter_key).await {
+            Ok(ref buf) => {
+                let v = buf
+                    .as_slice()
+                    .read_u64::<LittleEndian>()
+                    .expect("read counter error");
+                v
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    0
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        Ok(counter)
+    }
+    pub fn generate_sto_key(&self) -> String {
+        format!("C{}", self.to_str())
+    }
+    pub async fn increment(
+        &self,
+        operator: Arc<Operator>,
+    ) -> std::result::Result<u64, opendal::Error> {
+        self.increment_by(operator, 1).await
+    }
+    pub async fn increment_by(
+        &self,
+        operator: Arc<Operator>,
+        by: u64,
+    ) -> std::result::Result<u64, opendal::Error> {
+        let counter_key = self.generate_sto_key();
+        let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
+        let locker_ref = locker_ref.value();
+        let guard = locker_ref.write().await;
+        let counter = match operator.read(&counter_key).await {
+            Ok(ref buf) => {
+                let v: u64 = buf
+                    .as_slice()
+                    .read_u64::<LittleEndian>()
+                    .expect("read counter error");
+                v
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    0
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        let counter = counter + by;
+        let mut buf = vec![0u8; 8];
+        buf.as_mut_slice()
+            .write_u64::<LittleEndian>(counter)
+            .unwrap();
+        operator.write(&counter_key, buf).await?;
+        Ok(counter)
+    }
+
+    pub async fn load_counter(&self) {}
 }
 
-pub type Result<T> = std::result::Result<T, MetaError>;
+/// A table for allocating inode numbers.
+/// It starts at 2 since the root inode is 1.
+pub struct IdTable {
+    next_max_pair: RwLock<(u64, u64)>,
+    operator: Arc<Operator>,
+    counter: Counter,
+    step: u64,
+}
+
+impl IdTable {
+    /// Return a new empty `IdTable`.
+    pub fn new(operator: Arc<Operator>, counter: Counter, step: u64) -> Self {
+        Self {
+            next_max_pair: RwLock::new((0, 0)),
+            operator,
+            counter,
+            step,
+        }
+    }
+
+    /// Return the next unused ID from the table.
+    pub async fn next(&self) -> std::result::Result<u64, opendal::Error> {
+        let mut next_max_pair = self.next_max_pair.write().await;
+        if next_max_pair.0 >= next_max_pair.1 {
+            let new_max = self
+                .counter
+                .increment_by(self.operator.clone(), self.step)
+                .await?;
+            next_max_pair.0 = new_max - self.step;
+            next_max_pair.1 = new_max;
+        }
+        let mut next = next_max_pair.0;
+        next_max_pair.0 += 1;
+        while next <= 1 {
+            next = next_max_pair.0;
+            next_max_pair.0 += 1;
+        }
+        Ok(next)
+    }
+}
+
+pub struct OpenFile {
+    pub attr: InodeAttr,
+    pub reference_count: usize,
+    pub last_check: std::time::Instant,
+    pub chunks: HashMap<u32, Vec<Slice>>,
+}
+
+pub struct OpenFiles {
+    ttl: Duration,
+    limit: usize,
+    files: DashMap<Ino, OpenFile>,
+    // TODO: background clean up
+}
+
+impl OpenFiles {
+    pub(crate) fn new(ttl: Duration, limit: usize) -> Self {
+        Self {
+            ttl,
+            limit,
+            files: Default::default(),
+        }
+    }
+
+    pub(crate) fn check(&self, ino: Ino) -> Option<InodeAttr> {
+        self.files.get(&ino).and_then(|f| {
+            if f.last_check.elapsed() < self.ttl {
+                Some(f.attr.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn update(&self, ino: Ino, attr: &mut InodeAttr) -> bool {
+        self.files
+            .get_mut(&ino)
+            .and_then(|mut open_file| {
+                if attr.mtime != open_file.attr.mtime {
+                    open_file.chunks = HashMap::new();
+                } else {
+                    attr.keep_cache = open_file.attr.keep_cache;
+                }
+                open_file.attr = attr.clone();
+                open_file.last_check = std::time::Instant::now();
+                return Some(());
+            })
+            .is_some()
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FSStatesInner {
+    pub(crate) new_space: AtomicI64,
+    pub(crate) new_inodes: AtomicI64,
+    pub(crate) used_space: AtomicI64,
+    pub(crate) used_inodes: AtomicI64,
+}
 
 /// MetaEngine describes a meta service for file system.
 pub struct MetaEngine {
     pub config: MetaConfig,
     format: RwLock<Format>,
     root: Ino,
-    operator: Arc<Operator>,
+    pub(crate) operator: Arc<Operator>,
     sub_trash: Option<InternalNode>,
     open_files: OpenFiles,
     dir_parents: DashMap<Ino, Ino>,
@@ -232,7 +431,8 @@ impl MetaEngine {
         )
     }
 
-    /// Lookup returns the inode and attributes for the given entry in a directory.
+    /// Lookup returns the inode and attributes for the given entry in a
+    /// directory.
     pub async fn lookup(
         &self,
         ctx: &MetaContext,
@@ -290,8 +490,9 @@ impl MetaEngine {
         return Ok((inode, attr));
     }
 
-    // Verifies if the requested access mode (mmask) is permitted for the given user or group based on the file's actual permissions (mode).
-    // Ensures access control based on file permissions.
+    // Verifies if the requested access mode (mmask) is permitted for the given user
+    // or group based on the file's actual permissions (mode). Ensures access
+    // control based on file permissions.
     pub fn check_root(&self, inode: Ino) -> Ino {
         if inode.is_zero() {
             ROOT_INO // force using Root inode
@@ -313,16 +514,19 @@ impl MetaEngine {
         let mut attr = if inode.is_trash() || inode.is_root() {
             // call do_get_attr with timeout
             //
-            // In the timeout case, we give the root and trash inodes a default hard code value.
+            // In the timeout case, we give the root and trash inodes a default hard code
+            // value.
             //
-            // Availability: The Root and Trash inodes are critical for filesystem operations.
-            // Providing default values guarantees that they're always accessible, even under slow or unreliable conditions.
-            // Consistency: Ensuring consistent behavior for these inodes, even with timeouts, helps maintain filesystem integrity.
-            timeout(Duration::from_millis(300), self.do_get_attr(inode))
+            // Availability: The Root and Trash inodes are critical for filesystem
+            // operations. Providing default values guarantees that they're
+            // always accessible, even under slow or unreliable conditions.
+            // Consistency: Ensuring consistent behavior for these inodes, even with
+            // timeouts, helps maintain filesystem integrity.
+            timeout(Duration::from_millis(300), self.sto_get_attr(inode))
                 .await
                 .unwrap_or(Ok(InodeAttr::hard_code_inode_attr(inode.is_trash())))?
         } else {
-            self.do_get_attr(inode).await?
+            self.sto_get_attr(inode).await?
         };
 
         // update cache
@@ -333,31 +537,8 @@ impl MetaEngine {
         Ok(attr)
     }
 
-    async fn do_get_attr(&self, inode: Ino) -> Result<InodeAttr> {
-        // TODO: do we need transaction ?
-        let inode_key = inode.generate_key_str();
-        let attr_buf =
-            self.operator
-                .read(&inode_key)
-                .await
-                .context(ErrFailedToReadFromStoSnafu {
-                    key: inode_key.to_string(),
-                })?;
-        let attr: InodeAttr =
-            bincode::deserialize(&attr_buf).context(ErrBincodeDeserializeFailedSnafu)?;
-        Ok(attr)
-    }
-
     async fn do_lookup(&self, parent: Ino, name: &str) -> Result<(Ino, InodeAttr)> {
-        let entry_key = EntryInfo::generate_entry_key_str(parent, name);
-        let entry_buf = self
-            .operator
-            .read(&entry_key)
-            .await
-            .context(ErrFailedToReadFromStoSnafu { key: entry_key })?;
-
-        let entry_info =
-            EntryInfo::parse_from(&entry_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        let entry_info = self.sto_get_entry_info(parent, name).await?;
         let inode = entry_info.inode;
         let inode_key = inode.generate_key_str();
         let attr_buf = self
@@ -375,7 +556,8 @@ impl MetaEngine {
         todo!()
     }
 
-    // Readdir returns all entries for given directory, which include attributes if plus is true.
+    // Readdir returns all entries for given directory, which include attributes if
+    // plus is true.
     pub async fn read_dir(&self, ctx: &MetaContext, inode: Ino, plus: bool) -> Result<Vec<Entry>> {
         trace!(dir=?inode, "readdir");
         match self.read_dir_inner(ctx, inode, plus).await {
@@ -600,6 +782,83 @@ impl MetaEngine {
             }
         };
 
+        // FIXME: we need transaction here
+        let mut parent_attr = self.sto_get_attr(parent).await?;
+        if !parent_attr.is_dir() {
+            return Err(MetaError::ErrMknod {
+                kind: libc::ENOTDIR,
+            })?;
+        }
+        // check if the parent is trash
+        if parent_attr.parent.is_trash() {
+            return Err(MetaError::ErrMknod { kind: libc::ENOENT })?;
+        }
+
+        // check if the parent have the permission
+        access(ctx, parent, &parent_attr, MODE_MASK_W)?;
+        if parent_attr.juicefs_flags & Flag::Immutable as u8 != 0 {
+            return Err(MetaError::ErrMknod { kind: libc::EPERM })?;
+        }
+
+        // check if the entry already exists
+        match self.sto_get_entry_info(parent, name).await {
+            Ok(found) => return Err(MetaError::ErrMknod { kind: libc::EEXIST }),
+            Err(e) => {
+                if e.to_errno() != libc::ENOENT {
+                    return Err(e)?;
+                }
+            }
+        };
+
+        // check if we need to update the parent
+        let mut update_parent_attr = false;
+        if !parent.is_trash() && typ == FileType::Directory {
+            parent_attr.set_nlink(parent_attr.nlink + 1);
+            if self.config.skip_dir_nlink <= 0 {
+                let now = std::time::SystemTime::now();
+                parent_attr.mtime = now;
+                parent_attr.ctime = now;
+                update_parent_attr = true;
+            }
+        };
+
+        let now = std::time::SystemTime::now();
+        attr.set_atime(now);
+        attr.set_mtime(now);
+        attr.set_ctime(now);
+
+        #[cfg(target_os = "darwin")]
+        {
+            attr.set_gid(parent_attr.gid);
+        }
+
+        // TODO: review the logic here
+        #[cfg(target_os = "linux")]
+        {
+            if parent_attr.perm & 0o2000 != 0 {
+                attr.set_gid(parent_attr.gid);
+            }
+            if typ == FileType::Directory {
+                attr.perm |= 02000;
+            } else if attr.perm & 02010 == 02010 && ctx.uid != 0 {
+                if !ctx.gid_list.contains(&parent_attr.gid) {
+                    attr.perm &= !02010;
+                }
+            }
+        }
+
+        self.sto_set_entry_info(parent, name, EntryInfo::new(inode, typ))
+            .await?;
+        self.sto_set_attr(inode, attr).await?;
+        if update_parent_attr {
+            self.sto_set_attr(parent, parent_attr).await?;
+        }
+        if typ == FileType::Symlink {
+            self.sto_set_sym(inode, path).await?;
+        } else if typ == FileType::Directory {
+            self.sto_set_dir_stat(inode).await?;
+        }
+
         todo!()
     }
 }
@@ -640,8 +899,9 @@ impl Debug for MetaEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn path_components() {
@@ -649,5 +909,41 @@ mod tests {
         for c in p.components() {
             println!("{:?}", c);
         }
+    }
+    #[tokio::test]
+    async fn counter() {
+        let mut builder = opendal::services::Memory::default();
+        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir_path = tempdir.as_ref().to_str().unwrap();
+        builder.root(tempdir_path);
+
+        let op = Arc::new(Operator::new(builder).unwrap().finish());
+        let counter = Counter::UsedSpace;
+        let v = counter.get_counter_with_lock(op.clone()).await.unwrap();
+        assert_eq!(v, 0);
+        let v = counter.increment(op.clone()).await.unwrap();
+        assert_eq!(v, 1);
+
+        let (first, sec) =
+            tokio::join!(counter.increment(op.clone()), counter.increment(op.clone()),);
+        println!("{}, {}", first.unwrap(), sec.unwrap());
+
+        let v = counter.load(op.clone()).await.unwrap();
+        assert_eq!(v, 3);
+    }
+
+    #[tokio::test]
+    async fn id_table_alloc() {
+        let mut builder = opendal::services::Memory::default();
+        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir_path = tempdir.as_ref().to_str().unwrap();
+        builder.root(tempdir_path);
+
+        let op = Arc::new(Operator::new(builder).unwrap().finish());
+
+        let counter = Counter::NextInode;
+        let id_table = IdTable::new(op, counter, INODE_BATCH);
+        let x = id_table.next().await.unwrap();
+        assert_eq!(x, 2);
     }
 }

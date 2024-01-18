@@ -1,21 +1,21 @@
-/*
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use crate::sync::{Arc, Mutex};
+use crate::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 /// A single metric
 #[derive(Debug)]
@@ -59,8 +59,8 @@ impl Metric {
         metrics::Histogram::from_arc(inner.clone())
     }
 
-    /// Generate a string representation of this metric, or None if the metric has had no values
-    /// emitted since the last call to this function.
+    /// Generate a string representation of this metric, or None if the metric
+    /// has had no values emitted since the last call to this function.
     pub fn fmt_and_reset(&self) -> Option<String> {
         match self {
             Metric::Counter(inner) => {
@@ -113,18 +113,14 @@ impl ValueAndCount {
     pub fn load_and_reset(&self) -> Option<(u64, usize)> {
         let sum = self.sum.swap(0, Ordering::SeqCst);
         let n = self.n.swap(0, Ordering::SeqCst);
-        if n == 0 {
-            None
-        } else {
-            Some((sum, n))
-        }
+        if n == 0 { None } else { Some((sum, n)) }
     }
 }
 
 /// An atomic gauge.
 ///
-/// Gauges are floats but there's no atomic floats in std, so we stuff the float into an AtomicU64
-/// by converting to/from the bit representation.
+/// Gauges are floats but there's no atomic floats in std, so we stuff the float
+/// into an AtomicU64 by converting to/from the bit representation.
 #[derive(Debug, Default)]
 pub struct AtomicGauge {
     bits: AtomicU64,
@@ -155,11 +151,7 @@ impl AtomicGauge {
 
     pub fn load(&self) -> Option<f64> {
         let value = f64::from_bits(self.bits.load(Ordering::SeqCst));
-        if value == 0.0 {
-            None
-        } else {
-            Some(value)
-        }
+        if value == 0.0 { None } else { Some(value) }
     }
 }
 
@@ -187,8 +179,8 @@ impl Histogram {
         }
     }
 
-    /// If this histogram has any data, run the closure, reset the histogram, and return the closure
-    /// result. Otherwise return None.
+    /// If this histogram has any data, run the closure, reset the histogram,
+    /// and return the closure result. Otherwise return None.
     pub fn run_and_reset<T>(
         &self,
         f: impl FnOnce(&hdrhistogram::Histogram<u64>) -> T,
