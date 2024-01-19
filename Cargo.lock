@@ -1130,6 +1130,7 @@ dependencies = [
  "metrics",
  "opendal",
  "procfs",
+ "regex",
  "serde",
  "serde_json",
  "snafu",
