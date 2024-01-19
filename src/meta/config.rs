@@ -1,3 +1,5 @@
+use clap::ValueEnum;
+use std::fmt::{Display, Formatter};
 use std::{collections::HashMap, path::PathBuf, str::FromStr, time::Duration};
 
 use opendal::Scheme;
@@ -127,32 +129,68 @@ impl MetaConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Format {
-    pub name: String,
-    pub uuid: String,
-    pub storage: String,
-    pub storage_class: String,
-    pub bucket: String,
-    pub access_key: String,
-    pub secret_key: String,
-    pub session_token: String,
-    pub block_size: u64,
-    pub compression: String,
-    pub shards: u64,
-    pub hash_prefix: bool,
-    pub capacity: u64,
-    pub inodes: u64,
-    pub encrypt_key: String,
-    pub encrypt_algo: String,
-    pub key_encrypted: bool,
-    pub upload_limit: isize,
-    pub download_limit: isize,
-    pub trash_days: isize,
-    pub meta_version: isize,
-    pub min_client_version: String,
-    pub max_client_version: String,
+    // unimplemented
+    pub uuid: Option<String>,
+    pub storage: Option<String>,
+    pub storage_class: Option<String>,
+    pub bucket: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub session_token: Option<String>,
+    pub shards: Option<u64>,
+    pub hash_prefix: Option<bool>,
+    pub encrypt_key: Option<String>,
+    pub encrypt_algo: Option<String>,
+    pub key_encrypted: Option<bool>,
+    pub upload_limit: Option<isize>,
+    pub download_limit: Option<isize>,
+    pub min_client_version: Option<String>,
+    pub max_client_version: Option<String>,
+
     pub dir_stats: bool,
+    pub meta_version: usize,
+    pub name: String,
+    pub block_size: u64,
+    pub compression: Option<Compression>,
+    pub capacity_in_bytes: u64,
+    pub inodes: u64,
+    pub trash_days: Option<u64>,
+}
+
+const MIN_CLIENT_VERSION: &str = "1";
+const MAX_META_VERSION: usize = 1;
+
+impl Default for Format {
+    fn default() -> Self {
+        Self {
+            uuid: None,
+            storage: None,
+            storage_class: None,
+            bucket: None,
+            access_key: None,
+            secret_key: None,
+            session_token: None,
+            shards: None,
+            hash_prefix: None,
+            encrypt_key: None,
+            encrypt_algo: None,
+            key_encrypted: None,
+            upload_limit: None,
+            download_limit: None,
+            min_client_version: None,
+            max_client_version: None,
+            meta_version: MAX_META_VERSION,
+            dir_stats: true, // TODO: review it
+            name: "".to_string(),
+            block_size: 0,
+            compression: None,
+            capacity_in_bytes: 0,
+            inodes: 0,
+            trash_days: None,
+        }
+    }
 }
 
 impl Format {
@@ -168,6 +206,21 @@ impl Format {
 
     pub fn check_version(&self) -> std::result::Result<(), MetaError> {
         return Ok(());
+    }
+}
+
+#[derive(ValueEnum, Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Compression {
+    Lz4,
+    Zstd,
+}
+
+impl Display for Compression {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Compression::Lz4 => write!(f, "lz4"),
+            Compression::Zstd => write!(f, "zstd"),
+        }
     }
 }
 

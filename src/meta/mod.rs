@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 mod config;
-pub use config::MetaConfig;
+pub use config::{Compression, Format, MetaConfig};
 pub mod engine;
 mod err;
 pub use err::MetaError;

@@ -39,6 +39,7 @@ supports-color = "2.1.0"
 futures = "0.3.30"
 tempfile = "3.9.0"
 regex = "1.10.2"
+clap-num = "1.0.2"
 
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}

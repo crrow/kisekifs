@@ -22,7 +22,7 @@ use tokio::{
     sync::RwLock,
     time::{timeout, Duration, Instant},
 };
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::{
     common::err::ToErrno,
@@ -315,6 +315,11 @@ impl MetaEngine {
         };
         Ok(m)
     }
+    // Init is used to initialize a meta service.
+    pub async fn init(&self, format: Format, force: bool) -> Result<()> {
+        info!("do init");
+        Ok(())
+    }
     pub fn dump_config(&self) -> MetaConfig {
         self.config.clone()
     }
@@ -401,8 +406,8 @@ impl MetaEngine {
 
         let format = self.format.read().await;
 
-        let total_space = if format.capacity > 0 {
-            min(format.capacity, used_space as u64)
+        let total_space = if format.capacity_in_bytes > 0 {
+            min(format.capacity_in_bytes, used_space as u64)
         } else {
             let mut v = 1 << 50;
             let us = used_space as u64;
