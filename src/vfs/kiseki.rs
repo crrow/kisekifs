@@ -12,13 +12,12 @@ use snafu::prelude::*;
 use tokio::{sync::Mutex, time::Instant};
 use tracing::{debug, info, instrument, trace};
 
-use crate::meta::internal_nodes::CONFIG_INODE_NAME;
 use crate::{
     common,
     common::err::ToErrno,
     meta::{
         engine::{access, MetaEngine},
-        internal_nodes::{PreInternalNodes, CONTROL_INODE_NAME},
+        internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
         types::*,
         MetaContext, MODE_MASK_R, MODE_MASK_W,
     },
@@ -76,7 +75,7 @@ impl KisekiVFS {
         let config_buf = bincode::serialize(&vfs_config).expect("unable to serialize vfs config");
         config_inode.0.attr.set_length(config_buf.len() as u64);
         if let Some(_) = &meta.config.sub_dir {
-            //don't show trash directory
+            // don't show trash directory
             internal_nodes.remove_trash_node();
         }
         if vfs_config.prefix_internal {

@@ -6,7 +6,6 @@ authors = ["Ryan Tan"]
 license = "Apache-2.0"
 description = "A fuse filesystem"
 
-
 [[bin]]
 name = "kiseki"
 path = "src/bin/kiseki.rs"

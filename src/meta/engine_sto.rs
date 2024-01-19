@@ -1,7 +1,7 @@
-use byteorder::{LittleEndian, WriteBytesExt};
-use dashmap::mapref::one::RefMut;
-use snafu::ResultExt;
 use std::sync::atomic::Ordering;
+
+use byteorder::{LittleEndian, WriteBytesExt};
+use snafu::ResultExt;
 
 use crate::meta::{
     engine::MetaEngine,
