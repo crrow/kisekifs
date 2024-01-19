@@ -237,11 +237,14 @@ impl Filesystem for KisekiFuse {
             }
         };
 
-        for entry in entries.drain(..) {
-            todo!()
-            // if !reply.add(entry.inode.into(), entry.offset, entry.kind,
-            // entry.name) {     break;
-            // }
+        let mut offset = offset + 1;
+        debug!("get entry length: { }", entries.len());
+        for entry in entries.iter() {
+            if reply.add(entry.inode.into(), offset, entry.attr.kind, &entry.name) {
+                break;
+            } else {
+                offset += 1;
+            }
         }
         reply.ok();
     }

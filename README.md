@@ -1,4 +1,4 @@
-# Kisser
+# Kiseki
 
 Kiseki is a Rust port of JuiceFS, a distributed file 
 system known for its simplicity and efficiency.
@@ -21,17 +21,3 @@ understanding of their design and implementation.
 ## Disclaimer 
 Kiseki is an independent learning project 
 and is not endorsed by or affiliated with the Juice company.
-
-## Roadmap
-- [ ] Fuse Client
-  - [ ] Lookup
-- [ ] Meta Engine
-- [ ] Chunk Server
-- [ ] CI/CD
-  - [ ] Github Actions
-- [ ] Metrics
-  -  [ ] Prometheus
-- [ ] Posix Test
-- [ ] Benchmark
-- [ ] Vagrant
-- [ ] Terraform

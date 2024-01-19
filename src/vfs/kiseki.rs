@@ -234,11 +234,9 @@ impl KisekiVFS {
         offset: i64,
     ) -> Result<Vec<Entry>> {
         let inode = inode.into();
-        trace!(
+        debug!(
             "fs:readdir with ino {:?} fh {:?} offset {:?}",
-            inode,
-            fh,
-            offset
+            inode, fh, offset
         );
 
         let h = self
@@ -248,10 +246,24 @@ impl KisekiVFS {
         let mut h = h.lock().await;
         if h.children.is_empty() || offset == 0 {
             h.read_at = Some(Instant::now());
-            let entries = self.meta.read_dir(ctx, inode, true).await?;
+            let children = match self.meta.read_dir(ctx, inode, true).await {
+                Ok(children) => children,
+                Err(e) => {
+                    if e.to_errno() == libc::EACCES {
+                        let children = self.meta.read_dir(ctx, inode, false).await?;
+                        children
+                    } else {
+                        return Err(e)?;
+                    }
+                }
+            };
+            h.children = children;
         }
 
-        todo!()
+        if (offset as usize) < h.children.len() {
+            return Ok(h.children.drain(offset as usize..).collect::<Vec<_>>());
+        }
+        return Ok(Vec::new());
     }
 
     fn find_handle(&self, ino: Ino, fh: u64) -> Option<Arc<Mutex<Handle>>> {
