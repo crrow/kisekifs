@@ -10,14 +10,14 @@ use fuser::FileType;
 use libc::c_int;
 use snafu::prelude::*;
 use tokio::{sync::Mutex, time::Instant};
-use tracing::trace;
+use tracing::{debug, info, instrument, trace};
 
 use crate::{
     common,
     common::err::ToErrno,
     meta::{
         engine::{access, MetaEngine},
-        internal_nodes::{PreInternalNodes, CONTROL_INODE_NAME},
+        internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
         types::*,
         MetaContext, MODE_MASK_R, MODE_MASK_W,
     },
@@ -67,11 +67,23 @@ impl Display for KisekiVFS {
 
 impl KisekiVFS {
     pub fn create(vfs_config: VFSConfig, meta: MetaEngine) -> Result<Self> {
-        Ok(Self {
-            internal_nodes: PreInternalNodes::new((
-                vfs_config.entry_timeout,
-                vfs_config.dir_entry_timeout,
-            )),
+        let mut internal_nodes =
+            PreInternalNodes::new((vfs_config.entry_timeout, vfs_config.dir_entry_timeout));
+        let config_inode = internal_nodes
+            .get_mut_internal_node_by_name(CONFIG_INODE_NAME)
+            .unwrap();
+        let config_buf = bincode::serialize(&vfs_config).expect("unable to serialize vfs config");
+        config_inode.0.attr.set_length(config_buf.len() as u64);
+        if let Some(_) = &meta.config.sub_dir {
+            // don't show trash directory
+            internal_nodes.remove_trash_node();
+        }
+        if vfs_config.prefix_internal {
+            internal_nodes.add_prefix();
+        }
+
+        let vfs = Self {
+            internal_nodes,
             config: vfs_config,
             meta,
             writer: DataWriter::default(),
@@ -79,11 +91,19 @@ impl KisekiVFS {
             modified_at: DashMap::new(),
             _next_fh: AtomicU64::new(1),
             handles: DashMap::new(),
-        })
+        };
+
+        // TODO: spawn a background task to clean up modified time.
+
+        Ok(vfs)
     }
 
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(&self, ctx: &MetaContext) -> Result<()> {
+        debug!("vfs:init");
         let format = self.meta.load_format(false).await?;
+        if let Some(sub_dir) = &self.meta.config.sub_dir {
+            self.meta.chroot(ctx, sub_dir).await?;
+        }
 
         // TODO: handle the meta format
         Ok(())
@@ -143,8 +163,14 @@ impl KisekiVFS {
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
-        trace!("vfs:get_attr with inode {:?}", inode);
+        debug!("vfs:get_attr with inode {:?}", inode);
+        if inode.is_special() {
+            if let Some(n) = self.internal_nodes.get_internal_node(inode) {
+                return Ok(n.get_attr());
+            }
+        }
         let attr = self.meta.get_attr(inode).await?;
+        debug!("vfs:get_attr with inode {:?} attr {:?}", inode, attr);
         Ok(attr)
     }
 

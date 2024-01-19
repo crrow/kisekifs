@@ -1,26 +1,90 @@
-use byteorder::{LittleEndian, WriteBytesExt};
-use snafu::ResultExt;
+use std::sync::atomic::Ordering;
 
+use byteorder::{LittleEndian, WriteBytesExt};
+use opendal::ErrorKind::NotFound;
+use snafu::ResultExt;
+use tracing::debug;
+
+use crate::meta::engine::Counter;
 use crate::meta::{
     engine::MetaEngine,
     err::*,
     types::{DirStat, EntryInfo, Ino, InodeAttr},
+    Format,
 };
 
 impl MetaEngine {
-    pub(crate) async fn sto_get_attr(&self, inode: Ino) -> Result<InodeAttr> {
+    pub(crate) fn update_mem_fs_stats(&self, space: i64, inodes: i64) {
+        self.fs_states.new_space.fetch_add(space, Ordering::AcqRel);
+        self.fs_states
+            .new_inodes
+            .fetch_add(inodes, Ordering::AcqRel);
+    }
+    pub(crate) async fn update_mem_dir_stat(
+        &self,
+        ino: Ino,
+        length: i64,
+        space: i64,
+        inodes: i64,
+    ) -> Result<()> {
+        let guard = self.format.read().await;
+        if !guard.dir_stats {
+            return Ok(());
+        }
+
+        match self.dir_stats.get_mut(&ino) {
+            None => {
+                self.dir_stats.insert(
+                    ino,
+                    DirStat {
+                        length,
+                        space,
+                        inodes,
+                    },
+                );
+            }
+            Some(mut old) => {
+                old.length += length;
+                old.space += space;
+                old.inodes += inodes;
+            }
+        }
+
+        Ok(())
+    }
+    pub(crate) async fn sto_must_get_attr(&self, inode: Ino) -> Result<InodeAttr> {
+        let inode_key = inode.generate_key_str();
+        let buf = self
+            .operator
+            .read(&inode_key)
+            .await
+            .context(ErrFailedToReadFromStoSnafu {
+                key: inode_key.to_string(),
+            })?;
+        let attr: InodeAttr =
+            bincode::deserialize(&buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        Ok(attr)
+    }
+
+    pub(crate) async fn sto_get_attr(&self, inode: Ino) -> Result<Option<InodeAttr>> {
         // TODO: do we need transaction ?
         let inode_key = inode.generate_key_str();
-        let attr_buf =
-            self.operator
-                .read(&inode_key)
-                .await
-                .context(ErrFailedToReadFromStoSnafu {
-                    key: inode_key.to_string(),
-                })?;
-        let attr: InodeAttr =
-            bincode::deserialize(&attr_buf).context(ErrBincodeDeserializeFailedSnafu)?;
-        Ok(attr)
+        match self.operator.read(&inode_key).await {
+            Ok(buf) => {
+                let attr: InodeAttr =
+                    bincode::deserialize(&buf).context(ErrBincodeDeserializeFailedSnafu)?;
+                Ok(Some(attr))
+            }
+            Err(e) => {
+                if e.kind() == NotFound {
+                    Ok(None)
+                } else {
+                    Err(e).context(ErrFailedToReadFromStoSnafu {
+                        key: inode_key.to_string(),
+                    })
+                }
+            }
+        }
     }
 
     pub(crate) async fn sto_set_attr(&self, inode: Ino, attr: InodeAttr) -> Result<()> {
@@ -79,6 +143,60 @@ impl MetaEngine {
             .await
             .context(ErrFailedToWriteToStoSnafu { key: dir_stat_key })?;
         Ok(())
+    }
+
+    /// Load loads the existing setting of a formatted volume from meta service.
+    pub async fn load_format(&self, check_version: bool) -> Result<Format> {
+        debug!("load_format");
+        let format = self.sto_get_format().await?;
+        let format = if let Some(format) = format {
+            if check_version {
+                format.check_version()?;
+            }
+            format
+        } else {
+            return Err(MetaError::ErrMetaHasNotBeenInitializedYet {});
+        };
+        let mut guard = self.format.write().await;
+        *guard = format.clone();
+        Ok(format)
+    }
+    pub(crate) async fn sto_get_format(&self) -> Result<Option<Format>> {
+        let format_key_str = Format::format_key_str();
+        match self.operator.blocking().read(&format_key_str) {
+            Ok(buf) => {
+                let format = Format::parse_from(&buf).context(ErrBincodeDeserializeFailedSnafu)?;
+                Ok(Some(format))
+            }
+            Err(e) => {
+                if e.kind() == NotFound {
+                    Ok(None)
+                } else {
+                    Err(e).context(ErrFailedToReadFromStoSnafu {
+                        key: format_key_str,
+                    })
+                }
+            }
+        }
+    }
+    pub(crate) async fn sto_set_format(&self, format: &Format) -> Result<()> {
+        let format_key_str = Format::format_key_str();
+        let format_buf = format.encode();
+        self.operator
+            .write(&format_key_str, format_buf)
+            .await
+            .context(ErrFailedToWriteToStoSnafu {
+                key: format_key_str,
+            })?;
+        Ok(())
+    }
+
+    pub(crate) async fn sto_increment_counter(&self, c: Counter, step: u64) -> Result<u64> {
+        let v = c
+            .increment_by(self.operator.clone(), step)
+            .await
+            .context(ErrFailedToDoCounterSnafu)?;
+        Ok(v)
     }
 }
 

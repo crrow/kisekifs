@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 mod config;
-pub use config::MetaConfig;
+pub use config::{Compression, Format, MetaConfig};
 pub mod engine;
 mod err;
 pub use err::MetaError;
@@ -89,16 +89,24 @@ pub mod internal_nodes {
         pub fn get_internal_node_by_name(&self, name: &str) -> Option<&InternalNode> {
             self.nodes.get(name)
         }
+        pub fn get_mut_internal_node_by_name(&mut self, name: &str) -> Option<&mut InternalNode> {
+            self.nodes.get_mut(name)
+        }
         pub fn get_internal_node(&self, ino: Ino) -> Option<&InternalNode> {
             self.nodes.values().find(|node| node.0.inode == ino)
         }
-        pub fn get_mut_internal_node_by_name(&mut self, name: &str) -> Option<&mut InternalNode> {
-            self.nodes.get_mut(name)
+        pub fn remove_trash_node(&mut self) {
+            self.nodes.remove(TRASH_INODE_NAME);
+        }
+        pub fn add_prefix(&mut self) {
+            for (_, n) in &mut self.nodes {
+                n.0.name = format!(".kfs{}", n.0.name);
+            }
         }
     }
 
     #[derive(Debug)]
-    pub struct InternalNode(Entry);
+    pub struct InternalNode(pub Entry);
 
     impl Into<Entry> for InternalNode {
         fn into(self) -> Entry {
@@ -109,6 +117,12 @@ pub mod internal_nodes {
     impl Into<Entry> for &'_ InternalNode {
         fn into(self) -> Entry {
             self.0.clone()
+        }
+    }
+
+    impl InternalNode {
+        pub fn get_attr(&self) -> InodeAttr {
+            self.0.attr.clone()
         }
     }
 }

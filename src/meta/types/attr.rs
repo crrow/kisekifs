@@ -2,6 +2,7 @@ use std::time::SystemTime;
 
 use fuser::{FileAttr, FileType};
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 use crate::meta::{types::ino::*, util::UID_GID};
 
@@ -151,6 +152,7 @@ impl InodeAttr {
         perm as u8 & 7
     }
     pub fn to_fuse_attr<I: Into<u64>>(&self, ino: I) -> fuser::FileAttr {
+        info!("to_fuse_attr: {:?}", self);
         let mut fa = FileAttr {
             ino: ino.into(),
             size: 0,
@@ -221,7 +223,8 @@ mod tests {
             .set_perm(0o777)
             .set_kind(FileType::Directory)
             .set_gid(11)
-            .set_uid(22);
+            .set_uid(22)
+            .to_owned();
         attr.set_parent(Ino::from(1)).set_full();
 
         assert_eq!(attr.perm, 0o777);

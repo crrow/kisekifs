@@ -22,7 +22,7 @@ use tokio::{
     sync::RwLock,
     time::{timeout, Duration, Instant},
 };
-use tracing::{error, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::{
     common::err::ToErrno,
@@ -283,15 +283,16 @@ pub(crate) struct FSStatesInner {
 
 /// MetaEngine describes a meta service for file system.
 pub struct MetaEngine {
-    pub config: MetaConfig,
-    format: RwLock<Format>,
+    pub(crate) config: MetaConfig,
+    pub(crate) format: RwLock<Format>,
     root: Ino,
     pub(crate) operator: Arc<Operator>,
     sub_trash: Option<InternalNode>,
     open_files: OpenFiles,
     dir_parents: DashMap<Ino, Ino>,
-    fs_states: FSStatesInner,
+    pub(crate) fs_states: FSStatesInner,
     free_inodes: IdTable,
+    pub(crate) dir_stats: DashMap<Ino, DirStat>,
 }
 
 impl MetaEngine {
@@ -310,29 +311,56 @@ impl MetaEngine {
             dir_parents: DashMap::new(),
             fs_states: Default::default(),
             free_inodes: IdTable::new(op.clone(), Counter::NextInode, INODE_BATCH),
+            dir_stats: DashMap::new(),
         };
         Ok(m)
     }
-    pub fn info(&self) -> String {
-        format!("meta-{}", self.config.scheme)
-    }
+    // Init is used to initialize a meta service.
+    pub async fn init(&self, format: Format, force: bool) -> Result<()> {
+        info!("do init ...");
+        let mut need_init_root = false;
+        if let Some(old_format) = self.sto_get_format().await? {
+            if !old_format.dir_stats && format.dir_stats {
+                // remove dir stats as they are outdated
+            }
 
-    /// Load loads the existing setting of a formatted volume from meta service.
-    pub async fn load_format(&self, check_version: bool) -> Result<Format> {
-        let format_key_str = Format::format_key_str();
-        let format_buf = self.operator.blocking().read(&format_key_str).context(
-            ErrFailedToReadFromStoSnafu {
-                key: format_key_str,
-            },
-        )?;
-
-        let format = Format::parse_from(&format_buf).context(ErrBincodeDeserializeFailedSnafu)?;
-        if check_version {
-            format.check_version()?;
+            // TODO: update the old format
+        } else {
+            need_init_root = true;
         }
+
         let mut guard = self.format.write().await;
         *guard = format.clone();
-        Ok(format)
+
+        let mut basic_attr = InodeAttr::default()
+            .set_kind(FileType::Directory)
+            .set_nlink(2)
+            .set_length(4 << 10)
+            .set_parent(ROOT_INO)
+            .to_owned();
+
+        if format.trash_days > 0 {
+            if let None = self.sto_get_attr(TRASH_INODE).await? {
+                basic_attr.set_perm(0o555);
+                self.sto_set_attr(TRASH_INODE, basic_attr.clone()).await?;
+            }
+        }
+        self.sto_set_format(&format).await?;
+        if need_init_root {
+            basic_attr.set_perm(0o777);
+            tokio::try_join!(
+                self.sto_set_attr(ROOT_INO, basic_attr.clone()),
+                self.sto_increment_counter(Counter::NextInode, 2),
+            )?;
+        }
+
+        Ok(())
+    }
+    pub fn dump_config(&self) -> MetaConfig {
+        self.config.clone()
+    }
+    pub fn info(&self) -> String {
+        format!("meta-{}", self.config.scheme)
     }
 
     /// StatFS returns summary statistics of a volume.
@@ -395,8 +423,8 @@ impl MetaEngine {
 
         let format = self.format.read().await;
 
-        let total_space = if format.capacity > 0 {
-            min(format.capacity, used_space as u64)
+        let total_space = if format.capacity_in_bytes > 0 {
+            min(format.capacity_in_bytes, used_space as u64)
         } else {
             let mut v = 1 << 50;
             let us = used_space as u64;
@@ -505,7 +533,7 @@ impl MetaEngine {
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
-        trace!("get_attr with inode {:?}", inode);
+        debug!("get_attr with inode {:?}", inode);
         let inode = self.check_root(inode);
         // check cache
         if let Some(attr) = self.open_files.check(inode) {
@@ -523,11 +551,11 @@ impl MetaEngine {
             // always accessible, even under slow or unreliable conditions.
             // Consistency: Ensuring consistent behavior for these inodes, even with
             // timeouts, helps maintain filesystem integrity.
-            timeout(Duration::from_millis(300), self.sto_get_attr(inode))
+            timeout(Duration::from_millis(300), self.sto_must_get_attr(inode))
                 .await
                 .unwrap_or(Ok(InodeAttr::hard_code_inode_attr(inode.is_trash())))?
         } else {
-            self.sto_get_attr(inode).await?
+            self.sto_must_get_attr(inode).await?
         };
 
         // update cache
@@ -648,7 +676,7 @@ impl MetaEngine {
         Ok(())
     }
 
-    // Change root to a directory specified by sub_dir
+    // Change root to a directory specified by sub_dir.
     pub async fn chroot<P: AsRef<Path>>(&self, ctx: &MetaContext, sub_dir: P) -> Result<()> {
         let sub_dir = sub_dir.as_ref();
         for c in sub_dir.components() {
@@ -703,6 +731,7 @@ impl MetaEngine {
     }
 
     // Mknod creates a node in a directory with given name, type and permissions.
+    #[instrument(skip(self, ctx), fields(parent=?parent, name=?name, typ=?typ, mode=?mode, cumask=?cumask, rdev=?rdev, path=?path))]
     pub async fn mknod(
         &self,
         ctx: &MetaContext,
@@ -727,14 +756,16 @@ impl MetaEngine {
         let parent = self.check_root(parent);
         let (space, inodes) = (align4k(0), 1i64);
         self.check_quota(ctx, space, inodes, parent)?;
-        self.do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
-            .await
-            .and_then(|r| {
-                self.update_stats(space, inodes)?;
-                self.update_update_dir_stat(parent, 0, space, inodes)?;
-                self.update_dir_quota(parent, space, inodes)?;
-                Ok(r)
-            })
+        let r = self
+            .do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
+            .await?;
+
+        tokio::try_join!(
+            self.update_mem_dir_stat(parent, 0, space, inodes),
+            self.update_dir_quota(parent, space, inodes)
+        )?;
+
+        Ok(r)
     }
 
     async fn do_mknod(
@@ -749,10 +780,7 @@ impl MetaEngine {
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
         let inode = if parent.is_trash() {
-            let next = Counter::NextTrash
-                .increment(self.operator.clone())
-                .await
-                .context(ErrFailedToDoCounterSnafu)?;
+            let next = self.sto_increment_counter(Counter::NextTrash, 1).await?;
             TRASH_INODE + Ino::from(next)
         } else {
             Ino::from(
@@ -783,7 +811,7 @@ impl MetaEngine {
         };
 
         // FIXME: we need transaction here
-        let mut parent_attr = self.sto_get_attr(parent).await?;
+        let mut parent_attr = self.sto_must_get_attr(parent).await?;
         if !parent_attr.is_dir() {
             return Err(MetaError::ErrMknod {
                 kind: libc::ENOTDIR,

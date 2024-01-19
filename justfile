@@ -5,6 +5,10 @@
 @fmt:
     cargo +nightly fmt --all
 
+# Calculate code
+@cloc:
+    cloc . --exclude-dir=vendor,docs,tests,examples,build,scripts,tools,target
+
 # Install workspace tools
 @install-tools:
     cargo install cargo-nextest
@@ -33,21 +37,35 @@ alias t := test
 @build-fs:
     cargo build --bin kiseki
 
-@run-fs-help:
+alias sh := show-help
+@show-help:
     cargo run --bin kiseki help
     #cargo run --bin kiseki
 
+# ==================================================== mount
+
+alias sh-m := help-mount
 @help-mount:
     cargo run --color=always --bin kiseki help mount
 
 @mount:
     cargo run --color=always --bin kiseki mount
 
+# ==================================================== umount
+
+alias sh-um := help-umount
 @help-umount:
     cargo run --color=always --bin kiseki help umount
 
 @umount:
     cargo run --color=always --bin kiseki umount
 
-@cloc:
-    cloc . --exclude-dir=vendor,docs,tests,examples,build,scripts,tools,target
+# ==================================================== format
+
+@format:
+    cargo run --color=always --bin kiseki format
+
+alias sh-f := help-format
+@help-format:
+    cargo run --color=always --bin kiseki help format
+
