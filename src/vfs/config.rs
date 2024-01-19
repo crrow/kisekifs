@@ -9,4 +9,5 @@ pub struct VFSConfig {
     pub entry_timeout: Duration,
     pub backup_meta_interval: Duration,
     pub prefix_internal: bool,
+    pub hide_internal: bool,
 }

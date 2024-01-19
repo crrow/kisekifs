@@ -1,6 +1,8 @@
 use std::sync::atomic::Ordering;
 
 use byteorder::{LittleEndian, WriteBytesExt};
+use futures::stream::FuturesUnordered;
+use futures::{Stream, StreamExt};
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::debug;
@@ -86,6 +88,17 @@ impl MetaEngine {
             }
         }
     }
+
+    // pub(crate) async fn sto_batch_get_attr<I: Iterator<Item = Ino>>(
+    //     &self,
+    //     inodes: I,
+    // ) -> impl Stream<Item = Result<(Ino, InodeAttr)>> {
+    //     let f = FuturesUnordered::new();
+    //
+    //     for x in inodes {
+    //         f.push(async { (x, self.sto_get_attr(x).await) });
+    //     }
+    // }
 
     pub(crate) async fn sto_set_attr(&self, inode: Ino, attr: InodeAttr) -> Result<()> {
         let inode_key = inode.generate_key_str();

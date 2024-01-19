@@ -588,20 +588,7 @@ impl MetaEngine {
     // Readdir returns all entries for given directory, which include attributes if
     // plus is true.
     pub async fn read_dir(&self, ctx: &MetaContext, inode: Ino, plus: bool) -> Result<Vec<Entry>> {
-        trace!(dir=?inode, "readdir");
-        match self.read_dir_inner(ctx, inode, plus).await {
-            Ok(_) => {}
-            Err(_) => {}
-        }
-        todo!()
-    }
-
-    async fn read_dir_inner(
-        &self,
-        ctx: &MetaContext,
-        inode: Ino,
-        plus: bool,
-    ) -> Result<Vec<Entry>> {
+        info!(dir=?inode, "readdir");
         let inode = self.check_root(inode);
         let mut attr = self.get_attr(inode).await?;
         let mmask = if plus {
@@ -626,6 +613,8 @@ impl MetaEngine {
                 if source.kind() == opendal::ErrorKind::NotFound && inode.is_trash() {
                     return Ok(basic_entries);
                 }
+            } else {
+                return Err(e);
             }
         }
 
@@ -663,15 +652,12 @@ impl MetaEngine {
             basic_entries.push(Entry::new(entry_info.inode, name, entry_info.typ));
         }
 
+        // TODO: optimize me
         if plus && basic_entries.len() != 0 {
-            todo!()
-            // let mut entries = Vec::with_capacity(basic_entries.len());
-            // for entry in basic_entries {
-            //     let attr = self.get_attr(entry.inode).await?;
-            //     entry.attr = attr;
-            //     entries.push(entry.clone());
-            // }
-            // *basic_entries = entries;
+            for e in basic_entries {
+                let attr = self.get_attr(e.inode).await?;
+                e.attr = attr;
+            }
         }
         Ok(())
     }
