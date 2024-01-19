@@ -17,12 +17,11 @@ use std::{
     str::FromStr,
 };
 
-use clap::Parser;
+use clap::{Args, Parser};
 use fuser::MountOption;
 use snafu::{whatever, ResultExt, Whatever};
 use tracing::info;
 
-use super::MetaArgs;
 use crate::{
     fuse,
     fuse::{config::FuseConfig, null, KISEKI},
@@ -34,24 +33,34 @@ use crate::{
 
 const MOUNT_OPTIONS_HEADER: &str = "Mount options";
 const LOGGING_OPTIONS_HEADER: &str = "Logging options";
+const META_OPTIONS_HEADER: &str = "Meta options";
 
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Clone, Args)]
+#[command(flatten_help = true)]
+#[command(long_about = r"
+
+Mount the target volume at the mount point.
+Examples:
+
+# Mount in foreground
+kiseki mount -f /tmp/kiseki
+")]
 pub struct MountArgs {
-    #[clap(
+    #[arg(
         help = "Directory to mount the fs at",
-        value_name = "DIRECTORY",
+        value_name = "MOUNT_POINT",
         default_value = "/tmp/kiseki"
     )]
     pub mount_point: PathBuf,
 
-    #[clap(
+    #[arg(
     long,
     help = "Mount file system in read-only mode",
     help_heading = MOUNT_OPTIONS_HEADER
     )]
     pub read_only: bool,
 
-    #[clap(
+    #[arg(
     long,
     help = "Automatically unmount on exit",
     help_heading = MOUNT_OPTIONS_HEADER,
@@ -59,10 +68,10 @@ pub struct MountArgs {
     )]
     pub auto_unmount: bool,
 
-    #[clap(long, help = "Allow root user to access file system", help_heading = MOUNT_OPTIONS_HEADER)]
+    #[arg(long, help = "Allow root user to access file system", help_heading = MOUNT_OPTIONS_HEADER)]
     pub allow_root: bool,
 
-    #[clap(
+    #[arg(
     long,
     help = "Allow other users, including root, to access file system",
     help_heading = MOUNT_OPTIONS_HEADER,
@@ -121,6 +130,25 @@ pub struct MountArgs {
     pub meta_args: MetaArgs,
 }
 
+#[derive(Debug, Clone, Parser)]
+struct MetaArgs {
+    #[arg(
+    long,
+    help = "Specify the scheme of the meta store",
+    help_heading = META_OPTIONS_HEADER,
+    default_value_t = opendal::Scheme::Memory.to_string(),
+    )]
+    pub scheme: String, // FIXME
+
+    #[clap(
+    long,
+    help = "Specify the address of the meta store",
+    help_heading = META_OPTIONS_HEADER,
+    default_value = "/tmp/kiseki-meta",
+    )]
+    pub meta_address: String,
+}
+
 impl MountArgs {
     fn fuse_config(&self) -> FuseConfig {
         let mut options = vec![
@@ -150,10 +178,8 @@ impl MountArgs {
         let mut mc = MetaConfig::default();
         mc.scheme = opendal::Scheme::from_str(&self.meta_args.scheme)
             .with_whatever_context(|_| format!("invalid scheme {}", &self.meta_args.scheme))?;
-        mc.scheme_config.insert(
-            "datadir".to_string(),
-            self.meta_args.data_dir.to_string_lossy().to_string(),
-        );
+        mc.scheme_config
+            .insert("datadir".to_string(), self.meta_args.meta_address.clone());
         Ok(mc)
     }
 

@@ -1,17 +1,21 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::Args;
 use snafu::{ResultExt, Whatever};
 
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Clone, Args)]
+#[command(long_about = r"
+
+Unmount kiseki-fs from the specified directory.
+")]
 pub struct UmountArgs {
-    #[clap(
+    #[arg(
         help = "Directory to umount the fs at",
-        value_name = "DIRECTORY",
+        value_name = "MOUNT_POINT",
         default_value = "/tmp/kiseki"
     )]
     pub mount_point: PathBuf,
-    #[clap(long, short, help = "Force unmount even if the directory is not empty")]
+    #[arg(long, short, help = "Force unmount even if the directory is not empty")]
     pub force: bool,
 }
 
