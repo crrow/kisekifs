@@ -317,7 +317,43 @@ impl MetaEngine {
     }
     // Init is used to initialize a meta service.
     pub async fn init(&self, format: Format, force: bool) -> Result<()> {
-        info!("do init");
+        info!("do init ...");
+        let mut need_init_root = false;
+        if let Some(old_format) = self.sto_get_format().await? {
+            if !old_format.dir_stats && format.dir_stats {
+                // remove dir stats as they are outdated
+            }
+
+            // TODO: update the old format
+        } else {
+            need_init_root = true;
+        }
+
+        let mut guard = self.format.write().await;
+        *guard = format.clone();
+
+        let mut basic_attr = InodeAttr::default()
+            .set_kind(FileType::Directory)
+            .set_nlink(2)
+            .set_length(4 << 10)
+            .set_parent(ROOT_INO)
+            .to_owned();
+
+        if format.trash_days > 0 {
+            if let None = self.sto_get_attr(TRASH_INODE).await? {
+                basic_attr.set_perm(0o555);
+                self.sto_set_attr(TRASH_INODE, basic_attr.clone()).await?;
+            }
+        }
+        self.sto_set_format(&format).await?;
+        if need_init_root {
+            basic_attr.set_perm(0o777);
+            tokio::try_join!(
+                self.sto_set_attr(ROOT_INO, basic_attr.clone()),
+                self.sto_increment_counter(Counter::NextInode, 2),
+            )?;
+        }
+
         Ok(())
     }
     pub fn dump_config(&self) -> MetaConfig {
@@ -325,25 +361,6 @@ impl MetaEngine {
     }
     pub fn info(&self) -> String {
         format!("meta-{}", self.config.scheme)
-    }
-
-    /// Load loads the existing setting of a formatted volume from meta service.
-    pub async fn load_format(&self, check_version: bool) -> Result<Format> {
-        debug!("load_format");
-        let format_key_str = Format::format_key_str();
-        let format_buf = self.operator.blocking().read(&format_key_str).context(
-            ErrFailedToReadFromStoSnafu {
-                key: format_key_str,
-            },
-        )?;
-
-        let format = Format::parse_from(&format_buf).context(ErrBincodeDeserializeFailedSnafu)?;
-        if check_version {
-            format.check_version()?;
-        }
-        let mut guard = self.format.write().await;
-        *guard = format.clone();
-        Ok(format)
     }
 
     /// StatFS returns summary statistics of a volume.
@@ -534,11 +551,11 @@ impl MetaEngine {
             // always accessible, even under slow or unreliable conditions.
             // Consistency: Ensuring consistent behavior for these inodes, even with
             // timeouts, helps maintain filesystem integrity.
-            timeout(Duration::from_millis(300), self.sto_get_attr(inode))
+            timeout(Duration::from_millis(300), self.sto_must_get_attr(inode))
                 .await
                 .unwrap_or(Ok(InodeAttr::hard_code_inode_attr(inode.is_trash())))?
         } else {
-            self.sto_get_attr(inode).await?
+            self.sto_must_get_attr(inode).await?
         };
 
         // update cache
@@ -763,10 +780,7 @@ impl MetaEngine {
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
         let inode = if parent.is_trash() {
-            let next = Counter::NextTrash
-                .increment(self.operator.clone())
-                .await
-                .context(ErrFailedToDoCounterSnafu)?;
+            let next = self.sto_increment_counter(Counter::NextTrash, 1).await?;
             TRASH_INODE + Ino::from(next)
         } else {
             Ino::from(
@@ -797,7 +811,7 @@ impl MetaEngine {
         };
 
         // FIXME: we need transaction here
-        let mut parent_attr = self.sto_get_attr(parent).await?;
+        let mut parent_attr = self.sto_must_get_attr(parent).await?;
         if !parent_attr.is_dir() {
             return Err(MetaError::ErrMknod {
                 kind: libc::ENOTDIR,

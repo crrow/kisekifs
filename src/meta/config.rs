@@ -1,7 +1,12 @@
-use clap::ValueEnum;
-use std::fmt::{Display, Formatter};
-use std::{collections::HashMap, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::{Display, Formatter},
+    path::PathBuf,
+    str::FromStr,
+    time::Duration,
+};
 
+use clap::ValueEnum;
 use opendal::Scheme;
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use snafu::ResultExt;
@@ -156,7 +161,7 @@ pub struct Format {
     pub compression: Option<Compression>,
     pub capacity_in_bytes: u64,
     pub inodes: u64,
-    pub trash_days: Option<u64>,
+    pub trash_days: u64,
 }
 
 const MIN_CLIENT_VERSION: &str = "1";
@@ -188,7 +193,7 @@ impl Default for Format {
             compression: None,
             capacity_in_bytes: 0,
             inodes: 0,
-            trash_days: None,
+            trash_days: 0,
         }
     }
 }
@@ -196,7 +201,7 @@ impl Default for Format {
 impl Format {
     #[inline]
     pub fn format_key_str() -> String {
-        String::from("format")
+        String::from("setting")
     }
 
     pub fn parse_from<R: AsRef<[u8]>>(r: R) -> std::result::Result<Self, bincode::Error> {
@@ -206,6 +211,10 @@ impl Format {
 
     pub fn check_version(&self) -> std::result::Result<(), MetaError> {
         return Ok(());
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap()
     }
 }
 

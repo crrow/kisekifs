@@ -8,6 +8,8 @@ use crate::{common::err::ToErrno, meta::types::Ino};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum MetaError {
+    #[snafu(display("meta has not been initialized yet"))]
+    ErrMetaHasNotBeenInitializedYet,
     #[snafu(display("invalid format version"))]
     ErrInvalidFormatVersion,
     #[snafu(display("failed to parse scheme: {}: {}", got, source))]
@@ -59,6 +61,10 @@ impl ToErrno for MetaError {
             MetaError::ErrMknod { kind } => *kind,
             MetaError::ErrFailedToDoCounter { .. } => libc::EIO,
             MetaError::ErrFailedToWriteToSto { .. } => libc::EIO,
+            MetaError::ErrMetaHasNotBeenInitializedYet => {
+                error!("meta has not been initialized yet");
+                libc::EIO
+            }
         }
     }
 }

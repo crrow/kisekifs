@@ -3,18 +3,20 @@ use std::{
     str::FromStr,
 };
 
-use crate::meta;
 use clap::{Args, ValueEnum};
 use regex::Regex;
 use snafu::{ensure, ensure_whatever, ResultExt, Whatever};
 use tokio::runtime;
-use tracing::{debug, info, instrument, warn, Instrument};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
+use tracing::level_filters::LevelFilter;
+use tracing::{debug, info, instrument, warn, Instrument, Level};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use crate::meta::{types::DirStat, Compression, MetaConfig};
-use crate::metrics::metrics_tracing_span_layer;
+use crate::{
+    meta,
+    meta::{types::DirStat, Compression, MetaConfig},
+    metrics::metrics_tracing_span_layer,
+};
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
 const MANAGEMENT_OPTIONS_HEADER: &str = "MANAGEMENT";
@@ -49,7 +51,7 @@ pub struct FormatArgs {
         long,
         help = "Specify the scheme of the meta store",
         help_heading = FORMAT_OPTIONS_HEADER,
-        default_value_t = opendal::Scheme::Memory.to_string(),
+        default_value_t = opendal::Scheme::Sled.to_string(),
     )]
     pub scheme: String, // FIXME
 
@@ -92,7 +94,7 @@ pub struct FormatArgs {
         default_value = "1",
         value_parser = validate_trash_day,
     )]
-    pub trash_days: i64,
+    pub trash_days: u64,
 }
 impl FormatArgs {
     fn meta_config(&self) -> Result<MetaConfig, Whatever> {
@@ -113,11 +115,7 @@ impl FormatArgs {
         if let Some(inodes) = self.inodes {
             format.inodes = inodes as u64;
         }
-        format.trash_days = if self.trash_days > 0 {
-            Some(self.trash_days as u64)
-        } else {
-            None
-        };
+        format.trash_days = self.trash_days as u64;
         format.block_size = fix_block_size(self.block_size);
         format.compression = self.compression.clone();
         format.name = self.name.clone();
@@ -157,7 +155,14 @@ impl FormatArgs {
 
     fn std_log(&self) {
         let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_ansi(supports_color::on(supports_color::Stream::Stdout).is_some());
+            .with_ansi(supports_color::on(supports_color::Stream::Stdout).is_some())
+            .with_filter(
+                tracing_subscriber::filter::Targets::new().with_target("kiseki", LevelFilter::INFO),
+            )
+            .with_filter(
+                tracing_subscriber::filter::Targets::new()
+                    .with_target("kiseki", LevelFilter::DEBUG),
+            );
 
         let registry = tracing_subscriber::registry()
             // .with(syslog_layer)
@@ -187,8 +192,8 @@ fn validate_name(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-fn validate_trash_day(s: &str) -> Result<i64, String> {
-    clap_num::number_range(s, 1, i64::MAX)
+fn validate_trash_day(s: &str) -> Result<u64, String> {
+    clap_num::number_range(s, 1, u64::MAX)
 }
 fn validate_block_size(s: &str) -> Result<u64, String> {
     clap_num::number_range(s, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE)
