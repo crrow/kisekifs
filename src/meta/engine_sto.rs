@@ -1,5 +1,7 @@
 use byteorder::{LittleEndian, WriteBytesExt};
+use dashmap::mapref::one::RefMut;
 use snafu::ResultExt;
+use std::sync::atomic::Ordering;
 
 use crate::meta::{
     engine::MetaEngine,
@@ -8,6 +10,44 @@ use crate::meta::{
 };
 
 impl MetaEngine {
+    pub(crate) fn update_mem_fs_stats(&self, space: i64, inodes: i64) {
+        self.fs_states.new_space.fetch_add(space, Ordering::AcqRel);
+        self.fs_states
+            .new_inodes
+            .fetch_add(inodes, Ordering::AcqRel);
+    }
+    pub(crate) async fn update_mem_dir_stat(
+        &self,
+        ino: Ino,
+        length: i64,
+        space: i64,
+        inodes: i64,
+    ) -> Result<()> {
+        let guard = self.format.read().await;
+        if !guard.dir_stats {
+            return Ok(());
+        }
+
+        match self.dir_stats.get_mut(&ino) {
+            None => {
+                self.dir_stats.insert(
+                    ino,
+                    DirStat {
+                        length,
+                        space,
+                        inodes,
+                    },
+                );
+            }
+            Some(mut old) => {
+                old.length += length;
+                old.space += space;
+                old.inodes += inodes;
+            }
+        }
+
+        Ok(())
+    }
     pub(crate) async fn sto_get_attr(&self, inode: Ino) -> Result<InodeAttr> {
         // TODO: do we need transaction ?
         let inode_key = inode.generate_key_str();

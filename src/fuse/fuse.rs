@@ -11,7 +11,7 @@ use fuser::{
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
-use tracing::{debug, field, info, instrument, trace, Instrument};
+use tracing::{debug, error, field, info, instrument, trace, Instrument};
 
 use crate::{
     common::err::ToErrno,
@@ -105,7 +105,8 @@ impl Filesystem for KisekiFuse {
     /// object
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
         debug!("init kiseki...");
-        match self.runtime.block_on(self.vfs.init().in_current_span()) {
+        let ctx = MetaContext::default();
+        match self.runtime.block_on(self.vfs.init(&ctx).in_current_span()) {
             Ok(_) => {}
             Err(_) => {}
         }
@@ -152,14 +153,18 @@ impl Filesystem for KisekiFuse {
         self.reply_entry(&ctx, reply, entry);
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, name=field::Empty))]
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=ino, name=field::Empty))]
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         match self
             .runtime
             .block_on(self.vfs.get_attr(Ino::from(ino)).in_current_span())
+            // .block_on(self.vfs.get_attr(Ino::from(ino)))
         {
             Ok(attr) => reply.attr(&self.vfs.get_ttl(attr.kind), &attr.to_fuse_attr(ino)),
-            Err(e) => reply.error(e.to_errno()),
+            Err(e) => {
+                error!("getattr {:?} {:?}", ino, e);
+                reply.error(e.to_errno())
+            }
         };
     }
 

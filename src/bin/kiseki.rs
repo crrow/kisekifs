@@ -172,7 +172,7 @@ struct MetaArgs {
     long,
     help = "Specify the scheme of the meta store",
     help_heading = META_OPTIONS_HEADER,
-    default_value_t = opendal::Scheme::Sled.to_string(),
+    default_value_t = opendal::Scheme::Memory.to_string(),
     )]
     pub scheme: String, // FIXME
 
@@ -274,13 +274,13 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
 
     let fuse_config = args.fuse_config();
     let meta_config = args.meta_config()?;
-    let fs_config = args.vfs_config();
+    let vfs_config = args.vfs_config();
 
     let meta = meta_config
         .open()
         .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
 
-    let file_system = vfs::KisekiVFS::create(fs_config, meta)
+    let file_system = vfs::KisekiVFS::create(vfs_config, meta)
         .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
     let fs = fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(

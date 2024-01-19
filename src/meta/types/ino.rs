@@ -85,7 +85,9 @@ impl Ino {
         buf
     }
     pub fn generate_key_str(&self) -> String {
-        self.generate_key().into_iter().map(|x| x as char).collect()
+        // let key_buf = self.generate_key();
+        // String::from_utf8_lossy(&key_buf).to_string()
+        format!("A{:x}I", self.0)
     }
 }
 

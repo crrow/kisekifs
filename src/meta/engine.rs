@@ -22,7 +22,7 @@ use tokio::{
     sync::RwLock,
     time::{timeout, Duration, Instant},
 };
-use tracing::{error, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::{
     common::err::ToErrno,
@@ -283,15 +283,16 @@ pub(crate) struct FSStatesInner {
 
 /// MetaEngine describes a meta service for file system.
 pub struct MetaEngine {
-    pub config: MetaConfig,
-    format: RwLock<Format>,
+    pub(crate) config: MetaConfig,
+    pub(crate) format: RwLock<Format>,
     root: Ino,
     pub(crate) operator: Arc<Operator>,
     sub_trash: Option<InternalNode>,
     open_files: OpenFiles,
     dir_parents: DashMap<Ino, Ino>,
-    fs_states: FSStatesInner,
+    pub(crate) fs_states: FSStatesInner,
     free_inodes: IdTable,
+    pub(crate) dir_stats: DashMap<Ino, DirStat>,
 }
 
 impl MetaEngine {
@@ -310,8 +311,12 @@ impl MetaEngine {
             dir_parents: DashMap::new(),
             fs_states: Default::default(),
             free_inodes: IdTable::new(op.clone(), Counter::NextInode, INODE_BATCH),
+            dir_stats: DashMap::new(),
         };
         Ok(m)
+    }
+    pub fn dump_config(&self) -> MetaConfig {
+        self.config.clone()
     }
     pub fn info(&self) -> String {
         format!("meta-{}", self.config.scheme)
@@ -319,6 +324,7 @@ impl MetaEngine {
 
     /// Load loads the existing setting of a formatted volume from meta service.
     pub async fn load_format(&self, check_version: bool) -> Result<Format> {
+        debug!("load_format");
         let format_key_str = Format::format_key_str();
         let format_buf = self.operator.blocking().read(&format_key_str).context(
             ErrFailedToReadFromStoSnafu {
@@ -505,7 +511,7 @@ impl MetaEngine {
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
-        trace!("get_attr with inode {:?}", inode);
+        debug!("get_attr with inode {:?}", inode);
         let inode = self.check_root(inode);
         // check cache
         if let Some(attr) = self.open_files.check(inode) {
@@ -648,7 +654,7 @@ impl MetaEngine {
         Ok(())
     }
 
-    // Change root to a directory specified by sub_dir
+    // Change root to a directory specified by sub_dir.
     pub async fn chroot<P: AsRef<Path>>(&self, ctx: &MetaContext, sub_dir: P) -> Result<()> {
         let sub_dir = sub_dir.as_ref();
         for c in sub_dir.components() {
@@ -703,6 +709,7 @@ impl MetaEngine {
     }
 
     // Mknod creates a node in a directory with given name, type and permissions.
+    #[instrument(skip(self, ctx), fields(parent=?parent, name=?name, typ=?typ, mode=?mode, cumask=?cumask, rdev=?rdev, path=?path))]
     pub async fn mknod(
         &self,
         ctx: &MetaContext,
@@ -727,14 +734,16 @@ impl MetaEngine {
         let parent = self.check_root(parent);
         let (space, inodes) = (align4k(0), 1i64);
         self.check_quota(ctx, space, inodes, parent)?;
-        self.do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
-            .await
-            .and_then(|r| {
-                self.update_stats(space, inodes)?;
-                self.update_update_dir_stat(parent, 0, space, inodes)?;
-                self.update_dir_quota(parent, space, inodes)?;
-                Ok(r)
-            })
+        let r = self
+            .do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
+            .await?;
+
+        tokio::try_join!(
+            self.update_mem_dir_stat(parent, 0, space, inodes),
+            self.update_dir_quota(parent, space, inodes)
+        )?;
+
+        Ok(r)
     }
 
     async fn do_mknod(
