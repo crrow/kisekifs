@@ -103,6 +103,9 @@ pub mod internal_nodes {
                 n.0.name = format!(".kfs{}", n.0.name);
             }
         }
+        pub fn contains_name(&self, name: &str) -> bool {
+            self.nodes.contains_key(name)
+        }
     }
 
     #[derive(Debug)]

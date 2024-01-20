@@ -4,16 +4,15 @@ use std::{
     time,
 };
 
-use common::err::Result;
 use dashmap::DashMap;
 use fuser::FileType;
-use libc::c_int;
-use snafu::prelude::*;
+use libc::mode_t;
 use tokio::{sync::Mutex, time::Instant};
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, trace};
 
+use crate::meta::MAX_NAME_LENGTH;
+use crate::vfs::err::VFSError;
 use crate::{
-    common,
     common::err::ToErrno,
     meta::{
         engine::{access, MetaEngine},
@@ -22,30 +21,13 @@ use crate::{
         MetaContext, MODE_MASK_R, MODE_MASK_W,
     },
     vfs::{
-        config::VFSConfig, handle::Handle, reader::DataReader, writer::DataWriter,
-        VFSError::ErrBadFileHandle,
+        config::VFSConfig,
+        err::{Result, VFSError::ErrBadFileHandle},
+        handle::Handle,
+        reader::DataReader,
+        writer::DataWriter,
     },
 };
-
-#[derive(Debug, Snafu)]
-pub enum VFSError {
-    #[snafu(display("bad file handle: inode {:?} fh {:?}", inode, fh))]
-    ErrBadFileHandle { inode: Ino, fh: u64 },
-}
-
-impl From<VFSError> for common::err::Error {
-    fn from(value: VFSError) -> Self {
-        common::err::Error::VFSError { source: value }
-    }
-}
-
-impl ToErrno for VFSError {
-    fn to_errno(&self) -> c_int {
-        match self {
-            ErrBadFileHandle { .. } => libc::EBADF,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct KisekiVFS {
@@ -66,7 +48,7 @@ impl Display for KisekiVFS {
 }
 
 impl KisekiVFS {
-    pub fn create(vfs_config: VFSConfig, meta: MetaEngine) -> Result<Self> {
+    pub fn new(vfs_config: VFSConfig, meta: MetaEngine) -> Result<Self> {
         let mut internal_nodes =
             PreInternalNodes::new((vfs_config.entry_timeout, vfs_config.dir_entry_timeout));
         let config_inode = internal_nodes
@@ -270,5 +252,92 @@ impl KisekiVFS {
         let list = self.handles.get(&ino).unwrap();
         let l = list.value();
         return l.get(&fh).map(|h| h.value().clone());
+    }
+
+    pub async fn mknod(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: String,
+        mode: mode_t,
+        cumask: u16,
+        rdev: u32,
+    ) -> Result<Entry> {
+        if parent.is_root() && self.internal_nodes.contains_name(&name) {
+            return Err(VFSError::ErrLIBC { kind: libc::EEXIST });
+        }
+        if name.len() > MAX_NAME_LENGTH {
+            return Err(VFSError::ErrLIBC {
+                kind: libc::ENAMETOOLONG,
+            });
+        }
+        let file_type = get_file_type(mode)?;
+        let mode = mode as u16 & 0o777;
+
+        let (ino, attr) = self
+            .meta
+            .mknod(
+                ctx,
+                parent,
+                &name,
+                file_type,
+                mode,
+                cumask,
+                rdev,
+                String::new(),
+            )
+            .await?;
+        let ttl = self.get_entry_ttl(&attr);
+        Ok(Entry::new_with_attr(ino, &name, attr)
+            .with_generation(1)
+            .with_ttl(ttl)
+            .to_owned())
+    }
+
+    pub async fn create(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: &str,
+        mode: u16,
+        cumask: u16,
+        flags: u32,
+    ) -> Result<(Entry, u64)> {
+        debug!("fs:create with parent {:?} name {:?}", parent, name);
+        if parent.is_root() && self.internal_nodes.contains_name(name) {
+            return Err(VFSError::ErrLIBC { kind: libc::EEXIST });
+        }
+        if name.len() > MAX_NAME_LENGTH {
+            return Err(VFSError::ErrLIBC {
+                kind: libc::ENAMETOOLONG,
+            });
+        };
+
+        let (inode, attr) = self
+            .meta
+            .create(ctx, parent, name, mode & 0o777, cumask, flags)
+            .await?;
+
+        let ttl = self.get_entry_ttl(&attr);
+        let mut e = Entry::new_with_attr(inode, name, attr)
+            .with_generation(1)
+            .with_ttl(ttl)
+            .to_owned();
+        self.update_length(&mut e);
+        let fh = self.new_handle(inode);
+        Ok((e, fh))
+    }
+}
+
+fn get_file_type(mode: mode_t) -> Result<FileType> {
+    match (mode & (libc::S_IFMT & 0xffff)) as u32 {
+        libc::S_IFIFO => Ok(FileType::NamedPipe),
+        libc::S_IFSOCK => Ok(FileType::Socket),
+        libc::S_IFLNK => Ok(FileType::Symlink),
+        libc::S_IFREG => Ok(FileType::RegularFile),
+        libc::S_IFBLK => Ok(FileType::BlockDevice),
+        libc::S_IFDIR => Ok(FileType::Directory),
+        libc::S_IFCHR => Ok(FileType::CharDevice),
+        _ => Err(VFSError::ErrLIBC { kind: libc::EPERM }),
     }
 }

@@ -122,6 +122,10 @@ impl InodeAttr {
         self.ctime = t;
         self
     }
+    pub fn keep_cache(&mut self) -> &mut Self {
+        self.keep_cache = true;
+        self
+    }
 
     // Enforces different access levels for owner, group, and others.
     // Grants full access to the root user.

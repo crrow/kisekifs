@@ -5,8 +5,8 @@ use std::{
 };
 
 use fuser::{
-    Filesystem, KernelConfig, ReplyAttr, ReplyDirectory, ReplyEntry, ReplyOpen, ReplyStatfs,
-    Request,
+    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectory, ReplyEntry, ReplyOpen,
+    ReplyStatfs, Request,
 };
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
@@ -204,7 +204,7 @@ impl Filesystem for KisekiFuse {
     // Optionally opendir may also return an arbitrary filehandle in the
     // fuse_file_info structure, which will be passed to readdir, releasedir and
     // fsyncdir.
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
         let ctx = MetaContext::default();
         match self
@@ -247,5 +247,73 @@ impl Filesystem for KisekiFuse {
             }
         }
         reply.ok();
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    fn mknod(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        // mode_t is u32 on Linux but u16 on macOS, so cast it here
+        let ctx = MetaContext::default();
+        let name = name.to_string_lossy().to_string();
+
+        match self.runtime.block_on(
+            self.vfs
+                .mknod(
+                    &ctx,
+                    Ino(parent),
+                    name,
+                    mode as libc::mode_t,
+                    umask as u16,
+                    rdev,
+                )
+                .in_current_span(),
+        ) {
+            Ok(entry) => self.reply_entry(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let ctx = MetaContext::default();
+        let name = name.to_string_lossy().to_string();
+        match self.runtime.block_on(
+            self.vfs
+                .create(
+                    &ctx,
+                    Ino(parent),
+                    &name,
+                    mode as u16,
+                    umask as u16,
+                    flags as u32,
+                )
+                .in_current_span(),
+        ) {
+            Ok((entry, fh)) => reply.created(
+                &entry.ttl.unwrap(),
+                &entry.to_fuse_attr(),
+                entry.generation.unwrap(),
+                fh,
+                flags as u32,
+            ),
+            Err(e) => reply.error(e.to_errno()),
+        }
     }
 }

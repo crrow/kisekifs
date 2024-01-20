@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use crate::meta::{engine::MetaEngine, err::Result, types::Ino, MetaContext};
 
 impl MetaEngine {
@@ -14,6 +12,7 @@ impl MetaEngine {
     }
 
     pub(crate) async fn update_dir_quota(&self, ino: Ino, space: i64, inodes: i64) -> Result<()> {
-        todo!()
+        // TODO
+        return Ok(());
     }
 }

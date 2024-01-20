@@ -1,20 +1,15 @@
-use std::{
-    fmt::{Display, Formatter},
-    str::FromStr,
-};
+use std::{fmt::Display, str::FromStr};
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use regex::Regex;
-use snafu::{ensure, ensure_whatever, ResultExt, Whatever};
+use snafu::{ResultExt, Whatever};
 use tokio::runtime;
-use tracing::level_filters::LevelFilter;
-use tracing::{debug, info, instrument, warn, Instrument, Level};
-use tracing_subscriber::fmt::writer::MakeWriterExt;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing::{debug, info, level_filters::LevelFilter, warn, Instrument};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     meta,
-    meta::{types::DirStat, Compression, MetaConfig},
+    meta::{Compression, MetaConfig},
     metrics::metrics_tracing_span_layer,
 };
 

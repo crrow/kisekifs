@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::{
     cmp::{max, min},
     collections::HashMap,
@@ -11,6 +12,7 @@ use std::{
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
 use fuser::FileType;
 use futures::TryStream;
@@ -271,6 +273,29 @@ impl OpenFiles {
             })
             .is_some()
     }
+    pub(crate) fn open(&self, inode: Ino, attr: &mut InodeAttr) {
+        match self.files.get_mut(&inode) {
+            None => {
+                self.files.insert(
+                    inode,
+                    OpenFile {
+                        attr: attr.keep_cache().clone(),
+                        reference_count: 1,
+                        last_check: std::time::Instant::now(),
+                        chunks: HashMap::new(),
+                    },
+                );
+            }
+            Some(mut op) => {
+                if op.attr.mtime == attr.mtime {
+                    attr.keep_cache = op.attr.keep_cache;
+                }
+                op.attr.keep_cache = true;
+                op.reference_count += 1;
+                op.last_check = std::time::Instant::now();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -342,14 +367,14 @@ impl MetaEngine {
         if format.trash_days > 0 {
             if let None = self.sto_get_attr(TRASH_INODE).await? {
                 basic_attr.set_perm(0o555);
-                self.sto_set_attr(TRASH_INODE, basic_attr.clone()).await?;
+                self.sto_set_attr(TRASH_INODE, &basic_attr).await?;
             }
         }
         self.sto_set_format(&format).await?;
         if need_init_root {
             basic_attr.set_perm(0o777);
             tokio::try_join!(
-                self.sto_set_attr(ROOT_INO, basic_attr.clone()),
+                self.sto_set_attr(ROOT_INO, &basic_attr),
                 self.sto_increment_counter(Counter::NextInode, 2),
             )?;
         }
@@ -863,17 +888,53 @@ impl MetaEngine {
 
         self.sto_set_entry_info(parent, name, EntryInfo::new(inode, typ))
             .await?;
-        self.sto_set_attr(inode, attr).await?;
+        self.sto_set_attr(inode, &attr).await?;
         if update_parent_attr {
-            self.sto_set_attr(parent, parent_attr).await?;
+            self.sto_set_attr(parent, &parent_attr).await?;
         }
         if typ == FileType::Symlink {
             self.sto_set_sym(inode, path).await?;
         } else if typ == FileType::Directory {
             self.sto_set_dir_stat(inode, DirStat::default()).await?;
-        }
+        };
+        Ok((inode, attr))
+    }
 
-        todo!()
+    pub async fn create(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: &str,
+        mode: u16,
+        cumask: u16,
+        flags: u32,
+    ) -> Result<(Ino, InodeAttr)> {
+        let mut x = match self
+            .mknod(
+                ctx,
+                parent,
+                name,
+                FileType::RegularFile,
+                mode,
+                cumask,
+                0,
+                String::new(),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if e.to_errno() == libc::EEXIST {
+                    let rt = self.do_lookup(parent, name).await?;
+                    rt
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+
+        self.open_files.open(x.0, &mut x.1);
+        return Ok(x);
     }
 }
 

@@ -1,19 +1,19 @@
 use std::sync::atomic::Ordering;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use futures::stream::FuturesUnordered;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::debug;
 
-use crate::meta::engine::Counter;
 use crate::meta::{
-    engine::MetaEngine,
+    engine::{Counter, MetaEngine},
     err::*,
     types::{DirStat, EntryInfo, Ino, InodeAttr},
     Format,
 };
+
+// TODO: create a new type for maintain the persistent logic.
 
 impl MetaEngine {
     pub(crate) fn update_mem_fs_stats(&self, space: i64, inodes: i64) {
@@ -100,9 +100,9 @@ impl MetaEngine {
     //     }
     // }
 
-    pub(crate) async fn sto_set_attr(&self, inode: Ino, attr: InodeAttr) -> Result<()> {
+    pub(crate) async fn sto_set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()> {
         let inode_key = inode.generate_key_str();
-        let attr_buf = bincode::serialize(&attr).unwrap();
+        let attr_buf = bincode::serialize(attr).unwrap();
         self.operator
             .write(&inode_key, attr_buf)
             .await
