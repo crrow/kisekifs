@@ -1190,4 +1190,39 @@ mod tests {
         let x = id_table.next().await.unwrap();
         assert_eq!(x, 2);
     }
+
+    #[tokio::test]
+    async fn list_entries() {
+        let mut builder = opendal::services::Memory::default();
+        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir_path = tempdir.as_ref().to_str().unwrap();
+        builder.root(tempdir_path);
+
+        let op = Arc::new(Operator::new(builder).unwrap().finish());
+
+        let meta_engine = MetaEngine {
+            config: MetaConfig::default(),
+            format: RwLock::new(Format::default()),
+            root: ROOT_INO,
+            operator: op.clone(),
+            sub_trash: None,
+            open_files: OpenFiles::new(Duration::from_secs(0), 0),
+            dir_parents: DashMap::new(),
+            fs_states: Default::default(),
+            free_inodes: IdTable::new(op.clone(), Counter::NextInode, INODE_BATCH),
+            dir_stats: DashMap::new(),
+        };
+
+        meta_engine
+            .sto_set_entry_info(Ino(1), "a", EntryInfo::new(Ino(2), FileType::RegularFile))
+            .await
+            .unwrap();
+        meta_engine
+            .sto_set_entry_info(Ino(1), "b", EntryInfo::new(Ino(3), FileType::RegularFile))
+            .await
+            .unwrap();
+
+        let entry_infos = meta_engine.sto_list_entry_info(Ino(1)).await.unwrap();
+        assert_eq!(entry_infos.len(), 2);
+    }
 }

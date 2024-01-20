@@ -123,6 +123,30 @@ impl MetaEngine {
         EntryInfo::parse_from(&entry_buf).context(ErrBincodeDeserializeFailedSnafu)
     }
 
+    pub(crate) async fn sto_list_entry_info(&self, parent: Ino) -> Result<Vec<EntryInfo>> {
+        let entry_key = generate_sto_entry_key_str(parent, "");
+        let mut stream = self
+            .operator
+            .list(&entry_key)
+            .await
+            .context(ErrFailedToReadFromStoSnafu { key: entry_key })?;
+        let mut result = vec![];
+        for sto_entry in &stream {
+            let entry_info_key = sto_entry.path();
+            let entry_info_buf =
+                self.operator
+                    .read(entry_info_key)
+                    .await
+                    .context(ErrFailedToReadFromStoSnafu {
+                        key: entry_info_key.to_string(),
+                    })?;
+            let entry_info =
+                EntryInfo::parse_from(&entry_info_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+            result.push(entry_info)
+        }
+        Ok(result)
+    }
+
     #[instrument(level = "info", skip(self), fields(parent, name, entry_info))]
     pub(crate) async fn sto_set_entry_info(
         &self,
@@ -240,10 +264,7 @@ pub(crate) fn generate_entry_key(parent: Ino, name: &str) -> Vec<u8> {
     buf
 }
 pub(crate) fn generate_sto_entry_key_str(parent: Ino, name: &str) -> String {
-    let str = generate_entry_key(parent, name)
-        .into_iter()
-        .map(|x| x as char)
-        .collect();
+    let str = format!("A{:0>8}D/{}", parent.0, name);
     debug!("generate entry key str: {str}");
     str
 }
