@@ -442,6 +442,31 @@ impl KisekiVFS {
         // TODO: fix me
         Ok(InodeAttr::default())
     }
+
+    pub async fn mkdir(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: &str,
+        mode: u16,
+        umask: u16,
+    ) -> Result<Entry> {
+        debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
+        if parent.is_root() && self.internal_nodes.contains_name(name) {
+            return Err(VFSError::ErrLIBC { kind: libc::EEXIST });
+        }
+        if name.len() > MAX_NAME_LENGTH {
+            return Err(VFSError::ErrLIBC {
+                kind: libc::ENAMETOOLONG,
+            });
+        };
+        let (ino, attr) = self.meta.mkdir(ctx, parent, name, mode, umask).await?;
+        let ttl = self.get_entry_ttl(&attr);
+        Ok(Entry::new_with_attr(ino, name, attr)
+            .with_generation(1)
+            .with_ttl(ttl)
+            .to_owned())
+    }
 }
 
 // TODO: review me, use a better way.
