@@ -10,8 +10,6 @@ use crate::meta::{types::ino::*, util::UID_GID};
 pub struct InodeAttr {
     /// Flags (macOS only, see chflags(2))
     pub flags: u32,
-    /// juicefs' flags which wile be modified by interface
-    pub juicefs_flags: u8,
     /// Kind of file (directory, file, pipe, etc)
     pub kind: FileType,
     /// permission mode
@@ -57,7 +55,6 @@ impl InodeAttr {
     pub fn hard_code_inode_attr(is_trash: bool) -> Self {
         Self {
             flags: 0,
-            juicefs_flags: 0,
             kind: FileType::Directory,
             perm: if is_trash { 0o555 } else { 0o777 },
             uid: 0,
@@ -160,9 +157,10 @@ impl InodeAttr {
         perm as u8 & 7
     }
     pub fn to_fuse_attr<I: Into<u64>>(&self, ino: I) -> fuser::FileAttr {
-        info!("to_fuse_attr: {:?}", self);
+        let inode = ino.into();
+        info!("ino: {inode}, to_fuse_attr: {:?}", self);
         let mut fa = FileAttr {
-            ino: ino.into(),
+            ino: inode,
             size: 0,
             blocks: 0,
             atime: self.atime,
@@ -216,7 +214,6 @@ impl Default for InodeAttr {
             flags: 0,
             full: false,
             keep_cache: false,
-            juicefs_flags: 0,
         }
     }
 }

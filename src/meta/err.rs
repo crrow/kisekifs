@@ -13,25 +13,53 @@ pub enum MetaError {
     #[snafu(display("invalid format version"))]
     ErrInvalidFormatVersion,
     #[snafu(display("failed to parse scheme: {}: {}", got, source))]
-    FailedToParseScheme { source: opendal::Error, got: String },
+    FailedToParseScheme {
+        source: opendal::Error,
+        got: String,
+    },
     #[snafu(display("failed to open operator: {}", source))]
-    FailedToOpenOperator { source: opendal::Error },
+    FailedToOpenOperator {
+        source: opendal::Error,
+    },
     #[snafu(display("bad access permission for inode:{inode}, want:{want}, grant:{grant}"))]
-    ErrBadAccessPerm { inode: Ino, want: u8, grant: u8 },
+    ErrBadAccessPerm {
+        inode: Ino,
+        want: u8,
+        grant: u8,
+    },
     #[snafu(display("inode {inode} is not a directory"))]
-    ErrNotDir { inode: Ino },
+    ErrNotDir {
+        inode: Ino,
+    },
     #[snafu(display("failed to deserialize: {source}"))]
-    ErrBincodeDeserializeFailed { source: bincode::Error },
+    ErrBincodeDeserializeFailed {
+        source: bincode::Error,
+    },
     #[snafu(display("failed to read {key} from sto: {source}"))]
-    ErrFailedToReadFromSto { key: String, source: opendal::Error },
+    ErrFailedToReadFromSto {
+        key: String,
+        source: opendal::Error,
+    },
     #[snafu(display("failed to write {key} into sto: {source}"))]
-    ErrFailedToWriteToSto { key: String, source: opendal::Error },
+    ErrFailedToWriteToSto {
+        key: String,
+        source: opendal::Error,
+    },
     #[snafu(display("failed to list by opendal: {source}"))]
-    ErrOpendalList { source: opendal::Error },
+    ErrOpendalList {
+        source: opendal::Error,
+    },
     #[snafu(display("failed to mknod: {kind}"))]
-    ErrMknod { kind: libc::c_int },
+    ErrMknod {
+        kind: libc::c_int,
+    },
     #[snafu(display("failed to do counter: {source}"))]
-    ErrFailedToDoCounter { source: opendal::Error },
+    ErrFailedToDoCounter {
+        source: opendal::Error,
+    },
+    ErrLibc {
+        kind: libc::c_int,
+    },
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -65,6 +93,7 @@ impl ToErrno for MetaError {
                 error!("meta has not been initialized yet");
                 libc::EIO
             }
+            MetaError::ErrLibc { kind } => *kind,
         }
     }
 }

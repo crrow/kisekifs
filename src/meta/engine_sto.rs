@@ -4,7 +4,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use futures::StreamExt;
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::meta::{
     engine::{Counter, MetaEngine},
@@ -123,6 +123,7 @@ impl MetaEngine {
         EntryInfo::parse_from(&entry_buf).context(ErrBincodeDeserializeFailedSnafu)
     }
 
+    #[instrument(level = "info", skip(self), fields(parent, name, entry_info))]
     pub(crate) async fn sto_set_entry_info(
         &self,
         parent: Ino,
@@ -239,8 +240,10 @@ pub(crate) fn generate_entry_key(parent: Ino, name: &str) -> Vec<u8> {
     buf
 }
 pub(crate) fn generate_sto_entry_key_str(parent: Ino, name: &str) -> String {
-    generate_entry_key(parent, name)
+    let str = generate_entry_key(parent, name)
         .into_iter()
         .map(|x| x as char)
-        .collect()
+        .collect();
+    debug!("generate entry key str: {str}");
+    str
 }

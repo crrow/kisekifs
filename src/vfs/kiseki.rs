@@ -1,3 +1,5 @@
+use bitflags::bitflags;
+use std::time::SystemTime;
 use std::{
     fmt::{Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
@@ -5,13 +7,14 @@ use std::{
 };
 
 use dashmap::DashMap;
-use fuser::FileType;
-use libc::mode_t;
+use fuser::{FileType, TimeOrNow};
+use libc::{mode_t, EBADF, EINVAL, EPERM};
 use tokio::{sync::Mutex, time::Instant};
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
-use crate::meta::MAX_NAME_LENGTH;
+use crate::meta::{SetAttrFlags, MAX_NAME_LENGTH};
 use crate::vfs::err::VFSError;
+use crate::vfs::VFSError::ErrLIBC;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -20,13 +23,7 @@ use crate::{
         types::*,
         MetaContext, MODE_MASK_R, MODE_MASK_W,
     },
-    vfs::{
-        config::VFSConfig,
-        err::{Result, VFSError::ErrBadFileHandle},
-        handle::Handle,
-        reader::DataReader,
-        writer::DataWriter,
-    },
+    vfs::{config::VFSConfig, err::Result, handle::Handle, reader::DataReader, writer::DataWriter},
 };
 
 #[derive(Debug)]
@@ -223,7 +220,7 @@ impl KisekiVFS {
 
         let h = self
             .find_handle(inode, fh)
-            .ok_or_else(|| ErrBadFileHandle { inode, fh })?;
+            .ok_or_else(|| ErrLIBC { kind: EBADF })?;
 
         let mut h = h.lock().await;
         if h.children.is_empty() || offset == 0 {
@@ -327,8 +324,127 @@ impl KisekiVFS {
         let fh = self.new_handle(inode);
         Ok((e, fh))
     }
+
+    pub async fn set_attr(
+        &self,
+        ctx: &MetaContext,
+        ino: Ino,
+        flags: u32,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        fh: Option<u64>,
+    ) -> Result<Entry> {
+        info!(
+            "fs:setattr with ino {:?} flags {:?} atime {:?} mtime {:?}",
+            ino, flags, atime, mtime
+        );
+
+        if ino.is_special() {
+            return if let Some(n) = self.internal_nodes.get_internal_node(ino) {
+                Ok(n.into())
+            } else {
+                Err(ErrLIBC { kind: EPERM })
+            };
+        }
+
+        let mut new_attr = InodeAttr::default();
+        let flags = SetAttrFlags::from_bits(flags).expect("invalid set attr flags");
+        if flags.contains(SetAttrFlags::SIZE) {
+            if let Some(size) = size {
+                new_attr = self.truncate(ino, size, fh).await?;
+            } else {
+                return Err(ErrLIBC { kind: EINVAL });
+            }
+        }
+        if flags.contains(SetAttrFlags::MODE) {
+            if let Some(mode) = mode {
+                new_attr.perm = mode as u16 & 0o777;
+            } else {
+                return Err(ErrLIBC { kind: EINVAL });
+            }
+        }
+        if flags.contains(SetAttrFlags::UID) {
+            if let Some(uid) = uid {
+                new_attr.uid = uid;
+            } else {
+                return Err(ErrLIBC { kind: EINVAL });
+            }
+        }
+        if flags.contains(SetAttrFlags::GID) {
+            if let Some(gid) = gid {
+                new_attr.gid = gid;
+            } else {
+                return Err(ErrLIBC { kind: EINVAL });
+            }
+        }
+        let mut need_update = false;
+        if flags.contains(SetAttrFlags::ATIME) {
+            if let Some(atime) = atime {
+                new_attr.atime = match atime {
+                    TimeOrNow::SpecificTime(st) => SystemTime::from(st),
+                    TimeOrNow::Now => SystemTime::now(),
+                };
+                need_update = true;
+            } else {
+                return Err(ErrLIBC { kind: EINVAL });
+            }
+        }
+        if flags.contains(SetAttrFlags::MTIME) {
+            if let Some(mtime) = mtime {
+                new_attr.mtime = match mtime {
+                    TimeOrNow::SpecificTime(st) => SystemTime::from(st),
+                    TimeOrNow::Now => {
+                        need_update = true;
+                        SystemTime::now()
+                    }
+                };
+            } else {
+                return Err(ErrLIBC { kind: EINVAL });
+            }
+        }
+        if need_update {
+            if ctx.check_permission {
+                self.meta
+                    .check_set_attr(ctx, ino, flags, &mut new_attr)
+                    .await?;
+            }
+            let mtime = match mtime.unwrap() {
+                TimeOrNow::SpecificTime(st) => SystemTime::from(st),
+                TimeOrNow::Now => SystemTime::now(),
+            };
+            if flags.contains(SetAttrFlags::MTIME) || flags.contains(SetAttrFlags::MTIME_NOW) {
+                self.writer.update_mtime(ino, mtime)?;
+            }
+        }
+
+        let entry = self
+            .meta
+            .set_attr(ctx, flags, ino, &mut new_attr)
+            .await
+            .and_then(|mut entry| {
+                self.update_length(&mut entry);
+                let ttl = self.get_entry_ttl(&new_attr);
+                entry.with_ttl(ttl);
+                Ok(entry)
+            })?;
+
+        // TODO: invalid open_file cache
+
+        Ok(entry)
+    }
+
+    async fn truncate(&self, ino: Ino, size: u64, fh: Option<u64>) -> Result<InodeAttr> {
+        // let attr = self.meta.get_attr(ino).await?;
+        // TODO: fix me
+        Ok(InodeAttr::default())
+    }
 }
 
+// TODO: review me, use a better way.
 fn get_file_type(mode: mode_t) -> Result<FileType> {
     match (mode & (libc::S_IFMT & 0xffff)) as u32 {
         libc::S_IFIFO => Ok(FileType::NamedPipe),
@@ -338,6 +454,6 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
         libc::S_IFBLK => Ok(FileType::BlockDevice),
         libc::S_IFDIR => Ok(FileType::Directory),
         libc::S_IFCHR => Ok(FileType::CharDevice),
-        _ => Err(VFSError::ErrLIBC { kind: libc::EPERM }),
+        _ => Err(ErrLIBC { kind: libc::EPERM }),
     }
 }

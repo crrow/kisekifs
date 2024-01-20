@@ -1,3 +1,4 @@
+use std::time::SystemTime;
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
@@ -6,7 +7,7 @@ use std::{
 
 use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectory, ReplyEntry, ReplyOpen,
-    ReplyStatfs, Request,
+    ReplyStatfs, Request, TimeOrNow,
 };
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
@@ -96,6 +97,28 @@ impl KisekiFuse {
             entry.generation.unwrap(),
         );
     }
+    fn reply_attr(&self, ctx: &MetaContext, reply: ReplyAttr, mut entry: Entry) {
+        if !entry.inode.is_special()
+            && entry.is_file()
+            && self.vfs.modified_since(entry.inode, ctx.start_at)
+        {
+            debug!("refresh attr for {:?}", entry.inode);
+            match self
+                .runtime
+                .block_on(self.vfs.get_attr(entry.inode).in_current_span())
+            {
+                Ok(new_attr) => {
+                    debug!("refresh attr for {:?} to {:?}", entry.inode, new_attr);
+                    entry.attr = new_attr;
+                }
+                Err(e) => {
+                    debug!("failed to refresh attr for {:?} {:?}", entry.inode, e);
+                }
+            }
+        }
+        self.vfs.update_length(&mut entry);
+        reply.attr(&entry.ttl.unwrap(), &entry.attr.to_fuse_attr(entry.inode))
+    }
 }
 
 impl Filesystem for KisekiFuse {
@@ -124,6 +147,8 @@ impl Filesystem for KisekiFuse {
                 return;
             }
         };
+
+        // FIXME: tidy this error
 
         if name.len() > MAX_NAME_LENGTH {
             reply.error(
@@ -313,6 +338,47 @@ impl Filesystem for KisekiFuse {
                 fh,
                 flags as u32,
             ),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, name=field::Empty))]
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let ctx = MetaContext::from(_req);
+        match self.runtime.block_on(
+            self.vfs
+                .set_attr(
+                    &ctx,
+                    Ino(ino),
+                    flags.unwrap_or(0),
+                    atime,
+                    mtime,
+                    mode,
+                    uid,
+                    gid,
+                    size,
+                    fh,
+                )
+                .in_current_span(),
+        ) {
+            Ok(entry) => self.reply_attr(&ctx, reply, entry),
             Err(e) => reply.error(e.to_errno()),
         }
     }

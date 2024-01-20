@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use fuser::Request;
 use std::time::Instant;
 
@@ -153,6 +154,12 @@ impl<'a> From<&'a fuser::Request<'a>> for MetaContext {
     }
 }
 
+impl MetaContext {
+    pub fn contains_gid(&self, gid: u32) -> bool {
+        self.gid_list.contains(&gid)
+    }
+}
+
 pub const MAX_NAME_LENGTH: usize = 255;
 pub const DOT: &'static str = ".";
 pub const DOT_DOT: &'static str = "..";
@@ -160,3 +167,21 @@ pub const DOT_DOT: &'static str = "..";
 pub const MODE_MASK_R: u8 = 0b100;
 pub const MODE_MASK_W: u8 = 0b010;
 pub const MODE_MASK_X: u8 = 0b001;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetAttrFlags(pub u32);
+
+bitflags! {
+    impl SetAttrFlags: u32 {
+        const MODE = 1 << 0;
+        const UID = 1 << 1;
+        const GID = 1 << 2;
+        const SIZE = 1 << 3;
+        const ATIME = 1 << 4;
+        const MTIME = 1 << 5;
+        const CTIME = 1 << 6;
+        const ATIME_NOW = 1 << 7;
+        const MTIME_NOW = 1 << 8;
+        const FLAG = 1 << 15;
+    }
+}
