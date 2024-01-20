@@ -382,4 +382,26 @@ impl Filesystem for KisekiFuse {
             Err(e) => reply.error(e.to_errno()),
         }
     }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let ctx = MetaContext::from(_req);
+        let name = name.to_string_lossy().to_string();
+        match self.runtime.block_on(
+            self.vfs
+                .mkdir(&ctx, Ino(parent), &name, mode as u16, umask as u16)
+                .in_current_span(),
+        ) {
+            Ok(entry) => self.reply_entry(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
 }
