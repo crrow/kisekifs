@@ -105,7 +105,7 @@ impl Filesystem for KisekiFuse {
     /// object
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
         debug!("init kiseki...");
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         match self.runtime.block_on(self.vfs.init(&ctx).in_current_span()) {
             Ok(_) => {}
             Err(_) => {}
@@ -114,7 +114,7 @@ impl Filesystem for KisekiFuse {
     }
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
             name: name.to_owned(),
         }) {
@@ -170,7 +170,7 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         // FIXME: use a better way
         let state = self
             .runtime
@@ -206,7 +206,7 @@ impl Filesystem for KisekiFuse {
     // fsyncdir.
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         match self
             .runtime
             .block_on(self.vfs.open_dir(&ctx, _ino, _flags).in_current_span())
@@ -225,7 +225,7 @@ impl Filesystem for KisekiFuse {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         let mut entries = match self
             .runtime
             .block_on(self.vfs.read_dir(&ctx, ino, fh, offset).in_current_span())
@@ -261,7 +261,7 @@ impl Filesystem for KisekiFuse {
         reply: ReplyEntry,
     ) {
         // mode_t is u32 on Linux but u16 on macOS, so cast it here
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         let name = name.to_string_lossy().to_string();
 
         match self.runtime.block_on(
@@ -292,7 +292,7 @@ impl Filesystem for KisekiFuse {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         let name = name.to_string_lossy().to_string();
         match self.runtime.block_on(
             self.vfs

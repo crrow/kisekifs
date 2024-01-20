@@ -74,6 +74,10 @@ impl InodeAttr {
             keep_cache: false,
         }
     }
+    pub fn set_flags(&mut self, flags: u32) -> &mut Self {
+        self.flags = flags;
+        self
+    }
     pub fn set_perm(&mut self, perm: u16) -> &mut Self {
         self.perm = perm;
         self

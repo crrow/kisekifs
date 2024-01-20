@@ -1,3 +1,4 @@
+use fuser::Request;
 use std::time::Instant;
 
 mod config;
@@ -139,15 +140,14 @@ pub struct MetaContext {
     pub check_permission: bool,
     pub start_at: Instant,
 }
-
-impl Default for MetaContext {
-    fn default() -> Self {
+impl<'a> From<&'a fuser::Request<'a>> for MetaContext {
+    fn from(req: &'a Request) -> Self {
         Self {
-            gid: 0,
+            gid: req.gid(),
             gid_list: vec![],
-            uid: 0,
-            pid: 0,
-            check_permission: false,
+            uid: req.uid(),
+            pid: req.pid(),
+            check_permission: true,
             start_at: Instant::now(),
         }
     }

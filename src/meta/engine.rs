@@ -808,6 +808,7 @@ impl MetaEngine {
             .set_gid(ctx.gid)
             .set_uid(ctx.uid)
             .set_parent(parent)
+            // .set_flags(flags) // TODO, maybe we don't have to
             .set_full()
             .to_owned();
         if typ == FileType::Directory {
@@ -909,6 +910,10 @@ impl MetaEngine {
         cumask: u16,
         flags: u32,
     ) -> Result<(Ino, InodeAttr)> {
+        debug!(
+            "create with parent {:?}, name {:?}, mode {:?}, cumask {:?}, flags {:?}",
+            parent, name, mode, cumask, flags
+        );
         let mut x = match self
             .mknod(
                 ctx,
@@ -924,6 +929,7 @@ impl MetaEngine {
         {
             Ok(r) => r,
             Err(e) => {
+                warn!("create failed: {:?}", e);
                 if e.to_errno() == libc::EEXIST {
                     let rt = self.do_lookup(parent, name).await?;
                     rt
