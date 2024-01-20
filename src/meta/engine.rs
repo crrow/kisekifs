@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::ops::BitOr;
+use std::time::SystemTime;
 use std::{
     cmp::{max, min},
     collections::HashMap,
@@ -11,11 +14,12 @@ use std::{
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
 use fuser::FileType;
 use futures::TryStream;
 use lazy_static::lazy_static;
-use libc::c_int;
+use libc::{c_int, EACCES};
 use opendal::{ErrorKind, Operator};
 use snafu::{ResultExt, Snafu};
 use tokio::{
@@ -24,6 +28,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 
+use crate::meta::SetAttrFlags;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -271,6 +276,29 @@ impl OpenFiles {
             })
             .is_some()
     }
+    pub(crate) fn open(&self, inode: Ino, attr: &mut InodeAttr) {
+        match self.files.get_mut(&inode) {
+            None => {
+                self.files.insert(
+                    inode,
+                    OpenFile {
+                        attr: attr.keep_cache().clone(),
+                        reference_count: 1,
+                        last_check: std::time::Instant::now(),
+                        chunks: HashMap::new(),
+                    },
+                );
+            }
+            Some(mut op) => {
+                if op.attr.mtime == attr.mtime {
+                    attr.keep_cache = op.attr.keep_cache;
+                }
+                op.attr.keep_cache = true;
+                op.reference_count += 1;
+                op.last_check = std::time::Instant::now();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -342,14 +370,14 @@ impl MetaEngine {
         if format.trash_days > 0 {
             if let None = self.sto_get_attr(TRASH_INODE).await? {
                 basic_attr.set_perm(0o555);
-                self.sto_set_attr(TRASH_INODE, basic_attr.clone()).await?;
+                self.sto_set_attr(TRASH_INODE, &basic_attr).await?;
             }
         }
         self.sto_set_format(&format).await?;
         if need_init_root {
             basic_attr.set_perm(0o777);
             tokio::try_join!(
-                self.sto_set_attr(ROOT_INO, basic_attr.clone()),
+                self.sto_set_attr(ROOT_INO, &basic_attr),
                 self.sto_increment_counter(Counter::NextInode, 2),
             )?;
         }
@@ -588,7 +616,7 @@ impl MetaEngine {
     // Readdir returns all entries for given directory, which include attributes if
     // plus is true.
     pub async fn read_dir(&self, ctx: &MetaContext, inode: Ino, plus: bool) -> Result<Vec<Entry>> {
-        info!(dir=?inode, "readdir");
+        info!(dir=?inode, "readdir in plus?, {plus}");
         let inode = self.check_root(inode);
         let mut attr = self.get_attr(inode).await?;
         let mmask = if plus {
@@ -633,8 +661,10 @@ impl MetaEngine {
             .list(&entry_prefix)
             .await
             .context(ErrOpendalListSnafu)?;
+        debug!("read entries from sto: { }", sto_entries.len());
         for sto_entry in &sto_entries {
             let name = sto_entry.name();
+            info!("read entry in sto: {name}");
             if name.len() == 0 {
                 warn!("empty entry name under {:?}", inode);
                 continue;
@@ -649,11 +679,13 @@ impl MetaEngine {
                     })?;
             let entry_info =
                 EntryInfo::parse_from(&entry_info_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+            info!("found entry info: ino:{}, name: {}", entry_info.inode, name);
             basic_entries.push(Entry::new(entry_info.inode, name, entry_info.typ));
         }
 
         // TODO: optimize me
         if plus && basic_entries.len() != 0 {
+            info!("in plus mode, get dir entries' attr");
             for e in basic_entries {
                 let attr = self.get_attr(e.inode).await?;
                 e.attr = attr;
@@ -783,6 +815,7 @@ impl MetaEngine {
             .set_gid(ctx.gid)
             .set_uid(ctx.uid)
             .set_parent(parent)
+            // .set_flags(flags) // TODO, maybe we don't have to
             .set_full()
             .to_owned();
         if typ == FileType::Directory {
@@ -810,13 +843,13 @@ impl MetaEngine {
 
         // check if the parent have the permission
         access(ctx, parent, &parent_attr, MODE_MASK_W)?;
-        if parent_attr.juicefs_flags & Flag::Immutable as u8 != 0 {
+        if (parent_attr.flags as u8) & Flag::Immutable as u8 != 0 {
             return Err(MetaError::ErrMknod { kind: libc::EPERM })?;
         }
 
         // check if the entry already exists
         match self.sto_get_entry_info(parent, name).await {
-            Ok(found) => return Err(MetaError::ErrMknod { kind: libc::EEXIST }),
+            Ok(_) => return Err(MetaError::ErrMknod { kind: libc::EEXIST }),
             Err(e) => {
                 if e.to_errno() != libc::ENOENT {
                     return Err(e)?;
@@ -863,17 +896,218 @@ impl MetaEngine {
 
         self.sto_set_entry_info(parent, name, EntryInfo::new(inode, typ))
             .await?;
-        self.sto_set_attr(inode, attr).await?;
+        info!("create entry info: parent: {parent}, name: {name}, ino: {inode}");
+        self.sto_set_attr(inode, &attr).await?;
         if update_parent_attr {
-            self.sto_set_attr(parent, parent_attr).await?;
+            self.sto_set_attr(parent, &parent_attr).await?;
         }
         if typ == FileType::Symlink {
             self.sto_set_sym(inode, path).await?;
         } else if typ == FileType::Directory {
             self.sto_set_dir_stat(inode, DirStat::default()).await?;
-        }
+        };
+        Ok((inode, attr))
+    }
 
-        todo!()
+    pub async fn create(
+        &self,
+        ctx: &MetaContext,
+        parent: Ino,
+        name: &str,
+        mode: u16,
+        cumask: u16,
+        flags: u32,
+    ) -> Result<(Ino, InodeAttr)> {
+        debug!(
+            "create with parent {:?}, name {:?}, mode {:?}, cumask {:?}, flags {:?}",
+            parent, name, mode, cumask, flags
+        );
+        let mut x = match self
+            .mknod(
+                ctx,
+                parent,
+                name,
+                FileType::RegularFile,
+                mode,
+                cumask,
+                0,
+                String::new(),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("create failed: {:?}", e);
+                if e.to_errno() == libc::EEXIST {
+                    let rt = self.do_lookup(parent, name).await?;
+                    rt
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+
+        self.open_files.open(x.0, &mut x.1);
+        return Ok(x);
+    }
+    pub async fn check_set_attr(
+        &self,
+        ctx: &MetaContext,
+        ino: Ino,
+        flags: SetAttrFlags,
+        new_attr: &mut InodeAttr,
+    ) -> Result<()> {
+        let inode = self.check_root(ino);
+        let cur_attr = self.get_attr(inode).await?;
+        self.merge_attr(ctx, flags, inode, &cur_attr, new_attr, SystemTime::now())?;
+
+        // TODO: implement me
+        return Ok(());
+    }
+    // SetAttr updates the attributes for given node.
+    pub async fn set_attr(
+        &self,
+        ctx: &MetaContext,
+        flags: SetAttrFlags,
+        ino: Ino,
+        new_attr: &mut InodeAttr,
+    ) -> Result<Entry> {
+        let inode = self.check_root(ino);
+
+        let cur_attr = self
+            .sto_get_attr(inode)
+            .await?
+            .ok_or_else(|| MetaError::ErrLibc { kind: libc::ENOENT })?;
+        if cur_attr.parent.is_trash() {
+            return Err(MetaError::ErrLibc { kind: libc::EPERM });
+        }
+        let mut dirty_attr =
+            self.merge_attr(ctx, flags, ino, &cur_attr, new_attr, SystemTime::now())?;
+        dirty_attr.ctime = SystemTime::now();
+        self.sto_set_attr(inode, &dirty_attr).await?;
+        Ok(Entry::new_with_attr(inode, "", dirty_attr))
+    }
+    fn merge_attr(
+        &self,
+        ctx: &MetaContext,
+        flags: SetAttrFlags,
+        inode: Ino,
+        cur: &InodeAttr,
+        new_attr: &mut InodeAttr,
+        now: SystemTime,
+    ) -> Result<InodeAttr> {
+        let mut dirty_attr = cur.clone();
+        if flags.contains(SetAttrFlags::MODE)
+            && flags.contains(SetAttrFlags::UID | SetAttrFlags::GID)
+        {
+            // This operation isolates the file permission bits representing the user's file type (setuid, setgid, or sticky bit).
+            dirty_attr.perm |= cur.perm & 0o6000;
+        }
+        let mut changed = false;
+        if cur.perm & 0o6000 != 0 && flags.contains(SetAttrFlags::UID | SetAttrFlags::GID) {
+            #[cfg(target_os = "linux")]
+            {
+                if !dirty_attr.is_dir() {
+                    if ctx.uid != 0 || (dirty_attr.perm >> 3) & 1 != 0 {
+                        // clear SUID and SGID
+                        dirty_attr.perm &= 01777; // WHY ?
+                        new_attr.perm &= 01777;
+                    } else {
+                        // keep SGID if the file is non-group-executable
+                        dirty_attr.perm &= 03777;
+                        new_attr.perm &= 03777;
+                    }
+                }
+            }
+            changed = true;
+        }
+        if flags.contains(SetAttrFlags::GID) {
+            if ctx.uid != 0 && ctx.uid != cur.uid {
+                return Err(MetaError::ErrLibc { kind: libc::EPERM });
+            }
+            if cur.gid != new_attr.gid {
+                if ctx.check_permission && cur.uid != 0 && !ctx.contains_gid(new_attr.gid) {
+                    return Err(MetaError::ErrLibc { kind: libc::EPERM });
+                }
+                dirty_attr.gid = new_attr.gid;
+                changed = true;
+            }
+        }
+        if flags.contains(SetAttrFlags::UID) && cur.uid != new_attr.uid {
+            if ctx.uid != 0 {
+                return Err(MetaError::ErrLibc { kind: libc::EPERM });
+            }
+            dirty_attr.uid = new_attr.uid;
+            changed = true;
+        }
+        if flags.contains(SetAttrFlags::MODE) {
+            if ctx.uid != 0 && new_attr.perm & 0o2000 != 0 {
+                if ctx.uid != cur.gid {
+                    new_attr.perm &= 0o5777;
+                }
+            }
+            if cur.perm != new_attr.perm {
+                if ctx.uid != 0 && ctx.uid != cur.uid {
+                    if (cur.perm & 01777 != new_attr.perm & 01777
+                        || new_attr.perm & 02000 > cur.perm & 02000
+                        || new_attr.perm & 04000 > cur.perm & 04000)
+                    {
+                        return Err(MetaError::ErrLibc { kind: libc::EPERM });
+                    }
+                }
+
+                dirty_attr.perm = new_attr.perm;
+                changed = true;
+            }
+        }
+        if flags.contains(SetAttrFlags::ATIME_NOW) {
+            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
+                if ctx.uid != cur.uid {
+                    return Err(MetaError::ErrLibc { kind: libc::EACCES });
+                }
+            }
+            dirty_attr.atime = now;
+            changed = true;
+        } else if flags.contains(SetAttrFlags::ATIME) {
+            if ctx.uid != cur.uid {
+                return Err(MetaError::ErrLibc { kind: libc::EACCES });
+            }
+            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
+                if ctx.uid != cur.uid {
+                    return Err(MetaError::ErrLibc { kind: libc::EACCES });
+                }
+            }
+            dirty_attr.atime = new_attr.atime;
+            changed = true;
+        }
+        if flags.contains(SetAttrFlags::MTIME_NOW) {
+            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
+                if ctx.uid != cur.uid {
+                    return Err(MetaError::ErrLibc { kind: libc::EACCES });
+                }
+            }
+            dirty_attr.mtime = now;
+            changed = true;
+        } else if flags.contains(SetAttrFlags::MTIME) {
+            if ctx.uid != cur.uid {
+                return Err(MetaError::ErrLibc { kind: libc::EACCES });
+            }
+            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
+                if ctx.uid != cur.uid {
+                    return Err(MetaError::ErrLibc { kind: libc::EACCES });
+                }
+            }
+            dirty_attr.mtime = new_attr.mtime;
+            changed = true;
+        }
+        if flags.contains(SetAttrFlags::FLAG) {
+            dirty_attr.flags = flags.0;
+            changed = true;
+        }
+        if !changed {
+            dirty_attr = cur.clone();
+        }
+        Ok(dirty_attr)
     }
 }
 
@@ -893,11 +1127,7 @@ pub fn access(ctx: &MetaContext, inode: Ino, attr: &InodeAttr, perm_mask: u8) ->
         // perm = 0o644 (rw-r--r--)
         // perm_mask = 0o4 (read permission)
         // perm & perm_mask = 0o4 (read permission is granted)
-        return Err(MetaError::ErrBadAccessPerm {
-            inode,
-            want: perm_mask,
-            grant: perm,
-        })?;
+        return Err(MetaError::ErrLibc { kind: EACCES })?;
     }
 
     Ok(())
@@ -959,5 +1189,40 @@ mod tests {
         let id_table = IdTable::new(op, counter, INODE_BATCH);
         let x = id_table.next().await.unwrap();
         assert_eq!(x, 2);
+    }
+
+    #[tokio::test]
+    async fn list_entries() {
+        let mut builder = opendal::services::Memory::default();
+        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir_path = tempdir.as_ref().to_str().unwrap();
+        builder.root(tempdir_path);
+
+        let op = Arc::new(Operator::new(builder).unwrap().finish());
+
+        let meta_engine = MetaEngine {
+            config: MetaConfig::default(),
+            format: RwLock::new(Format::default()),
+            root: ROOT_INO,
+            operator: op.clone(),
+            sub_trash: None,
+            open_files: OpenFiles::new(Duration::from_secs(0), 0),
+            dir_parents: DashMap::new(),
+            fs_states: Default::default(),
+            free_inodes: IdTable::new(op.clone(), Counter::NextInode, INODE_BATCH),
+            dir_stats: DashMap::new(),
+        };
+
+        meta_engine
+            .sto_set_entry_info(Ino(1), "a", EntryInfo::new(Ino(2), FileType::RegularFile))
+            .await
+            .unwrap();
+        meta_engine
+            .sto_set_entry_info(Ino(1), "b", EntryInfo::new(Ino(3), FileType::RegularFile))
+            .await
+            .unwrap();
+
+        let entry_infos = meta_engine.sto_list_entry_info(Ino(1)).await.unwrap();
+        assert_eq!(entry_infos.len(), 2);
     }
 }

@@ -50,6 +50,7 @@ impl LoggingConfig {
         }
         let console_layer = if self.log_to_stdout {
             let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_line_number(true)
                 .with_ansi(supports_color::on(supports_color::Stream::Stdout).is_some())
                 .with_filter(create_env_filter(&self.default_filter));
             Some(fmt_layer)

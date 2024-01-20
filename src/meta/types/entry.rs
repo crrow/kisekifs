@@ -40,7 +40,15 @@ impl Entry {
         self.ttl = Some(ttl);
         self
     }
+    pub fn with_ttl(&mut self, ttl: Duration) -> &mut Self {
+        self.ttl = Some(ttl);
+        self
+    }
     pub fn set_generation(mut self, generation: u64) -> Self {
+        self.generation = Some(generation);
+        self
+    }
+    pub fn with_generation(&mut self, generation: u64) -> &mut Self {
         self.generation = Some(generation);
         self
     }

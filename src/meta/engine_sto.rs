@@ -1,19 +1,19 @@
 use std::sync::atomic::Ordering;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use futures::stream::FuturesUnordered;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
-use tracing::debug;
+use tracing::{debug, instrument};
 
-use crate::meta::engine::Counter;
 use crate::meta::{
-    engine::MetaEngine,
+    engine::{Counter, MetaEngine},
     err::*,
     types::{DirStat, EntryInfo, Ino, InodeAttr},
     Format,
 };
+
+// TODO: create a new type for maintain the persistent logic.
 
 impl MetaEngine {
     pub(crate) fn update_mem_fs_stats(&self, space: i64, inodes: i64) {
@@ -100,9 +100,9 @@ impl MetaEngine {
     //     }
     // }
 
-    pub(crate) async fn sto_set_attr(&self, inode: Ino, attr: InodeAttr) -> Result<()> {
+    pub(crate) async fn sto_set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()> {
         let inode_key = inode.generate_key_str();
-        let attr_buf = bincode::serialize(&attr).unwrap();
+        let attr_buf = bincode::serialize(attr).unwrap();
         self.operator
             .write(&inode_key, attr_buf)
             .await
@@ -123,6 +123,31 @@ impl MetaEngine {
         EntryInfo::parse_from(&entry_buf).context(ErrBincodeDeserializeFailedSnafu)
     }
 
+    pub(crate) async fn sto_list_entry_info(&self, parent: Ino) -> Result<Vec<EntryInfo>> {
+        let entry_key = generate_sto_entry_key_str(parent, "");
+        let mut stream = self
+            .operator
+            .list(&entry_key)
+            .await
+            .context(ErrFailedToReadFromStoSnafu { key: entry_key })?;
+        let mut result = vec![];
+        for sto_entry in &stream {
+            let entry_info_key = sto_entry.path();
+            let entry_info_buf =
+                self.operator
+                    .read(entry_info_key)
+                    .await
+                    .context(ErrFailedToReadFromStoSnafu {
+                        key: entry_info_key.to_string(),
+                    })?;
+            let entry_info =
+                EntryInfo::parse_from(&entry_info_buf).context(ErrBincodeDeserializeFailedSnafu)?;
+            result.push(entry_info)
+        }
+        Ok(result)
+    }
+
+    #[instrument(level = "info", skip(self), fields(parent, name, entry_info))]
     pub(crate) async fn sto_set_entry_info(
         &self,
         parent: Ino,
@@ -239,8 +264,7 @@ pub(crate) fn generate_entry_key(parent: Ino, name: &str) -> Vec<u8> {
     buf
 }
 pub(crate) fn generate_sto_entry_key_str(parent: Ino, name: &str) -> String {
-    generate_entry_key(parent, name)
-        .into_iter()
-        .map(|x| x as char)
-        .collect()
+    let str = format!("A{:0>8}D/{}", parent.0, name);
+    debug!("generate entry key str: {str}");
+    str
 }

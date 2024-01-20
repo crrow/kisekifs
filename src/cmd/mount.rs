@@ -234,7 +234,7 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
         .open()
         .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
 
-    let file_system = vfs::KisekiVFS::create(vfs_config, meta)
+    let file_system = vfs::KisekiVFS::new(vfs_config, meta)
         .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
     let fs = fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(

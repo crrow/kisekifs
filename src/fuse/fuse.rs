@@ -1,3 +1,4 @@
+use std::time::SystemTime;
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
@@ -5,8 +6,8 @@ use std::{
 };
 
 use fuser::{
-    Filesystem, KernelConfig, ReplyAttr, ReplyDirectory, ReplyEntry, ReplyOpen, ReplyStatfs,
-    Request,
+    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectory, ReplyEntry, ReplyOpen,
+    ReplyStatfs, Request, TimeOrNow,
 };
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
@@ -96,6 +97,28 @@ impl KisekiFuse {
             entry.generation.unwrap(),
         );
     }
+    fn reply_attr(&self, ctx: &MetaContext, reply: ReplyAttr, mut entry: Entry) {
+        if !entry.inode.is_special()
+            && entry.is_file()
+            && self.vfs.modified_since(entry.inode, ctx.start_at)
+        {
+            debug!("refresh attr for {:?}", entry.inode);
+            match self
+                .runtime
+                .block_on(self.vfs.get_attr(entry.inode).in_current_span())
+            {
+                Ok(new_attr) => {
+                    debug!("refresh attr for {:?} to {:?}", entry.inode, new_attr);
+                    entry.attr = new_attr;
+                }
+                Err(e) => {
+                    debug!("failed to refresh attr for {:?} {:?}", entry.inode, e);
+                }
+            }
+        }
+        self.vfs.update_length(&mut entry);
+        reply.attr(&entry.ttl.unwrap(), &entry.attr.to_fuse_attr(entry.inode))
+    }
 }
 
 impl Filesystem for KisekiFuse {
@@ -105,7 +128,7 @@ impl Filesystem for KisekiFuse {
     /// object
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
         debug!("init kiseki...");
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         match self.runtime.block_on(self.vfs.init(&ctx).in_current_span()) {
             Ok(_) => {}
             Err(_) => {}
@@ -114,7 +137,7 @@ impl Filesystem for KisekiFuse {
     }
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
             name: name.to_owned(),
         }) {
@@ -124,6 +147,8 @@ impl Filesystem for KisekiFuse {
                 return;
             }
         };
+
+        // FIXME: tidy this error
 
         if name.len() > MAX_NAME_LENGTH {
             reply.error(
@@ -170,7 +195,7 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         // FIXME: use a better way
         let state = self
             .runtime
@@ -204,9 +229,9 @@ impl Filesystem for KisekiFuse {
     // Optionally opendir may also return an arbitrary filehandle in the
     // fuse_file_info structure, which will be passed to readdir, releasedir and
     // fsyncdir.
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         match self
             .runtime
             .block_on(self.vfs.open_dir(&ctx, _ino, _flags).in_current_span())
@@ -225,7 +250,7 @@ impl Filesystem for KisekiFuse {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let ctx = MetaContext::default();
+        let ctx = MetaContext::from(_req);
         let mut entries = match self
             .runtime
             .block_on(self.vfs.read_dir(&ctx, ino, fh, offset).in_current_span())
@@ -247,5 +272,114 @@ impl Filesystem for KisekiFuse {
             }
         }
         reply.ok();
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    fn mknod(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        // mode_t is u32 on Linux but u16 on macOS, so cast it here
+        let ctx = MetaContext::from(_req);
+        let name = name.to_string_lossy().to_string();
+
+        match self.runtime.block_on(
+            self.vfs
+                .mknod(
+                    &ctx,
+                    Ino(parent),
+                    name,
+                    mode as libc::mode_t,
+                    umask as u16,
+                    rdev,
+                )
+                .in_current_span(),
+        ) {
+            Ok(entry) => self.reply_entry(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let ctx = MetaContext::from(_req);
+        let name = name.to_string_lossy().to_string();
+        match self.runtime.block_on(
+            self.vfs
+                .create(
+                    &ctx,
+                    Ino(parent),
+                    &name,
+                    mode as u16,
+                    umask as u16,
+                    flags as u32,
+                )
+                .in_current_span(),
+        ) {
+            Ok((entry, fh)) => reply.created(
+                &entry.ttl.unwrap(),
+                &entry.to_fuse_attr(),
+                entry.generation.unwrap(),
+                fh,
+                flags as u32,
+            ),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, name=field::Empty))]
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let ctx = MetaContext::from(_req);
+        match self.runtime.block_on(
+            self.vfs
+                .set_attr(
+                    &ctx,
+                    Ino(ino),
+                    flags.unwrap_or(0),
+                    atime,
+                    mtime,
+                    mode,
+                    uid,
+                    gid,
+                    size,
+                    fh,
+                )
+                .in_current_span(),
+        ) {
+            Ok(entry) => self.reply_attr(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
     }
 }

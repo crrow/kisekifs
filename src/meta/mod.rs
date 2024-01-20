@@ -1,3 +1,5 @@
+use bitflags::bitflags;
+use fuser::Request;
 use std::time::Instant;
 
 mod config;
@@ -103,6 +105,9 @@ pub mod internal_nodes {
                 n.0.name = format!(".kfs{}", n.0.name);
             }
         }
+        pub fn contains_name(&self, name: &str) -> bool {
+            self.nodes.contains_key(name)
+        }
     }
 
     #[derive(Debug)]
@@ -136,17 +141,22 @@ pub struct MetaContext {
     pub check_permission: bool,
     pub start_at: Instant,
 }
-
-impl Default for MetaContext {
-    fn default() -> Self {
+impl<'a> From<&'a fuser::Request<'a>> for MetaContext {
+    fn from(req: &'a Request) -> Self {
         Self {
-            gid: 0,
+            gid: req.gid(),
             gid_list: vec![],
-            uid: 0,
-            pid: 0,
-            check_permission: false,
+            uid: req.uid(),
+            pid: req.pid(),
+            check_permission: true,
             start_at: Instant::now(),
         }
+    }
+}
+
+impl MetaContext {
+    pub fn contains_gid(&self, gid: u32) -> bool {
+        self.gid_list.contains(&gid)
     }
 }
 
@@ -157,3 +167,21 @@ pub const DOT_DOT: &'static str = "..";
 pub const MODE_MASK_R: u8 = 0b100;
 pub const MODE_MASK_W: u8 = 0b010;
 pub const MODE_MASK_X: u8 = 0b001;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetAttrFlags(pub u32);
+
+bitflags! {
+    impl SetAttrFlags: u32 {
+        const MODE = 1 << 0;
+        const UID = 1 << 1;
+        const GID = 1 << 2;
+        const SIZE = 1 << 3;
+        const ATIME = 1 << 4;
+        const MTIME = 1 << 5;
+        const CTIME = 1 << 6;
+        const ATIME_NOW = 1 << 7;
+        const MTIME_NOW = 1 << 8;
+        const FLAG = 1 << 15;
+    }
+}
