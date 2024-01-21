@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use libc::{EBADF, EPERM};
+use snafu::Snafu;
 use std::sync::RwLock;
 use tokio::sync::Notify;
 use tokio::time::timeout;
@@ -77,6 +78,7 @@ pub(crate) struct Handle {
     // we can acquire reader when the reader is not -1;
     readers: Arc<AtomicI64>,
     notify: Arc<Notify>,
+    timeout: Duration,
 }
 
 impl Handle {
@@ -90,6 +92,7 @@ impl Handle {
             inner: Arc::new(RwLock::new(inner)),
             notify,
             readers: Default::default(),
+            timeout: Duration::from_secs(1),
         }
     }
     pub(crate) fn new_with<F: FnMut(&mut HandleInner)>(fh: u64, inode: Ino, mut f: F) -> Self {
@@ -101,6 +104,7 @@ impl Handle {
             inner: Arc::new(RwLock::new(inner)),
             notify: Arc::new(Notify::new()),
             readers: Default::default(),
+            timeout: Duration::from_secs(1),
         }
     }
     pub(crate) fn fh(&self) -> u64 {
@@ -111,8 +115,15 @@ impl Handle {
     }
     pub(crate) async fn acquire_read_lock(&self) -> Result<HandleReadGuard> {
         // we can only acquire reader when the readers is not -1,
+        let start = Instant::now();
         let seq;
         loop {
+            let elapsed = Instant::now().checked_duration_since(start).unwrap();
+            if elapsed > self.timeout {
+                return Err(VFSError::ErrTimeout {
+                    timeout: self.timeout,
+                });
+            }
             let readers = self.readers.load(Ordering::SeqCst);
             if readers >= 0 {
                 match self.readers.compare_exchange(
@@ -146,8 +157,15 @@ impl Handle {
     }
     pub(crate) async fn acquire_write_lock(&self) -> Result<HandleWriteGuard> {
         let seq;
+        let start = Instant::now();
         // we can only acquire writer when the readers is 0,
         loop {
+            let elapsed = Instant::now().checked_duration_since(start).unwrap();
+            if elapsed > self.timeout {
+                return Err(VFSError::ErrTimeout {
+                    timeout: self.timeout,
+                });
+            }
             let current = self.readers.load(Ordering::SeqCst);
             if current != 0 {
                 debug!(
@@ -257,6 +275,7 @@ impl<'a> Drop for HandleWriteGuard<'a> {
 mod tests {
     use super::*;
     use rand::prelude::SliceRandom;
+    use std::thread::sleep;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 5)]
     async fn rwlock_basic_read() {
@@ -307,29 +326,30 @@ mod tests {
         let _ = tokio::join!(read_handle, write_handle);
     }
 
+    #[derive(Clone, Copy)]
+    struct A {
+        inner: *mut i32,
+    }
+    unsafe impl Send for crate::vfs::handle::tests::A {}
+    unsafe impl Sync for crate::vfs::handle::tests::A {}
+    impl crate::vfs::handle::tests::A {
+        fn read(&self) -> i32 {
+            unsafe { *self.inner }
+        }
+        fn write(&self, x: i32) {
+            unsafe {
+                *self.inner += x;
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 5)]
     async fn rwlock_concurrent() {
         let handle = Handle::new(0, Ino(1));
         let mut jhs = vec![];
         let mut x = 0i32;
         let ptr = &mut x as *mut _;
-        #[derive(Clone, Copy)]
-        struct A {
-            inner: *mut i32,
-        }
         let ptr = A { inner: ptr };
-        unsafe impl Send for A {};
-        unsafe impl Sync for A {};
-        impl A {
-            fn read(&self) -> i32 {
-                unsafe { *self.inner }
-            }
-            fn write(&self, x: i32) {
-                unsafe {
-                    *self.inner += x;
-                }
-            }
-        }
 
         for i in 0..5000 {
             // let mut data = data.clone();
@@ -359,5 +379,28 @@ mod tests {
         }
 
         assert_eq!(ptr.read(), 5000);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+    async fn timeout() {
+        let handle = Handle::new(0, Ino(1));
+
+        let handle1 = handle.clone();
+        let wh = tokio::spawn(async move {
+            let wh = handle1.acquire_write_lock().await;
+            assert!(wh.is_ok());
+            sleep(Duration::from_secs(2));
+            drop(wh);
+        });
+
+        let handle2 = handle.clone();
+        let wh2 = tokio::spawn(async move {
+            let wh = handle2.acquire_write_lock().await;
+            assert!(wh.is_err());
+            println!("acquired write lock err {:?}", wh.unwrap_err())
+        });
+
+        assert!(wh.await.is_ok());
+        let r = wh2.await.unwrap();
     }
 }
