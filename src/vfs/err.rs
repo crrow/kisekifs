@@ -1,8 +1,11 @@
 use libc::c_int;
 use snafu::Snafu;
 
-use crate::meta::MetaError;
-use crate::{common, common::err::ToErrno, meta::types::Ino};
+use crate::{
+    common,
+    common::err::ToErrno,
+    meta::{types::Ino, MetaError},
+};
 
 // FIXME: its ugly
 

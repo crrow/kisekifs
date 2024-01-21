@@ -1,15 +1,15 @@
-use std::time::SystemTime;
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
     fmt::Display,
+    time::SystemTime,
 };
 
 use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectory, ReplyEntry, ReplyOpen,
     ReplyStatfs, Request, TimeOrNow,
 };
-use libc::c_int;
+use libc::{c_int, open};
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
 use tracing::{debug, error, field, info, instrument, trace, Instrument};
@@ -401,6 +401,18 @@ impl Filesystem for KisekiFuse {
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=_ino, pid=_req.pid(), name=field::Empty))]
+    fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
+        let ctx = MetaContext::from(_req);
+        match self
+            .runtime
+            .block_on(self.vfs.open(&ctx, Ino(_ino), _flags).in_current_span())
+        {
+            Ok(opened) => reply.opened(opened.fh, opened.flags),
             Err(e) => reply.error(e.to_errno()),
         }
     }

@@ -1,6 +1,7 @@
+use std::time::Instant;
+
 use bitflags::bitflags;
 use fuser::Request;
-use std::time::Instant;
 
 mod config;
 pub use config::{Compression, Format, MetaConfig};

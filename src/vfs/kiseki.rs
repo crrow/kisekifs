@@ -1,29 +1,32 @@
-use bitflags::bitflags;
-use std::time::SystemTime;
 use std::{
     fmt::{Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
     time,
+    time::SystemTime,
 };
 
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use libc::{mode_t, EBADF, EINVAL, EPERM};
+use libc::{mode_t, open, EACCES, EBADF, EINVAL, EPERM};
 use tokio::{sync::Mutex, time::Instant};
 use tracing::{debug, info, trace};
 
-use crate::meta::{SetAttrFlags, MAX_NAME_LENGTH};
-use crate::vfs::err::VFSError;
-use crate::vfs::VFSError::ErrLIBC;
 use crate::{
     common::err::ToErrno,
     meta::{
         engine::{access, MetaEngine},
-        internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+        internal_nodes::{InternalNode, PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
         types::*,
-        MetaContext, MODE_MASK_R, MODE_MASK_W,
+        MetaContext, SetAttrFlags, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W,
     },
-    vfs::{config::VFSConfig, err::Result, handle::Handle, reader::DataReader, writer::DataWriter},
+    vfs::{
+        config::VFSConfig,
+        err::{Result, VFSError},
+        handle::Handle,
+        reader::DataReader,
+        writer::DataWriter,
+        VFSError::ErrLIBC,
+    },
 };
 
 #[derive(Debug)]
@@ -133,6 +136,15 @@ impl KisekiVFS {
             self.reader.truncate(entry.inode, entry.attr.length);
         }
     }
+    pub fn update_length_by_attr(&self, inode: Ino, attr: &mut InodeAttr) {
+        if attr.full && attr.is_file() {
+            let len = self.writer.get_length(inode);
+            if len > attr.length {
+                attr.length = len;
+            }
+            self.reader.truncate(inode, attr.length);
+        }
+    }
 
     pub fn modified_since(&self, inode: Ino, start_at: time::Instant) -> bool {
         match self.modified_at.get(&inode) {
@@ -198,6 +210,20 @@ impl KisekiVFS {
             }
         };
         fh
+    }
+    fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<u64> {
+        let fh = self.next_fh();
+        let mut handle = Handle::new(fh, inode);
+        match flags & libc::O_ACCMODE {
+            libc::O_RDONLY => handle.reader = Some(self.reader.open(inode, length)),
+            libc::O_WRONLY | libc::O_RDWR => {
+                handle.reader = Some(self.reader.open(inode, length));
+                handle.writer = Some(self.writer.open(inode, length));
+            }
+            _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
+        }
+
+        Ok(fh)
     }
 
     fn next_fh(&self) -> u64 {
@@ -467,6 +493,57 @@ impl KisekiVFS {
             .with_ttl(ttl)
             .to_owned())
     }
+
+    pub async fn open(&self, ctx: &MetaContext, inode: Ino, flags: i32) -> Result<Opened> {
+        debug!(
+            "fs:open with ino {:?} flags {:#b} pid {:?}",
+            inode, flags, ctx.pid
+        );
+
+        let mut opened_fh = 0;
+        let mut entry: Entry;
+        if inode.is_special() {
+            // TODO: at present, we don't implement the same logic as the juicefs.
+            return Err(ErrLIBC { kind: EACCES });
+            // if inode != CONTROL_INODE && flags & libc::O_ACCMODE !=
+            // libc::O_RDONLY { }
+        }
+
+        match self.meta.open_inode(ctx, inode, flags).await {
+            Ok(mut attr) => {
+                self.update_length_by_attr(inode, &mut attr);
+                opened_fh = self.new_file_handle(inode, attr.length, flags)?;
+                let ttl = self.get_ttl(attr.kind);
+                entry = Entry::new_with_attr(inode, "", attr)
+                    .with_generation(1)
+                    .with_ttl(ttl)
+                    .to_owned();
+            }
+            Err(e) => return Err(e)?,
+        }
+
+        let opened_flags = if inode.is_special() {
+            fuser::consts::FOPEN_DIRECT_IO
+        } else if entry.attr.keep_cache {
+            fuser::consts::FOPEN_KEEP_CACHE
+        } else {
+            0
+        };
+
+        Ok(Opened {
+            fh: opened_fh,
+            flags: opened_flags,
+            entry,
+        })
+    }
+}
+
+/// Reply to a `open` or `opendir` call
+#[derive(Debug)]
+pub struct Opened {
+    pub fh: u64,
+    pub flags: u32,
+    pub entry: Entry,
 }
 
 // TODO: review me, use a better way.

@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -23,14 +24,10 @@ pub fn align4k(length: u64) -> i64 {
     (blocks_needed * 4096) as i64
 }
 
-#[derive(Debug)]
-pub enum Flag {
-    Immutable = 1,
-    Append = 2,
-}
-
-impl Into<u8> for Flag {
-    fn into(self) -> u8 {
-        self as u8
+bitflags! {
+    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    pub struct Flags: u8 {
+        const IMMUTABLE = 0x01;
+        const APPEND = 0x02;
     }
 }
