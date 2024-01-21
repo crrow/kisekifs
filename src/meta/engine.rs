@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path},
     sync::{
         atomic::{AtomicI64, Ordering::Acquire},
-        Arc,
+        Arc, RwLock,
     },
     time::SystemTime,
 };
@@ -23,10 +23,7 @@ use libc::{c_int, EACCES};
 use opendal::{ErrorKind, Operator};
 use scopeguard::defer;
 use snafu::{ResultExt, Snafu};
-use tokio::{
-    sync::RwLock,
-    time::{timeout, Duration, Instant},
-};
+use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::{
@@ -105,7 +102,7 @@ impl Counter {
         let counter_key = self.generate_sto_key();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
-        let guard = locker_ref.read().await;
+        let guard = locker_ref.read().unwrap();
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => buf
                 .as_slice()
@@ -119,6 +116,7 @@ impl Counter {
                 }
             }
         };
+        drop(guard);
         Ok(counter)
     }
     pub async fn load(&self, operator: Arc<Operator>) -> std::result::Result<u64, opendal::Error> {
@@ -158,7 +156,8 @@ impl Counter {
         let counter_key = self.generate_sto_key();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
-        let guard = locker_ref.write().await;
+        let guard = locker_ref.write().unwrap();
+        defer!(drop(guard));
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => {
                 let v: u64 = buf
@@ -209,7 +208,7 @@ impl IdTable {
 
     /// Return the next unused ID from the table.
     pub async fn next(&self) -> std::result::Result<u64, opendal::Error> {
-        let mut next_max_pair = self.next_max_pair.write().await;
+        let mut next_max_pair = self.next_max_pair.write().unwrap();
         if next_max_pair.0 >= next_max_pair.1 {
             let new_max = self
                 .counter
@@ -368,7 +367,7 @@ impl MetaEngine {
             need_init_root = true;
         }
 
-        let mut guard = self.format.write().await;
+        let mut guard = self.format.write().unwrap();
         *guard = format.clone();
 
         let mut basic_attr = InodeAttr::default()
@@ -460,7 +459,7 @@ impl MetaEngine {
         inodes = max(inodes, 0);
         let iused = inodes as u64;
 
-        let format = self.format.read().await;
+        let format = self.format.read().unwrap();
 
         let total_space = if format.capacity_in_bytes > 0 {
             min(format.capacity_in_bytes, used_space as u64)

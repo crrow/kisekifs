@@ -6,13 +6,13 @@ use std::{
 };
 
 use fuser::{
-    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectory, ReplyEntry, ReplyOpen,
-    ReplyStatfs, Request, TimeOrNow,
+    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry,
+    ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
 use libc::{c_int, open};
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
-use tracing::{debug, error, field, info, instrument, trace, Instrument};
+use tracing::{debug, error, field, info, instrument, instrument::Instrumented, trace, Instrument};
 
 use crate::{
     common::err::ToErrno,
@@ -413,6 +413,68 @@ impl Filesystem for KisekiFuse {
             .block_on(self.vfs.open(&ctx, Ino(_ino), _flags).in_current_span())
         {
             Ok(opened) => reply.opened(opened.fh, opened.flags),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, size=size, name=field::Empty))]
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+        let ctx = MetaContext::from(_req);
+        let mut bytes_sent = 0;
+        match self.runtime.block_on(
+            self.vfs
+                .read(&ctx, Ino(ino), fh, offset, size, flags, lock_owner)
+                .in_current_span(),
+        ) {
+            Ok(data) => {
+                bytes_sent = data.len();
+                reply.data(&data);
+            }
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        write_flags: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        let ctx = MetaContext::from(_req);
+        match self.runtime.block_on(
+            self.vfs
+                .write(
+                    &ctx,
+                    Ino(ino),
+                    fh,
+                    offset,
+                    data,
+                    write_flags,
+                    flags,
+                    lock_owner,
+                )
+                .in_current_span(),
+        ) {
+            Ok(bytes_written) => {
+                reply.written(bytes_written);
+            }
             Err(e) => reply.error(e.to_errno()),
         }
     }
