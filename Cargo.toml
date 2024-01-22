@@ -41,6 +41,10 @@ tempfile = "3.9.0"
 regex = "1.10.2"
 clap-num = "1.0.2"
 bitflags = "2.4.2"
+scopeguard = "1.2.0"
+bytes = "1.5.0"
+crossbeam-channel = "0.5.11"
+rand = "0.8.5"
 
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}

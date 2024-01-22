@@ -29,7 +29,7 @@ impl MetaEngine {
         space: i64,
         inodes: i64,
     ) -> Result<()> {
-        let guard = self.format.read().await;
+        let guard = self.format.read().unwrap();
         if !guard.dir_stats {
             return Ok(());
         }
@@ -195,7 +195,7 @@ impl MetaEngine {
         } else {
             return Err(MetaError::ErrMetaHasNotBeenInitializedYet {});
         };
-        let mut guard = self.format.write().await;
+        let mut guard = self.format.write().unwrap();
         *guard = format.clone();
         Ok(format)
     }

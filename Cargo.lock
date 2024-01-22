@@ -471,6 +471,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "176dc175b78f56c0f321911d9c8eb2b77a78a4860b9c19db83835fea1a46649b"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-epoch"
 version = "0.9.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1126,9 +1135,11 @@ dependencies = [
  "bitflags 2.4.2",
  "built",
  "byteorder",
+ "bytes",
  "clap",
  "clap-num",
  "const_format",
+ "crossbeam-channel",
  "ctrlc",
  "dashmap",
  "features",
@@ -1141,7 +1152,9 @@ dependencies = [
  "metrics",
  "opendal",
  "procfs",
+ "rand",
  "regex",
+ "scopeguard",
  "serde",
  "serde_json",
  "snafu",

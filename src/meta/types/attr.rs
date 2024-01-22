@@ -50,6 +50,10 @@ impl InodeAttr {
     pub fn is_dir(&self) -> bool {
         self.kind == FileType::Directory
     }
+
+    pub fn is_file(&self) -> bool {
+        self.kind == FileType::RegularFile
+    }
     /// Providing default values guarantees for some critical inode,
     /// makes them always available, even under slow or unreliable conditions.
     pub fn hard_code_inode_attr(is_trash: bool) -> Self {

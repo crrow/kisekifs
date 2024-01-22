@@ -1,34 +1,31 @@
-use std::future::Future;
-use std::ops::BitOr;
-use std::time::SystemTime;
 use std::{
     cmp::{max, min},
     collections::HashMap,
     fmt::{Debug, Formatter},
+    future::Future,
+    ops::BitOr,
     os::unix::ffi::OsStrExt,
     path::{Component, Path},
     sync::{
         atomic::{AtomicI64, Ordering::Acquire},
-        Arc,
+        Arc, RwLock,
     },
+    time::SystemTime,
 };
 
+use bitflags::bitflags;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
 use fuser::FileType;
 use futures::TryStream;
 use lazy_static::lazy_static;
 use libc::{c_int, EACCES};
 use opendal::{ErrorKind, Operator};
+use scopeguard::defer;
 use snafu::{ResultExt, Snafu};
-use tokio::{
-    sync::RwLock,
-    time::{timeout, Duration, Instant},
-};
+use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::meta::SetAttrFlags;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -38,7 +35,7 @@ use crate::{
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
         types::{DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, ROOT_INO, TRASH_INODE},
         util::*,
-        MetaContext, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
+        MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },
 };
 
@@ -105,7 +102,7 @@ impl Counter {
         let counter_key = self.generate_sto_key();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
-        let guard = locker_ref.read().await;
+        let guard = locker_ref.read().unwrap();
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => buf
                 .as_slice()
@@ -119,6 +116,7 @@ impl Counter {
                 }
             }
         };
+        drop(guard);
         Ok(counter)
     }
     pub async fn load(&self, operator: Arc<Operator>) -> std::result::Result<u64, opendal::Error> {
@@ -158,7 +156,8 @@ impl Counter {
         let counter_key = self.generate_sto_key();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
-        let guard = locker_ref.write().await;
+        let guard = locker_ref.write().unwrap();
+        defer!(drop(guard));
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => {
                 let v: u64 = buf
@@ -209,7 +208,7 @@ impl IdTable {
 
     /// Return the next unused ID from the table.
     pub async fn next(&self) -> std::result::Result<u64, opendal::Error> {
-        let mut next_max_pair = self.next_max_pair.write().await;
+        let mut next_max_pair = self.next_max_pair.write().unwrap();
         if next_max_pair.0 >= next_max_pair.1 {
             let new_max = self
                 .counter
@@ -299,6 +298,17 @@ impl OpenFiles {
             }
         }
     }
+
+    pub(crate) fn open_check(&self, ino: Ino) -> Option<InodeAttr> {
+        if let Some(mut of) = self.files.get_mut(&ino) {
+            if of.last_check.elapsed() < self.ttl {
+                of.reference_count += 1;
+                return Some(of.attr.clone());
+            }
+        }
+
+        return None;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -357,7 +367,7 @@ impl MetaEngine {
             need_init_root = true;
         }
 
-        let mut guard = self.format.write().await;
+        let mut guard = self.format.write().unwrap();
         *guard = format.clone();
 
         let mut basic_attr = InodeAttr::default()
@@ -449,7 +459,7 @@ impl MetaEngine {
         inodes = max(inodes, 0);
         let iused = inodes as u64;
 
-        let format = self.format.read().await;
+        let format = self.format.read().unwrap();
 
         let total_space = if format.capacity_in_bytes > 0 {
             min(format.capacity_in_bytes, used_space as u64)
@@ -843,7 +853,11 @@ impl MetaEngine {
 
         // check if the parent have the permission
         access(ctx, parent, &parent_attr, MODE_MASK_W)?;
-        if (parent_attr.flags as u8) & Flag::Immutable as u8 != 0 {
+
+        if Flags::from_bits(parent_attr.flags as u8)
+            .unwrap()
+            .contains(Flags::IMMUTABLE)
+        {
             return Err(MetaError::ErrMknod { kind: libc::EPERM })?;
         }
 
@@ -1000,7 +1014,8 @@ impl MetaEngine {
         if flags.contains(SetAttrFlags::MODE)
             && flags.contains(SetAttrFlags::UID | SetAttrFlags::GID)
         {
-            // This operation isolates the file permission bits representing the user's file type (setuid, setgid, or sticky bit).
+            // This operation isolates the file permission bits representing the user's file
+            // type (setuid, setgid, or sticky bit).
             dirty_attr.perm |= cur.perm & 0o6000;
         }
         let mut changed = false;
@@ -1109,6 +1124,52 @@ impl MetaEngine {
         }
         Ok(dirty_attr)
     }
+
+    // Open checks permission on a node and track it as open.
+    pub async fn open_inode(&self, ctx: &MetaContext, inode: Ino, flags: i32) -> Result<InodeAttr> {
+        if self.config.read_only
+            && flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC | libc::O_APPEND) != 0
+        {
+            return Err(MetaError::ErrLibc { kind: libc::EROFS });
+        }
+
+        defer!(self.touch_atime(ctx, inode));
+
+        if !self.config.open_cache.is_zero() {
+            if let Some(attr) = self.open_files.open_check(inode) {
+                return Ok(attr);
+            }
+        }
+
+        let mut attr = self.sto_must_get_attr(inode).await?;
+        let mask = match flags & (libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR) {
+            libc::O_RDONLY => MODE_MASK_R,
+            libc::O_WRONLY => MODE_MASK_W,
+            libc::O_RDWR => MODE_MASK_W | MODE_MASK_R,
+            _ => return Err(MetaError::ErrLibc { kind: libc::EINVAL }),
+        };
+
+        access(ctx, inode, &attr, mask)?;
+
+        let attr_flags = Flags::from_bits(attr.flags as u8).unwrap();
+        if attr_flags.contains(Flags::IMMUTABLE) || attr.parent.is_trash() {
+            if flags & (libc::O_WRONLY | libc::O_RDWR) != 0 {
+                return Err(MetaError::ErrLibc { kind: libc::EPERM });
+            }
+        }
+        if attr_flags.contains(Flags::APPEND) {
+            if flags & (libc::O_WRONLY | libc::O_RDWR) != 0 && flags & libc::O_APPEND == 0 {
+                return Err(MetaError::ErrLibc { kind: libc::EPERM });
+            }
+            if flags & libc::O_TRUNC != 0 {
+                return Err(MetaError::ErrLibc { kind: libc::EPERM });
+            }
+        }
+        self.open_files.open(inode, &mut attr);
+        Ok(attr)
+    }
+
+    fn touch_atime(&self, ctx: &MetaContext, inode: Ino) {}
 }
 
 pub fn access(ctx: &MetaContext, inode: Ino, attr: &InodeAttr, perm_mask: u8) -> Result<()> {

@@ -1,16 +1,28 @@
 use libc::c_int;
 use snafu::Snafu;
+use std::time::Duration;
 
-use crate::meta::MetaError;
-use crate::{common, common::err::ToErrno, meta::types::Ino};
+use crate::{
+    common,
+    common::err::ToErrno,
+    meta::{types::Ino, MetaError},
+};
 
 // FIXME: its ugly
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum VFSError {
-    ErrMeta { source: crate::meta::MetaError },
-    ErrLIBC { kind: c_int },
+    ErrMeta {
+        source: crate::meta::MetaError,
+    },
+    ErrLIBC {
+        kind: c_int,
+    },
+    #[snafu(display("try acquire lock timeout {:?}", timeout))]
+    ErrTimeout {
+        timeout: Duration,
+    },
 }
 
 impl From<VFSError> for common::err::Error {
@@ -33,6 +45,7 @@ impl ToErrno for VFSError {
         match self {
             VFSError::ErrMeta { source } => source.to_errno(),
             VFSError::ErrLIBC { kind } => kind.to_owned(),
+            VFSError::ErrTimeout { .. } => libc::ETIMEDOUT,
         }
     }
 }

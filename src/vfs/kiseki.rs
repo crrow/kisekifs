@@ -1,42 +1,53 @@
-use bitflags::bitflags;
-use std::time::SystemTime;
 use std::{
     fmt::{Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
     time,
+    time::SystemTime,
 };
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use libc::{mode_t, EBADF, EINVAL, EPERM};
-use tokio::{sync::Mutex, time::Instant};
+use libc::{mode_t, open, EACCES, EBADF, EFBIG, EINTR, EINVAL, EPERM};
+use scopeguard::defer;
+use tokio::time::Instant;
 use tracing::{debug, info, trace};
 
-use crate::meta::{SetAttrFlags, MAX_NAME_LENGTH};
-use crate::vfs::err::VFSError;
-use crate::vfs::VFSError::ErrLIBC;
 use crate::{
     common::err::ToErrno,
+    meta,
     meta::{
         engine::{access, MetaEngine},
-        internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+        internal_nodes::{InternalNode, PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
         types::*,
-        MetaContext, MODE_MASK_R, MODE_MASK_W,
+        MetaContext, SetAttrFlags, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W,
     },
-    vfs::{config::VFSConfig, err::Result, handle::Handle, reader::DataReader, writer::DataWriter},
+    vfs::{
+        config::VFSConfig,
+        err::{Result, VFSError},
+        handle::{Handle, HandleInner},
+        reader::DataReader,
+        writer::DataWriter,
+        VFSError::ErrLIBC,
+    },
 };
+
+const MAX_FILE_SIZE: usize = meta::MAX_CHUNK_SIZE << 31;
 
 #[derive(Debug)]
 pub struct KisekiVFS {
     config: VFSConfig,
     meta: MetaEngine,
     internal_nodes: PreInternalNodes,
-    writer: DataWriter,
-    reader: DataReader,
+    pub(crate) writer: DataWriter,
+    pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
-    _next_fh: AtomicU64,
-    handles: DashMap<Ino, DashMap<u64, Arc<Mutex<Handle>>>>,
+    pub(crate) _next_fh: AtomicU64,
+    // FIXME: use rwlock rather than mutex.
+    pub(crate) handles: DashMap<Ino, DashMap<FH, Handle>>,
 }
+
+type FH = u64;
 
 impl Display for KisekiVFS {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -133,6 +144,15 @@ impl KisekiVFS {
             self.reader.truncate(entry.inode, entry.attr.length);
         }
     }
+    pub fn update_length_by_attr(&self, inode: Ino, attr: &mut InodeAttr) {
+        if attr.full && attr.is_file() {
+            let len = self.writer.get_length(inode);
+            if len > attr.length {
+                attr.length = len;
+            }
+            self.reader.truncate(inode, attr.length);
+        }
+    }
 
     pub fn modified_since(&self, inode: Ino, start_at: time::Instant) -> bool {
         match self.modified_at.get(&inode) {
@@ -183,28 +203,6 @@ impl KisekiVFS {
         Ok(self.new_handle(inode))
     }
 
-    fn new_handle(&self, inode: Ino) -> u64 {
-        let fh = self.next_fh();
-        let h = Arc::new(Mutex::new(Handle::new(fh, inode)));
-        match self.handles.get_mut(&inode) {
-            None => {
-                let fh_handle_map = DashMap::new();
-                fh_handle_map.insert(fh, h);
-                self.handles.insert(inode, fh_handle_map);
-            }
-            Some(mut fh_handle_map) => {
-                let l = fh_handle_map.value_mut();
-                l.insert(fh, h);
-            }
-        };
-        fh
-    }
-
-    fn next_fh(&self) -> u64 {
-        self._next_fh
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    }
-
     pub async fn read_dir<I: Into<Ino>>(
         &self,
         ctx: &MetaContext,
@@ -222,7 +220,7 @@ impl KisekiVFS {
             .find_handle(inode, fh)
             .ok_or_else(|| ErrLIBC { kind: EBADF })?;
 
-        let mut h = h.lock().await;
+        let mut h = h.inner.write().unwrap();
         if h.children.is_empty() || offset == 0 {
             h.read_at = Some(Instant::now());
             let children = match self.meta.read_dir(ctx, inode, true).await {
@@ -243,12 +241,6 @@ impl KisekiVFS {
             return Ok(h.children.drain(offset as usize..).collect::<Vec<_>>());
         }
         return Ok(Vec::new());
-    }
-
-    fn find_handle(&self, ino: Ino, fh: u64) -> Option<Arc<Mutex<Handle>>> {
-        let list = self.handles.get(&ino).unwrap();
-        let l = list.value();
-        return l.get(&fh).map(|h| h.value().clone());
     }
 
     pub async fn mknod(
@@ -467,6 +459,136 @@ impl KisekiVFS {
             .with_ttl(ttl)
             .to_owned())
     }
+
+    pub async fn open(&self, ctx: &MetaContext, inode: Ino, flags: i32) -> Result<Opened> {
+        debug!(
+            "fs:open with ino {:?} flags {:#b} pid {:?}",
+            inode, flags, ctx.pid
+        );
+
+        let mut opened_fh = 0;
+        let mut entry: Entry;
+        if inode.is_special() {
+            // TODO: at present, we don't implement the same logic as the juicefs.
+            return Err(ErrLIBC { kind: EACCES });
+            // if inode != CONTROL_INODE && flags & libc::O_ACCMODE !=
+            // libc::O_RDONLY { }
+        }
+
+        match self.meta.open_inode(ctx, inode, flags).await {
+            Ok(mut attr) => {
+                self.update_length_by_attr(inode, &mut attr);
+                opened_fh = self.new_file_handle(inode, attr.length, flags)?;
+                let ttl = self.get_ttl(attr.kind);
+                entry = Entry::new_with_attr(inode, "", attr)
+                    .with_generation(1)
+                    .with_ttl(ttl)
+                    .to_owned();
+            }
+            Err(e) => return Err(e)?,
+        }
+
+        let opened_flags = if inode.is_special() {
+            fuser::consts::FOPEN_DIRECT_IO
+        } else if entry.attr.keep_cache {
+            fuser::consts::FOPEN_KEEP_CACHE
+        } else {
+            0
+        };
+
+        Ok(Opened {
+            fh: opened_fh,
+            flags: opened_flags,
+            entry,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn read(
+        &self,
+        ctx: &MetaContext,
+        ino: Ino,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock: Option<u64>,
+    ) -> Result<Bytes> {
+        trace!(
+            "fs:read with ino {:?} fh {:?} offset {:?} size {:?}",
+            ino,
+            fh,
+            offset,
+            size
+        );
+
+        if ino.is_special() {
+            todo!()
+        }
+
+        // just convert it.
+        // TODO: review me, is it correct? it may be negative.
+        let offset = offset as u64;
+        let size = size as u64;
+
+        let handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        if offset >= MAX_FILE_SIZE as u64 || offset + size >= MAX_FILE_SIZE as u64 {
+            return Err(ErrLIBC { kind: EFBIG });
+        }
+        if !handle.can_read() {
+            return Err(ErrLIBC { kind: EBADF });
+        }
+        let read_guard = handle.acquire_read_lock().await?;
+
+        todo!()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write(
+        &self,
+        ctx: &MetaContext,
+        ino: Ino,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        write_flags: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+    ) -> Result<u32> {
+        let size = data.len();
+        trace!(
+            "fs:write with ino {:?} fh {:?} offset {:?} size {:?}",
+            ino,
+            fh,
+            offset,
+            size
+        );
+
+        let offset = offset as usize;
+        if offset >= MAX_FILE_SIZE || offset + size >= MAX_FILE_SIZE {
+            return Err(ErrLIBC { kind: EFBIG });
+        }
+        let handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        if ino == CONTROL_INODE {
+            todo!()
+        }
+        if !handle.can_write() {
+            return Err(ErrLIBC { kind: EBADF });
+        }
+
+        let write_guard = handle.acquire_write_lock().await?;
+        let write_length = handle.write(&write_guard, offset as u64, data)?;
+        self.reader.truncate(ino, self.writer.get_length(ino));
+        Ok(write_length)
+    }
+}
+
+/// Reply to a `open` or `opendir` call
+#[derive(Debug)]
+pub struct Opened {
+    pub fh: u64,
+    pub flags: u32,
+    pub entry: Entry,
 }
 
 // TODO: review me, use a better way.
