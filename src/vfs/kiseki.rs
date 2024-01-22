@@ -535,6 +535,9 @@ impl KisekiVFS {
         if offset >= MAX_FILE_SIZE as u64 || offset + size >= MAX_FILE_SIZE as u64 {
             return Err(ErrLIBC { kind: EFBIG });
         }
+        if !handle.can_read() {
+            return Err(ErrLIBC { kind: EBADF });
+        }
         let read_guard = handle.acquire_read_lock().await?;
 
         todo!()
@@ -569,10 +572,14 @@ impl KisekiVFS {
         if ino == CONTROL_INODE {
             todo!()
         }
+        if !handle.can_write() {
+            return Err(ErrLIBC { kind: EBADF });
+        }
 
-        let write_guard = handle.acquire_write_lock();
-
-        todo!()
+        let write_guard = handle.acquire_write_lock().await?;
+        let write_length = handle.write(&write_guard, offset as u64, data)?;
+        self.reader.truncate(ino, self.writer.get_length(ino));
+        Ok(write_length)
     }
 }
 

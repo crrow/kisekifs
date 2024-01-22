@@ -2,6 +2,7 @@ use std::time::SystemTime;
 
 use tracing::debug;
 
+use crate::vfs::handle::HandleWriteGuard;
 use crate::{meta::types::Ino, vfs::err::Result};
 
 #[derive(Debug, Default)]
@@ -23,5 +24,5 @@ impl DataWriter {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct FileWriter {}

@@ -72,6 +72,7 @@ pub(crate) struct Handle {
     fh: u64,                                    // cannot be changed
     inode: Ino,                                 // cannot be changed
     pub(crate) inner: Arc<RwLock<HandleInner>>, // status lock
+
     // we can only acquire writer when the readers is 0, then we mark the
     // readers to -1, then no writer or reader is allowed to acquire the lock again.
     //
@@ -79,6 +80,9 @@ pub(crate) struct Handle {
     readers: Arc<AtomicI64>,
     notify: Arc<Notify>,
     timeout: Duration,
+
+    reader: Option<FileReader>, // TODO: how to make it concurrent safe ?
+    writer: Option<FileWriter>,
 }
 
 impl Handle {
@@ -93,19 +97,23 @@ impl Handle {
             notify,
             readers: Default::default(),
             timeout: Duration::from_secs(1),
+            reader: None,
+            writer: None,
         }
     }
-    pub(crate) fn new_with<F: FnMut(&mut HandleInner)>(fh: u64, inode: Ino, mut f: F) -> Self {
-        let mut inner = HandleInner::new();
-        f(&mut inner);
-        Self {
+    pub(crate) fn new_with<F: FnMut(&mut Handle)>(fh: u64, inode: Ino, mut f: F) -> Self {
+        let mut h = Self {
             fh,
             inode,
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(RwLock::new(HandleInner::new())),
             notify: Arc::new(Notify::new()),
             readers: Default::default(),
             timeout: Duration::from_secs(1),
-        }
+            reader: None,
+            writer: None,
+        };
+        f(&mut h);
+        h
     }
     pub(crate) fn fh(&self) -> u64 {
         self.fh
@@ -113,6 +121,14 @@ impl Handle {
     pub(crate) fn inode(&self) -> Ino {
         self.inode
     }
+
+    pub(crate) fn can_write(&self) -> bool {
+        return self.writer.is_some();
+    }
+    pub(crate) fn can_read(&self) -> bool {
+        return self.reader.is_some();
+    }
+
     pub(crate) async fn acquire_read_lock(&self) -> Result<HandleReadGuard> {
         // we can only acquire reader when the readers is not -1,
         let start = Instant::now();
@@ -155,6 +171,7 @@ impl Handle {
         // get the lock already, we should build a guard for it.
         Ok(HandleReadGuard { inner: self, seq })
     }
+
     pub(crate) async fn acquire_write_lock(&self) -> Result<HandleWriteGuard> {
         let seq;
         let start = Instant::now();
@@ -196,15 +213,21 @@ impl Handle {
         // get the lock already, we should build a guard for it.
         Ok(HandleWriteGuard { inner: self, seq })
     }
+
+    pub(crate) fn write(
+        &self,
+        handle_write_guard: &HandleWriteGuard,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u32> {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct HandleInner {
     pub(crate) children: Vec<Entry>,
     pub(crate) read_at: Option<Instant>,
-
-    pub(crate) reader: Option<FileReader>,
-    pub(crate) writer: Option<FileWriter>,
 }
 
 impl HandleInner {
@@ -212,8 +235,6 @@ impl HandleInner {
         Self {
             children: Vec::new(),
             read_at: None,
-            reader: None,
-            writer: None,
         }
     }
 }
