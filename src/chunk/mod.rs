@@ -1,27 +1,72 @@
 mod config;
+pub use config::Config as ChunkConfig;
 mod engine;
-pub use engine::ChunkEngine;
+pub use engine::Engine;
 mod err;
-mod slice;
-pub(crate) use {slice::SliceID, slice::WSlice};
-
 pub use err::ChunkError;
 
-/// In JuiceFS, each file is composed of one or more chunks.
+/// Each file is composed of one or more chunks.
 /// Each chunk has a maximum size of 64 MB.
-/// Regardless of the file's size, all reads and writes are
-/// located based on their offsets (the position in the file
-/// where the read or write operation occurs) to the
-/// corresponding chunk.
-pub(crate) const MAX_CHUNK_SIZE: usize = 1 << 26; // 64 MB
-pub(crate) const PAGE_SIZE: usize = 1 << 16; // 64 KB
+///
+/// Chunks exist to optimize lookup and positioning,
+/// while the actual file writing is performed on
+/// slices.
+///
+/// Each slice represents a single continuous write,
+/// belongs to a specific chunk, and cannot overlap
+/// between adjacent chunks. This ensures that the
+/// slice length never exceeds 64 MB.
+///
+/// For example, if a file is generated through a
+/// continuous sequential write, each chunk contains
+/// only one slice.
+///
+/// File writing generates slices, and invoking flush
+/// persists these slices.
+///
+/// When persisting to the object storage, slices are
+/// further split into individual blocks (default
+/// maximum size of 4 MB) to enable multi-threaded
+/// concurrent writes, thereby enhancing write
+/// performance.
+///
+/// The previously mentioned chunks and slices are
+/// logical data structures, while blocks represent
+/// the final physical storage form and serve as the
+/// smallest storage unit for the object storage and
+/// disk cache.
 
-pub(crate) fn chunk_index(offset: usize) -> usize {
+pub(crate) const MAX_CHUNK_SIZE: usize = 1 << 26; // 64 MB
+pub(crate) const MAX_BLOCK_SIZE: usize = 1 << 22; // 4 MB TODO: we may need to config the block size.
+pub(crate) const MIN_BLOCK_SIZE: usize = 1 << 16; // 64 KB
+
+pub(crate) fn chunk_id(offset: usize) -> usize {
     offset / MAX_CHUNK_SIZE
 }
 pub(crate) fn chunk_pos(offset: usize) -> usize {
     offset % MAX_CHUNK_SIZE
 }
 
-pub(crate) type ChunkIndex = usize;
+pub(crate) type PageIdx = usize;
+pub(crate) type BlockIdx = usize;
+
+/// ChunkID is calculated by the offset / MAX_CHUNK_SIZE.
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
+pub(crate) struct ChunkID(pub(crate) usize);
+
+impl ChunkID {
+    pub(crate) fn new(file_offset: usize) -> Self {
+        Self(chunk_id(file_offset))
+    }
+}
+
+impl Into<usize> for ChunkID {
+    fn into(self) -> usize {
+        self.0
+    }
+}
+
 pub(crate) type ChunkOffset = usize;
+
+/// SliceID is a unique identifier for a slice.
+pub(crate) type SliceID = usize;

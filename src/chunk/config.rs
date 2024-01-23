@@ -1,2 +1,2 @@
 #[derive(Debug, Clone, Default)]
-pub struct ChunkConfig {}
+pub struct Config {}
