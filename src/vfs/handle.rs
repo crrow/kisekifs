@@ -45,13 +45,13 @@ impl KisekiVFS {
         match flags & libc::O_ACCMODE {
             libc::O_RDONLY => {
                 Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(self.reader.open(inode, length));
+                    h.reader = Some(Arc::new(self.reader.open(inode, length)));
                 });
             }
             libc::O_WRONLY | libc::O_RDWR => {
                 Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(self.reader.open(inode, length));
-                    h.writer = Some(self.writer.open(inode, length));
+                    h.reader = Some(Arc::new(self.reader.open(inode, length)));
+                    h.writer = Some(Arc::new(self.writer.open(inode, length)));
                 });
             }
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
@@ -81,8 +81,8 @@ pub(crate) struct Handle {
     notify: Arc<Notify>,
     timeout: Duration,
 
-    reader: Option<FileReader>, // TODO: how to make it concurrent safe ?
-    writer: Option<FileWriter>,
+    reader: Option<Arc<FileReader>>, // TODO: how to make it concurrent safe ?
+    writer: Option<Arc<FileWriter>>,
 }
 
 impl Handle {

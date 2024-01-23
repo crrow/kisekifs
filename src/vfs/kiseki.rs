@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace};
 
 use crate::{
+    chunk,
     common::err::ToErrno,
     meta,
     meta::{
@@ -32,7 +33,7 @@ use crate::{
     },
 };
 
-const MAX_FILE_SIZE: usize = meta::MAX_CHUNK_SIZE << 31;
+const MAX_FILE_SIZE: usize = chunk::MAX_CHUNK_SIZE << 31;
 
 #[derive(Debug)]
 pub struct KisekiVFS {
