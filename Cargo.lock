@@ -1154,6 +1154,7 @@ dependencies = [
  "procfs",
  "rand",
  "regex",
+ "rustix",
  "scopeguard",
  "serde",
  "serde_json",
@@ -1162,6 +1163,7 @@ dependencies = [
  "sys-mount",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

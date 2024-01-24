@@ -497,6 +497,8 @@ struct SliceUploader {
 
 impl SliceUploader {
     async fn upload(mut self, engine: Engine) -> Result<()> {
+        // TODO: we should try to upload to cache.
+
         debug!(
             "SliceUploader: {} uploading block {} to {}, len: {}",
             self.slice_id,

@@ -10,6 +10,11 @@ pub enum ChunkError {
     StoErr { source: opendal::Error },
     #[snafu(display("invalid input {msg}"))]
     ErrInvalidInput { msg: String },
+
+    #[snafu(display("general error : {}", source))]
+    General {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl From<ChunkError> for crate::common::err::Error {
