@@ -5,7 +5,10 @@ use crate::common::err::ToErrno;
 pub type Result<T> = std::result::Result<T, ChunkError>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub enum ChunkError {}
+pub enum ChunkError {
+    #[snafu(display("operate opendal store failed : {}", source))]
+    StoErr { source: opendal::Error },
+}
 
 impl From<ChunkError> for crate::common::err::Error {
     fn from(value: ChunkError) -> Self {
