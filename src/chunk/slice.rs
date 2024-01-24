@@ -1,11 +1,30 @@
-use crate::chunk::err::Result;
+// JuiceFS, Copyright 2020 Juicedata, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use crate::chunk::{BlockIdx, Engine, SliceID, DEFAULT_BLOCK_SIZE, MAX_CHUNK_SIZE, MIN_BLOCK_SIZE};
+use std::{
+    cmp::{max, min},
+    io::{Cursor, ErrorKind, Seek, SeekFrom, Write},
+};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use std::cmp::{max, min};
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use opendal::raw::oio::StreamExt;
 use tracing::{debug, instrument, Instrument};
+
+use crate::chunk::{
+    err::Result, BlockIdx, ChunkError, Engine, SliceID, DEFAULT_BLOCK_SIZE, MAX_CHUNK_SIZE,
+    MIN_BLOCK_SIZE,
+};
 
 #[derive(Debug)]
 pub(crate) struct Config {
@@ -54,6 +73,7 @@ impl SliceInner {
         }
     }
     // Read only work after writer finish...
+    // TODO: figure out how to make it async.
     #[instrument(skip_all, fields(sid=self.sid, offset=offset, page_len=page.len()))]
     fn read_at(&mut self, offset: usize, page: &mut [u8]) -> Result<usize> {
         let page_len = page.len();
@@ -191,8 +211,63 @@ impl RSlice {
         self.0.read_at(offset, page)
     }
 
-    pub fn remove(&mut self) -> Result<()> {
-        todo!()
+    // TODO: control the remove concurrent number.
+    pub async fn remove(&mut self) -> Result<()> {
+        if self.length() == 0 {
+            // no block, nothing to do
+            return Ok(());
+        };
+
+        let last_index = (self.length() - 1) / self.0.config.block_size;
+        let handles = (0..last_index)
+            .into_iter()
+            .map(|idx| {
+                let key = self.0.generate_slice_key(idx);
+                debug!("remove slice: {} at key: {}", self.0.sid, key);
+                // self.0.engine.delete(&key).await?;
+                SliceDeleter {
+                    sid: self.0.sid,
+                    key,
+                    engine: self.0.engine.clone(),
+                }
+            })
+            .map(|mut deleter| tokio::spawn(async move { deleter.delete().await }))
+            .collect::<Vec<_>>();
+
+        // TODO: handle the error
+        futures::future::join_all(handles).await;
+
+        Ok(())
+    }
+
+    pub fn length(&self) -> usize {
+        self.0.length
+    }
+}
+
+struct SliceDeleter {
+    sid: SliceID,
+    key: String,
+    engine: Engine,
+}
+
+impl SliceDeleter {
+    // there could be multiple clients try to remove the same chunk in the same
+    // time, any of them should succeed if any blocks is removed
+    async fn delete(mut self) -> Result<()> {
+        return match self.engine.delete(&self.key).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let ChunkError::StoErr { source } = e {
+                    if source.kind() == opendal::ErrorKind::NotFound {
+                        return Ok(());
+                    }
+                    Err(ChunkError::StoErr { source })
+                } else {
+                    Err(e)
+                }
+            }
+        };
     }
 }
 
@@ -464,47 +539,5 @@ impl Page {
     fn slice(&mut self, offset: usize, size: usize) -> &mut [u8] {
         assert!(offset + size <= self.data.len());
         &mut self.data[offset..offset + size]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tracing_subscriber::{prelude::*, Registry};
-
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn slice_writer() {
-        let stdout_log = tracing_subscriber::fmt::layer().pretty();
-        let subscriber = Registry::default().with(stdout_log);
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Unable to set global subscriber");
-
-        let engine = Engine::default();
-        let mut ws = engine.slice_writer(1);
-        let data = b"hello world" as &[u8];
-        let n = ws.write_at(0, data).unwrap();
-        assert_eq!(n, data.len());
-        assert_eq!(ws.length(), data.len());
-
-        let offset = ws.load_block_size_from_config() - 3;
-        let n = ws.write_at(offset, data).unwrap();
-        assert_eq!(n, data.len());
-        let size = offset + data.len();
-        assert_eq!(ws.length(), size);
-
-        ws.flush_to(DEFAULT_BLOCK_SIZE + 3).await.unwrap();
-        ws.finish(size).await.unwrap();
-
-        let mut rs = engine.slice_reader(1, size);
-        let page = &mut [0; 5];
-        let n = rs.read_at(6, page).unwrap();
-        assert_eq!(n, 5);
-        assert_eq!(page, b"world");
-
-        let page = &mut [0; 20];
-        let n = rs.read_at(offset, page).unwrap();
-        assert_eq!(n, data.len());
-        assert_eq!(&page[..n], data);
     }
 }

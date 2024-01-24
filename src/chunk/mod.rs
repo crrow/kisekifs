@@ -39,8 +39,8 @@ pub use err::ChunkError;
 /// disk cache.
 
 pub(crate) const MAX_CHUNK_SIZE: usize = 1 << 26; // 64 MB
-                                                  // pub(crate) const MAX_BLOCK_SIZE: usize = 1 << 22; // 4 MB TODO: we may need
-                                                  // to config the block size.
+// pub(crate) const MAX_BLOCK_SIZE: usize = 1 << 22; // 4 MB TODO: we may need
+// to config the block size.
 pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1 << 20; // 1 MB
 pub(crate) const MIN_BLOCK_SIZE: usize = 1 << 16; // 64 KB
 
