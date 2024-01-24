@@ -537,6 +537,6 @@ mod tests {
         let page = &mut [0; 20];
         let n = sw.read_at(offset, page).unwrap();
         assert_eq!(n, data.len());
-        assert_eq!(page, data);
+        assert_eq!(&page[..n], data);
     }
 }
