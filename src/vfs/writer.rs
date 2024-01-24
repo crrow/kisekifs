@@ -1,18 +1,21 @@
-use dashmap::DashMap;
-use std::collections::HashMap;
-use std::io::{Error, Write};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
-use std::time::SystemTime;
-use tokio::sync::Notify;
-use tokio::time::Instant;
+use std::{
+    collections::HashMap,
+    io::{Error, Write},
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    task::{Context, Poll},
+    time::SystemTime,
+};
 
+use dashmap::DashMap;
+use tokio::{sync::Notify, time::Instant};
 use tracing::debug;
 
-use crate::chunk::{ChunkError, ChunkOffset, Engine, SliceID};
-use crate::vfs::handle::HandleWriteGuard;
-use crate::{meta::types::Ino, vfs::err::Result};
+use crate::{
+    chunk::{ChunkError, ChunkOffset, Engine, SliceID},
+    meta::types::Ino,
+    vfs::{err::Result, handle::HandleWriteGuard},
+};
 
 #[derive(Debug, Default)]
 pub(crate) struct DataWriter {}

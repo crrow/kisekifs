@@ -1,6 +1,7 @@
+use std::time::Duration;
+
 use libc::c_int;
 use snafu::Snafu;
-use std::time::Duration;
 
 use crate::{
     common,

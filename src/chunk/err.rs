@@ -8,6 +8,8 @@ pub type Result<T> = std::result::Result<T, ChunkError>;
 pub enum ChunkError {
     #[snafu(display("operate opendal store failed : {}", source))]
     StoErr { source: opendal::Error },
+    #[snafu(display("invalid input {msg}"))]
+    ErrInvalidInput { msg: String },
 }
 
 impl From<ChunkError> for crate::common::err::Error {

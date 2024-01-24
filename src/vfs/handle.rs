@@ -1,15 +1,20 @@
-use std::fmt::Debug;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    fmt::Debug,
+    sync::{
+        atomic::{AtomicI64, AtomicU64, Ordering},
+        Arc, RwLock,
+    },
+    time::Duration,
+};
 
 use dashmap::DashMap;
 use libc::{EBADF, EPERM};
 use snafu::Snafu;
-use std::sync::RwLock;
-use tokio::sync::Notify;
-use tokio::time::timeout;
-use tokio::{select, time::Instant};
+use tokio::{
+    select,
+    sync::Notify,
+    time::{timeout, Instant},
+};
 use tracing::debug;
 
 use crate::{
@@ -294,9 +299,11 @@ impl<'a> Drop for HandleWriteGuard<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rand::prelude::SliceRandom;
     use std::thread::sleep;
+
+    use rand::prelude::SliceRandom;
+
+    use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 5)]
     async fn rwlock_basic_read() {
