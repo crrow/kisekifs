@@ -4,9 +4,12 @@ mod engine;
 pub use engine::Engine;
 mod disk_cache;
 mod err;
-mod slice;
+pub mod page;
+pub mod slice;
 
 pub use err::ChunkError;
+
+pub mod slice2;
 
 /// Each file is composed of one or more chunks.
 /// Each chunk has a maximum size of 64 MB.

@@ -22,33 +22,36 @@ use opendal::raw::oio::StreamExt;
 use tracing::{debug, instrument, Instrument};
 
 use crate::chunk::{
-    err::Result, BlockIdx, ChunkError, Engine, SliceID, DEFAULT_BLOCK_SIZE, MAX_CHUNK_SIZE,
-    MIN_BLOCK_SIZE,
+    err::Result, page, slice, BlockIdx, ChunkError, Engine, SliceID, DEFAULT_BLOCK_SIZE,
+    MAX_CHUNK_SIZE, MIN_BLOCK_SIZE,
 };
 
-#[derive(Debug)]
-pub(crate) struct Config {
-    pub(crate) block_size: usize,
-    pub(crate) disk_cache_enabled: bool,
-    pub(crate) has_prefix: bool,
-    // weather the data on the object storage is seekable,
-    // which is decided by if we compress the data or not.
-    pub(crate) seekable: bool,
-    // write to local cache first then write back to object storage.
-    pub(crate) write_back: bool,
-}
+// #[derive(Debug)]
+// pub(crate) struct Config {
+//     pub(crate) block_size: usize,
+//     pub(crate) disk_cache_enabled: bool,
+//     pub(crate) has_prefix: bool,
+//     // weather the data on the object storage is seekable,
+//     // which is decided by if we compress the data or not.
+//     pub(crate) seekable: bool,
+//     // write to local cache first then write back to object storage.
+//     pub(crate) write_back: bool,
+// }
+//
+// impl Default for Config {
+//     fn default() -> Self {
+//         Self {
+//             block_size: DEFAULT_BLOCK_SIZE,
+//             disk_cache_enabled: false,
+//             has_prefix: false,
+//             seekable: false,
+//             write_back: false,
+//         }
+//     }
+// }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            block_size: DEFAULT_BLOCK_SIZE,
-            disk_cache_enabled: false,
-            has_prefix: false,
-            seekable: false,
-            write_back: false,
-        }
-    }
-}
+use crate::chunk::page::{UnsafePage, UnsafePageView, UnsafePages};
+use slice::Config;
 
 #[derive(Debug)]
 struct SliceInner {
@@ -277,7 +280,7 @@ pub struct WSlice {
     /// the length of bytes that has been uploaded to
     /// the object storage.
     uploaded: usize,
-    pages: Vec<Vec<Page>>, // BLOCK_IDX -> PAGE_IDX -> PAGE
+    pages: Vec<Vec<page::UnsafePage>>, // BLOCK_IDX -> PAGE_IDX -> PAGE
 }
 
 impl WSlice {
@@ -343,11 +346,12 @@ impl WSlice {
             let page_idx = block_pos / page_size;
             let page_pos = block_pos % page_size;
 
+            // TODO: introduce a page table to manage these pages.
             let page = if page_idx < self.pages[block_idx].len() {
                 let p = &mut self.pages[block_idx][page_idx];
                 p
             } else {
-                let p = Page::allocate(page_size);
+                let p = UnsafePage::allocate(page_size);
                 self.pages[block_idx].push(p);
                 &mut self.pages[block_idx][page_idx]
             };
@@ -357,35 +361,21 @@ impl WSlice {
                 // we should make sure the page has enough space to write.
                 let v = page_size - page_pos;
                 if page.len() < page_size {
-                    page.data.resize(page_size, 0);
+                    page.resize(page_size);
                 }
                 v
-            } else if page.data.len() < page_pos + left {
-                // we should make sure the page has enough space to write.
-                page.data.resize(page_pos + left, 0);
+            } else if page.len() < page_pos + left {
+                page.resize(page_pos + left);
                 left
             } else {
                 left
             };
 
-            let mut cursor = Cursor::new(&mut page.data);
-            cursor
-                .seek(SeekFrom::Start(page_pos as u64))
-                .expect("seek on memory should not failed");
-            let n = cursor
+            let mut page_writer = page.writer(page_pos, current_need_write);
+            let n = page_writer
                 .write(&buf[total_written_len..total_written_len + current_need_write])
                 .expect("in memory write should not failed");
             debug_assert_eq!(n, current_need_write);
-
-            // let writer = &mut page.data.as_mut_slice()[page_pos..current_need_write];
-            // writer.copy_from_slice(&buf[total_written_len..current_need_write]);
-
-            // // let current_need_write = min(expected_write_len - total_written_len,
-            // page_size); let current_write_len = page.write(
-            //     page_pos,
-            //     &buf[total_written_len..total_written_len + current_need_write],
-            // )?;
-            // debug_assert_eq!(current_write_len, current_need_write);
             total_written_len += current_need_write;
         }
 
@@ -430,26 +420,24 @@ impl WSlice {
                     block_idx,
                 );
 
-                let mut buffer;
-                let mut offset = 0;
-                if pages.len() == 1 {
-                    offset = pages[0].len();
-                    buffer = BytesMut::from(pages[0].data.as_slice());
-                } else {
-                    buffer = BytesMut::with_capacity(block_size);
-                    pages.into_iter().for_each(|page| {
-                        let data = page.data.as_slice();
-                        offset += data.len();
-                        buffer.put_slice(data);
-                    });
-                }
-                assert_eq!(offset, buffer.len(), "block length does not match offset");
+                // let mut buffer;
+                // if pages.len() == 1 {
+                //     buffer = BytesMut::from(pages[0].as_ref());
+                // } else {
+                //     buffer = BytesMut::with_capacity(block_size);
+                //     pages.into_iter().for_each(|page| {
+                //         let data = page.as_slice();
+                //
+                //         buffer.put_slice(data);
+                //     });
+                // }
+
                 SliceUploader {
                     slice_id: self.inner.sid,
                     block_idx,
                     block_size,
                     key,
-                    buf: buffer.freeze(),
+                    buf: UnsafePages(pages).into(),
                     write_back: self.inner.config.write_back,
                 }
             })
@@ -491,7 +479,7 @@ struct SliceUploader {
     block_idx: BlockIdx,
     block_size: usize,
     key: String,
-    buf: Bytes,
+    buf: Vec<u8>,
     write_back: bool,
 }
 
@@ -506,40 +494,53 @@ impl SliceUploader {
             self.key,
             self.buf.len(),
         );
-        let buf = self.buf.to_vec();
-        engine.put(&self.key, buf).await?;
+
+        // let buf = self.buf.to_vec();
+        engine.put(&self.key, self.buf).await?;
         Ok(())
     }
 }
 
-#[derive(Debug, Clone)]
-struct Page {
-    data: Vec<u8>,
-}
+#[cfg(test)]
+mod tests {
+    use tracing_subscriber::{prelude::*, Registry};
 
-impl Page {
-    fn allocate(size: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(size),
-        }
-    }
+    use super::*;
 
-    fn len(&self) -> usize {
-        self.data.len()
-    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn basic() {
+        let stdout_log = tracing_subscriber::fmt::layer().pretty();
+        let subscriber = Registry::default().with(stdout_log);
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("Unable to set global subscriber");
 
-    fn write(&mut self, offset: usize, data: &[u8]) -> std::io::Result<usize> {
-        let mut cursor = Cursor::new(&mut self.data);
-        cursor.seek(SeekFrom::Start(offset as u64))?;
-        cursor.write(data)
-    }
+        let engine = Engine::default();
+        let mut ws = WSlice::new(1, engine.clone());
+        let data = b"hello world" as &[u8];
+        let n = ws.write_at(0, data).unwrap();
+        assert_eq!(n, data.len());
+        assert_eq!(ws.length(), data.len());
 
-    fn clear(&mut self) {
-        self.data.clear()
-    }
+        let offset = ws.load_block_size_from_config() - 3;
+        let n = ws.write_at(offset, data).unwrap();
+        assert_eq!(n, data.len());
+        let size = offset + data.len();
+        assert_eq!(ws.length(), size);
 
-    fn slice(&mut self, offset: usize, size: usize) -> &mut [u8] {
-        assert!(offset + size <= self.data.len());
-        &mut self.data[offset..offset + size]
+        ws.flush_to(DEFAULT_BLOCK_SIZE + 3).await.unwrap();
+        ws.finish(size).await.unwrap();
+
+        let mut rs = RSlice::new(1, size, engine.clone());
+        let page = &mut [0; 5];
+        let n = rs.read_at(6, page).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(page, b"world");
+
+        let page = &mut [0; 20];
+        let n = rs.read_at(offset, page).unwrap();
+        assert_eq!(n, data.len());
+        assert_eq!(&page[..n], data);
+
+        // engine.remove(1, size).await.unwrap();
     }
 }

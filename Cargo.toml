@@ -5,10 +5,21 @@ edition = "2021"
 authors = ["Ryan Tan"]
 license = "Apache-2.0"
 description = "A fuse filesystem"
+exclude = ["benches"]
+autobenches = false
+
+[lib]
+bench = false
 
 [[bin]]
 name = "kiseki"
 path = "src/bin/kiseki.rs"
+bench = false
+
+[[bench]]
+name = "bench_main"
+harness = false
+path = "benches/bench_main.rs"
 
 [dependencies]
 fuser = { version = "0.14.0", features = ["serializable"]}
@@ -51,5 +62,6 @@ rustix = "0.38.30"
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}
 
-
+[dev-dependencies]
+criterion = {  version = "0.5.1", features = ["async_tokio","async_futures"] }
 

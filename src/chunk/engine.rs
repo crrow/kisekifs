@@ -62,6 +62,20 @@ impl Clone for Engine {
 }
 
 impl Engine {
+    pub fn new_sled() -> Self {
+        let mut builder = opendal::services::Sled::default();
+        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir_path = tempdir.as_ref().to_str().unwrap();
+        builder.datadir(tempdir_path);
+
+        let op = Arc::new(Operator::new(builder).unwrap().finish());
+        let config = Config::default();
+        let inner = Inner {
+            storage: op,
+            config,
+        };
+        Self(inner)
+    }
     pub fn slice_config(&self) -> slice::Config {
         self.0.slice_config()
     }

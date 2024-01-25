@@ -29,6 +29,11 @@ alias t := test
 @test:
     cargo test --verbose  -- --nocapture --show-output
 
+alias b := bench
+@bench:
+    #cargo bench -- --verbose --color always --nocapture --show-output
+    cargo bench
+
 @book:
     mdbook serve docs
 

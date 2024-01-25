@@ -1,11 +1,14 @@
 use crate::chunk::err::{GeneralSnafu, Result};
+use crate::chunk::page::UnsafePageView;
 use crate::chunk::ChunkError;
 use dashmap::DashMap;
 use opendal::Operator;
 use snafu::ResultExt;
+use std::hash::Hash;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
@@ -43,7 +46,12 @@ struct CacheStore {
     // runtime status
     stage_full: Arc<AtomicBool>,
     cancel_token: CancellationToken,
-    pages: DashMap<String, Vec<u8>>,
+    // we use hash as the key for inner pages map.
+    pages: DashMap<u64, UnsafePageView>,
+}
+struct CacheEntry<K> {
+    hash: u64,
+    _mark: PhantomData<K>,
 }
 
 impl CacheStore {
@@ -83,7 +91,10 @@ impl CacheStore {
 
     // we don't care error in this function.
     // TODO: don't receive data as &[u8], we should introduce an abstraction.
-    fn cache<K: AsRef<str>>(&self, key: K, data: &[u8], force: bool) {
+    fn cache<K: AsRef<str>>(&self, key: K, data: &[u8], force: bool)
+    where
+        K: Hash,
+    {
         if self.config.capacity.is_none() {
             return;
         }
@@ -97,9 +108,9 @@ impl CacheStore {
             );
             return;
         }
-        if self.pages.contains_key(&key) {
-            return;
-        }
+        // if self.pages.contains_key(&key) {
+        //     return;
+        // }
     }
 }
 
