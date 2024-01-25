@@ -1,15 +1,36 @@
-use std::fmt::Debug;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+/*
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::{
+    fmt::Debug,
+    sync::{
+        atomic::{AtomicI64, AtomicU64, Ordering},
+        Arc, RwLock,
+    },
+    time::Duration,
+};
 
 use dashmap::DashMap;
 use libc::{EBADF, EPERM};
 use snafu::Snafu;
-use std::sync::RwLock;
-use tokio::sync::Notify;
-use tokio::time::timeout;
-use tokio::{select, time::Instant};
+use tokio::{
+    select,
+    sync::Notify,
+    time::{timeout, Instant},
+};
 use tracing::debug;
 
 use crate::{
@@ -45,13 +66,13 @@ impl KisekiVFS {
         match flags & libc::O_ACCMODE {
             libc::O_RDONLY => {
                 Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(self.reader.open(inode, length));
+                    h.reader = Some(Arc::new(self.reader.open(inode, length)));
                 });
             }
             libc::O_WRONLY | libc::O_RDWR => {
                 Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(self.reader.open(inode, length));
-                    h.writer = Some(self.writer.open(inode, length));
+                    h.reader = Some(Arc::new(self.reader.open(inode, length)));
+                    h.writer = Some(Arc::new(self.writer.open(inode, length)));
                 });
             }
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
@@ -81,8 +102,8 @@ pub(crate) struct Handle {
     notify: Arc<Notify>,
     timeout: Duration,
 
-    reader: Option<FileReader>, // TODO: how to make it concurrent safe ?
-    writer: Option<FileWriter>,
+    reader: Option<Arc<FileReader>>, // TODO: how to make it concurrent safe ?
+    writer: Option<Arc<FileWriter>>,
 }
 
 impl Handle {
@@ -294,9 +315,11 @@ impl<'a> Drop for HandleWriteGuard<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rand::prelude::SliceRandom;
     use std::thread::sleep;
+
+    use rand::prelude::SliceRandom;
+
+    use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 5)]
     async fn rwlock_basic_read() {

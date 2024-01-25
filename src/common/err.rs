@@ -10,6 +10,7 @@ pub trait ToErrno {
 pub enum Error {
     MetaError { source: crate::meta::MetaError },
     VFSError { source: crate::vfs::VFSError },
+    ChunkError { source: crate::chunk::ChunkError },
 }
 
 impl ToErrno for Error {
@@ -17,6 +18,7 @@ impl ToErrno for Error {
         match self {
             Error::MetaError { source } => source.to_errno(),
             Error::VFSError { source } => source.to_errno(),
+            Error::ChunkError { source } => source.to_errno(),
         }
     }
 }
