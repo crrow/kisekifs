@@ -420,24 +420,12 @@ impl WSlice {
                     block_idx,
                 );
 
-                // let mut buffer;
-                // if pages.len() == 1 {
-                //     buffer = BytesMut::from(pages[0].as_ref());
-                // } else {
-                //     buffer = BytesMut::with_capacity(block_size);
-                //     pages.into_iter().for_each(|page| {
-                //         let data = page.as_slice();
-                //
-                //         buffer.put_slice(data);
-                //     });
-                // }
-
                 SliceUploader {
                     slice_id: self.inner.sid,
                     block_idx,
                     block_size,
                     key,
-                    buf: UnsafePages(pages).into(),
+                    block_data: UnsafePages(pages).into(),
                     write_back: self.inner.config.write_back,
                 }
             })
@@ -479,7 +467,7 @@ struct SliceUploader {
     block_idx: BlockIdx,
     block_size: usize,
     key: String,
-    buf: Vec<u8>,
+    block_data: Vec<u8>,
     write_back: bool,
 }
 
@@ -492,11 +480,11 @@ impl SliceUploader {
             self.slice_id,
             self.block_idx,
             self.key,
-            self.buf.len(),
+            self.block_data.len(),
         );
 
         // let buf = self.buf.to_vec();
-        engine.put(&self.key, self.buf).await?;
+        engine.put(&self.key, self.block_data).await?;
         Ok(())
     }
 }

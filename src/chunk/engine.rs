@@ -62,7 +62,7 @@ impl Clone for Engine {
 }
 
 impl Engine {
-    pub fn new_sled() -> Self {
+    pub fn new_sled() -> Engine {
         let mut builder = opendal::services::Sled::default();
         let tempdir = tempfile::tempdir().unwrap();
         let tempdir_path = tempdir.as_ref().to_str().unwrap();
@@ -89,6 +89,11 @@ impl Engine {
         let mut x = self.reader(sid, length);
         x.remove().await?;
         Ok(())
+    }
+
+    pub fn used_memory(&self) -> usize {
+        // TODO
+        return 0;
     }
 
     pub(crate) fn block_load<K: AsRef<str>>(

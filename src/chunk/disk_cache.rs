@@ -1,6 +1,7 @@
 use crate::chunk::err::{GeneralSnafu, Result};
 use crate::chunk::page::UnsafePageView;
 use crate::chunk::ChunkError;
+use bytes::Bytes;
 use dashmap::DashMap;
 use opendal::Operator;
 use snafu::ResultExt;
@@ -19,9 +20,12 @@ const CACHE_DIR: &str = "raw";
 pub(crate) struct Config {
     free_ratio: f32,
     has_prefix: bool,
+    block_size: usize,
     // if none, we don't cache anything.
     // MiB
     capacity: Option<usize>,
+    // if true, we only cache full block.
+    only_full_block: bool,
 }
 
 impl Default for Config {
@@ -29,7 +33,9 @@ impl Default for Config {
         Self {
             free_ratio: 0.1, // 10%
             has_prefix: false,
+            block_size: 0,
             capacity: Some(100 << 10),
+            only_full_block: false,
         }
     }
 }
@@ -46,8 +52,7 @@ struct CacheStore {
     // runtime status
     stage_full: Arc<AtomicBool>,
     cancel_token: CancellationToken,
-    // we use hash as the key for inner pages map.
-    pages: DashMap<u64, UnsafePageView>,
+    pages: DashMap<u64, Bytes>,
 }
 struct CacheEntry<K> {
     hash: u64,
@@ -77,8 +82,19 @@ impl CacheStore {
         free_space_checker.run();
     }
 
-    fn stage(&mut self, key: &str, data: &[u8], keep_cache: bool) -> Result<PathBuf> {
+    // When write slice finish its job, it will transfer the ownership of the block to
+    // the cache.
+    fn stage(&mut self, key: &str, data: Vec<u8>) -> Result<PathBuf> {
+        if self.stage_full.load(Ordering::SeqCst) {
+            // return Err(ChunkError::CacheFull.into());
+        }
+        let stage_path = self.stage_path(key);
+
         todo!()
+    }
+
+    pub fn should_cache(&self, size: usize) -> bool {
+        self.config.only_full_block || size < self.config.block_size
     }
 
     fn stage_path(&self, key: &str) -> PathBuf {
@@ -90,8 +106,7 @@ impl CacheStore {
     }
 
     // we don't care error in this function.
-    // TODO: don't receive data as &[u8], we should introduce an abstraction.
-    fn cache<K: AsRef<str>>(&self, key: K, data: &[u8], force: bool)
+    fn cache<K: AsRef<str>>(&self, key: K, data: Vec<u8>, force: bool)
     where
         K: Hash,
     {

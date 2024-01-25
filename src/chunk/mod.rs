@@ -48,8 +48,8 @@ pub(crate) const MAX_CHUNK_SIZE: usize = 1 << 26; // 64 MB
 pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1 << 20; // 1 MB
 pub(crate) const MIN_BLOCK_SIZE: usize = 1 << 16; // 64 KB
 
-pub(crate) fn chunk_id(offset: usize) -> usize {
-    offset / MAX_CHUNK_SIZE
+pub(crate) fn chunk_id(offset: usize) -> ChunkID {
+    ChunkID(offset / MAX_CHUNK_SIZE)
 }
 pub(crate) fn chunk_pos(offset: usize) -> usize {
     offset % MAX_CHUNK_SIZE
@@ -64,7 +64,7 @@ pub(crate) struct ChunkID(pub(crate) usize);
 
 impl ChunkID {
     pub(crate) fn new(file_offset: usize) -> Self {
-        Self(chunk_id(file_offset))
+        chunk_id(file_offset)
     }
 }
 

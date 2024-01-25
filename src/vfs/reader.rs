@@ -1,3 +1,4 @@
+use std::sync::Weak;
 use tracing::debug;
 
 use crate::meta::types::Ino;
@@ -6,9 +7,9 @@ use crate::meta::types::Ino;
 pub(crate) struct DataReader {}
 
 impl DataReader {
-    pub(crate) fn open(&self, inode: Ino, length: u64) -> FileReader {
+    pub(crate) fn open(&self, inode: Ino, length: u64) -> Weak<FileReader> {
         debug!("data reader do nothing inode: {inode}, length: {length}");
-        return FileReader::default();
+        return Weak::new();
     }
     pub(crate) fn truncate(&self, inode: Ino, length: u64) {
         debug!("reader truncate do nothing, inode: {inode}, length: {length}");

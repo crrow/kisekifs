@@ -585,7 +585,7 @@ impl KisekiVFS {
         if offset >= MAX_FILE_SIZE || offset + size >= MAX_FILE_SIZE {
             return Err(ErrLIBC { kind: EFBIG });
         }
-        let handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        let mut handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
         if ino == CONTROL_INODE {
             todo!()
         }
