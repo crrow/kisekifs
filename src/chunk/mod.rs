@@ -67,7 +67,6 @@ impl ChunkID {
         chunk_id(file_offset)
     }
 }
-
 impl Into<usize> for ChunkID {
     fn into(self) -> usize {
         self.0

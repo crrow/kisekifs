@@ -6,5 +6,6 @@ pub mod fuse;
 pub mod logging;
 pub mod meta;
 pub mod metrics;
+mod storage;
 mod sync;
 pub mod vfs;

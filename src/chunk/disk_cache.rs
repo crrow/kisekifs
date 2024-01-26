@@ -264,7 +264,9 @@ mod tests {
         let config = Config {
             free_ratio: 0.1,
             has_prefix: false,
+            block_size: 0,
             capacity: Some(1024 * 1024 * 1024),
+            only_full_block: false,
         };
 
         let cs = CacheStore::new(&tempdir, config, op);
