@@ -1,3 +1,4 @@
+mod buffer;
 pub mod config;
 mod err;
 mod handle;

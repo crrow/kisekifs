@@ -481,27 +481,28 @@ impl Chunk {
     // we should try to flush the slice to the background, and
     // release the memory.
     async fn find_writable_slice(&self, chunk_offset: usize) -> Arc<SliceWriter> {
-        let mut guard = self.slices.lock().await;
-        for (i, slice) in guard.iter().rev().enumerate() {
-            if !slice.frozen.load(Ordering::SeqCst) {
-                if chunk_offset >= slice.offset + slice.flushed_len
-                    && chunk_offset <= slice.offset + slice.length
-                {
-                    // we can write to this slice.
-                    return slice.clone();
-                }
-            }
-            if i >= 3 {
-                tokio::spawn(slice.flush_and_release_buffer());
-            }
-        }
-        let sw = Arc::new(SliceWriter::new(
-            self.chunk_size,
-            chunk_offset,
-            self.chunk_engine.writer(0),
-        ));
-        guard.push(sw.clone());
-        sw
+        // let mut guard = self.slices.lock().await;
+        // for (i, slice) in guard.iter().rev().enumerate() {
+        //     if !slice.frozen.load(Ordering::SeqCst) {
+        //         if chunk_offset >= slice.offset + slice.flushed_len
+        //             && chunk_offset <= slice.offset + slice.length
+        //         {
+        //             // we can write to this slice.
+        //             return slice.clone();
+        //         }
+        //     }
+        //     if i >= 3 {
+        //         tokio::spawn(slice.flush_and_release_buffer());
+        //     }
+        // }
+        // let sw = Arc::new(SliceWriter::new(
+        //     self.chunk_size,
+        //     chunk_offset,
+        //     self.chunk_engine.writer(0),
+        // ));
+        // guard.push(sw.clone());
+        // sw
+        todo!()
     }
 
     // Start a background task if there is no background task running,
@@ -567,20 +568,21 @@ impl SliceWriter {
     }
 
     async fn write(self: &Arc<Self>, slice_offset: usize, data: &[u8]) -> Result<usize> {
-        let guard = self.mu.write().await;
-        let write_len = self
-            .write_buffer
-            .write_at(slice_offset, data)
-            .expect("write data failed");
-        self.length = max(self.length, slice_offset + write_len);
-        self.last_modified.replace(Instant::now());
-        if self.length == self.chunk_size {
-            drop(guard);
-            tokio::spawn(self.flush_and_release_buffer());
-        } else if self.length > self.write_buffer.load_block_size() {
-        }
-
-        Ok(write_len)
+        // let guard = self.mu.write().await;
+        // let write_len = self
+        //     .write_buffer
+        //     .write_at(slice_offset, data)
+        //     .expect("write data failed");
+        // self.length = max(self.length, slice_offset + write_len);
+        // self.last_modified.replace(Instant::now());
+        // if self.length == self.chunk_size {
+        //     drop(guard);
+        //     tokio::spawn(self.flush_and_release_buffer());
+        // } else if self.length > self.write_buffer.load_block_size() {
+        // }
+        //
+        // Ok(write_len)
+        todo!()
     }
 
     async fn flush_and_release_buffer(&self) {}
