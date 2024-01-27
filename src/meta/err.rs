@@ -64,7 +64,7 @@ pub enum MetaError {
 
 impl From<MetaError> for crate::common::err::Error {
     fn from(value: MetaError) -> Self {
-        Self::MetaError { source: value }
+        Self::_MetaError { source: value }
     }
 }
 

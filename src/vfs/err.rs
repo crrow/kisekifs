@@ -29,8 +29,8 @@ pub enum VFSError {
 impl From<VFSError> for common::err::Error {
     fn from(value: VFSError) -> Self {
         match value {
-            VFSError::ErrMeta { source } => common::err::Error::MetaError { source },
-            _ => common::err::Error::VFSError { source: value },
+            VFSError::ErrMeta { source } => common::err::Error::_MetaError { source },
+            _ => common::err::Error::_VFSError { source: value },
         }
     }
 }

@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(n, data.len());
         assert_eq!(ws.length(), data.len());
 
-        let offset = ws.load_block_size_from_config() - 3;
+        let offset = ws.load_block_size() - 3;
         let n = ws.write_at(offset, data).unwrap();
         assert_eq!(n, data.len());
         let size = offset + data.len();

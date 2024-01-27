@@ -8,17 +8,17 @@ pub trait ToErrno {
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    MetaError { source: crate::meta::MetaError },
-    VFSError { source: crate::vfs::VFSError },
-    ChunkError { source: crate::chunk::ChunkError },
+    _MetaError { source: crate::meta::MetaError },
+    _VFSError { source: crate::vfs::VFSError },
+    _ChunkError { source: crate::chunk::ChunkError },
 }
 
 impl ToErrno for Error {
     fn to_errno(&self) -> c_int {
         match self {
-            Error::MetaError { source } => source.to_errno(),
-            Error::VFSError { source } => source.to_errno(),
-            Error::ChunkError { source } => source.to_errno(),
+            Error::_MetaError { source } => source.to_errno(),
+            Error::_VFSError { source } => source.to_errno(),
+            Error::_ChunkError { source } => source.to_errno(),
         }
     }
 }

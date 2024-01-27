@@ -290,6 +290,10 @@ impl WSlice {
         }
     }
 
+    pub fn set_id(&mut self, id: SliceID) {
+        self.inner.sid = id
+    }
+
     pub fn write_at(&mut self, offset: usize, buf: &[u8]) -> Result<usize> {
         let expected_write_len = buf.len();
         if expected_write_len <= 0 {
@@ -480,7 +484,7 @@ impl WSlice {
         self.inner.length
     }
 
-    pub fn load_block_size_from_config(&self) -> usize {
+    pub fn load_block_size(&self) -> usize {
         self.inner.config.block_size
     }
 }

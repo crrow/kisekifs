@@ -19,7 +19,7 @@ pub enum ChunkError {
 
 impl From<ChunkError> for crate::common::err::Error {
     fn from(value: ChunkError) -> Self {
-        crate::common::err::Error::ChunkError { source: value }
+        crate::common::err::Error::_ChunkError { source: value }
     }
 }
 

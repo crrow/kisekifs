@@ -54,7 +54,7 @@ const MAX_FILE_SIZE: usize = chunk::DEFAULT_CHUNK_SIZE << 31;
 #[derive(Debug)]
 pub struct KisekiVFS {
     config: VFSConfig,
-    meta: MetaEngine,
+    meta: Arc<MetaEngine>,
     internal_nodes: PreInternalNodes,
     pub(crate) writer: writer::DataManager,
     pub(crate) reader: DataReader,
@@ -89,15 +89,19 @@ impl KisekiVFS {
             internal_nodes.add_prefix();
         }
 
+        let meta = Arc::new(meta);
         let write_buffer_pool: Arc<dyn MemoryPool> =
             Arc::new(GreedyMemoryPool::new(vfs_config.write_buffer_size));
         let cancel_token = CancellationToken::new();
+        let chunk_engine = Arc::new(chunk::Engine::default());
 
         let vfs = Self {
             writer: writer::DataManager::new(
                 write_buffer_pool,
                 cancel_token,
                 vfs_config.chunk_size,
+                meta.clone(),
+                chunk_engine.clone(),
             ),
             internal_nodes,
             config: vfs_config,
