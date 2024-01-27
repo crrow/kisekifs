@@ -61,6 +61,8 @@ rustix = "0.38.30"
 arrow-buffer = "50.0.0"
 datafusion-execution = "35.0.0"
 datafusion-common = "35.0.0"
+clippy-utilities = "0.2.0"
+rangemap = "1.4.0"
 
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}
