@@ -1,7 +1,10 @@
+use std::{
+    io::{copy, Read, Write},
+    rc::{Rc, Weak},
+};
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use opendal::raw::oio::WriteBuf;
-use std::io::{copy, Read, Write};
-use std::rc::{Rc, Weak};
 
 pub const MAX_PAGE_SIZE: usize = 1 << 20; // 1 MB
 

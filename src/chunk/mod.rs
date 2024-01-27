@@ -49,9 +49,7 @@ pub fn cal_chunk_pos(offset: usize, chunk_size: usize) -> usize {
     offset % chunk_size
 }
 
-pub const DEFAULT_CHUNK_SIZE: usize = 1 << 26; // 64 MB
-                                               // pub(crate) const MAX_BLOCK_SIZE: usize = 1 << 22; // 4 MB TODO: we may need
-                                               // to config the block size.
+pub const DEFAULT_CHUNK_SIZE: usize = 1 << 26; // 64 MB.
 pub const BLOCK_SIZE: usize = 1 << 20; // 1 MB
 pub const PAGE_SIZE: usize = 1 << 16; // 64 KB
 

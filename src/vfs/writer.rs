@@ -1,22 +1,28 @@
-use crate::chunk::{cal_chunk_idx, cal_chunk_pos};
-use crate::meta;
-use crate::meta::engine::MetaEngine;
-use crate::meta::types::Ino;
+use std::{
+    cmp::min,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
+        Arc, Weak,
+    },
+    time::SystemTime,
+};
+
 use dashmap::{DashMap, DashSet};
-use datafusion_common::arrow::array::Array;
-use datafusion_common::DataFusionError;
+use datafusion_common::{arrow::array::Array, DataFusionError};
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use libc::{EINTR, EIO};
 use rand::{Rng, SeedableRng};
 use snafu::{ResultExt, Snafu};
-use std::cmp::min;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
-use std::time::SystemTime;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+
+use crate::{
+    chunk::{cal_chunk_idx, cal_chunk_pos},
+    meta,
+    meta::{engine::MetaEngine, types::Ino},
+};
 
 #[derive(Debug, Snafu)]
 pub(crate) enum Error {
@@ -46,8 +52,8 @@ pub struct WriteOp {
     data: *const u8,
     // The expected length of the write operation.
     expect_write_len: usize,
-    // The chunk manager.
-    chunk_manager: Weak<FileManager>,
+    // Current file's manager.
+    file_manager: Weak<FileManager>,
     meta_engine: Arc<MetaEngine>,
 }
 
@@ -63,14 +69,14 @@ impl WriteOp {
             offset,
             data: data.as_ptr(),
             expect_write_len: data.len(),
-            chunk_manager,
+            file_manager: chunk_manager,
             meta_engine,
         }
     }
 
     // Run the write operation.
     pub async fn run(&self) -> Result<usize> {
-        let file_manager = self.chunk_manager.upgrade().ok_or_else(|| Error::Unknown {
+        let file_manager = self.file_manager.upgrade().ok_or_else(|| Error::Unknown {
             msg: "chunk manager is dropped".to_string(),
         })?;
 
@@ -130,7 +136,7 @@ impl WriteOp {
                     Err(e) => {
                         return Err(Error::Unknown {
                             msg: format!("internal write failed: {}", e),
-                        })
+                        });
                     }
                 },
                 Err(e) => {
@@ -146,7 +152,7 @@ impl WriteOp {
 
     fn get_locations(&self) -> impl Iterator<Item = ChunkWriteCtx> {
         let file_manager = self
-            .chunk_manager
+            .file_manager
             .upgrade()
             .ok_or_else(|| Error::Unknown {
                 msg: "chunk manager is dropped".to_string(),
@@ -264,9 +270,9 @@ impl FileManager {
             .map(move |idx| {
                 let max_can_write = min(self.chunk_size - chunk_pos, left);
                 // debug!(
-                //     "chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max can write: {}",
-                //     self.chunk_size, idx, chunk_pos, left, buf_start_at, max_can_write,
-                // );
+                //     "chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max
+                // can write: {}",     self.chunk_size, idx, chunk_pos, left,
+                // buf_start_at, max_can_write, );
 
                 let ctx = ChunkWriteCtx {
                     chunk_idx: idx,
@@ -569,12 +575,11 @@ struct PartialBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use crate::meta::MetaConfig;
     use datafusion_execution::memory_pool::GreedyMemoryPool;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
+    use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+    use super::*;
+    use crate::meta::MetaConfig;
 
     fn install_log() {
         let stdout_log = tracing_subscriber::fmt::layer().pretty();

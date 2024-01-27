@@ -19,12 +19,8 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use opendal::raw::oio::StreamExt;
+use slice::Config;
 use tracing::{debug, instrument, Instrument};
-
-use crate::chunk::{
-    err::Result, page, slice, BlockIdx, ChunkError, Engine, SliceID, BLOCK_SIZE,
-    DEFAULT_CHUNK_SIZE, PAGE_SIZE,
-};
 
 // #[derive(Debug)]
 // pub(crate) struct Config {
@@ -49,9 +45,11 @@ use crate::chunk::{
 //         }
 //     }
 // }
-
 use crate::chunk::page::{UnsafePage, UnsafePageView, UnsafePages};
-use slice::Config;
+use crate::chunk::{
+    err::Result, page, slice, BlockIdx, ChunkError, Engine, SliceID, BLOCK_SIZE,
+    DEFAULT_CHUNK_SIZE, PAGE_SIZE,
+};
 
 #[derive(Debug)]
 struct SliceInner {

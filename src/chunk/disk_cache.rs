@@ -1,17 +1,25 @@
-use crate::chunk::err::{GeneralSnafu, Result};
-use crate::chunk::page::UnsafePageView;
-use crate::chunk::ChunkError;
+use std::{
+    hash::Hash,
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
+};
+
 use bytes::Bytes;
 use dashmap::DashMap;
 use opendal::Operator;
 use snafu::ResultExt;
-use std::hash::Hash;
-use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
+
+use crate::chunk::{
+    err::{GeneralSnafu, Result},
+    page::UnsafePageView,
+    ChunkError,
+};
 
 const STAGING_DIR: &str = "rawstaging";
 const CACHE_DIR: &str = "raw";
@@ -82,8 +90,8 @@ impl CacheStore {
         free_space_checker.run();
     }
 
-    // When write slice finish its job, it will transfer the ownership of the block to
-    // the cache.
+    // When write slice finish its job, it will transfer the ownership of the block
+    // to the cache.
     fn stage(&mut self, key: &str, data: Vec<u8>) -> Result<PathBuf> {
         if self.stage_full.load(Ordering::SeqCst) {
             // return Err(ChunkError::CacheFull.into());
@@ -235,9 +243,9 @@ impl FreeSpaceChecker {
 
 #[cfg(test)]
 mod tests {
+    use tracing_subscriber::{layer::SubscriberExt, Registry};
+
     use super::*;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
 
     #[test]
     fn get_disk_usage() {

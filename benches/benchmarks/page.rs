@@ -1,10 +1,13 @@
 use bytes::BytesMut;
-use criterion::measurement::WallTime;
-use criterion::Throughput::Bytes;
-use criterion::{criterion_group, BenchmarkGroup, Criterion, Throughput};
-use kisekifs::chunk::slice::{RSlice as RawRSlice, WSlice as RawWSlice};
-use kisekifs::chunk::slice2::{RSlice, WSlice};
-use kisekifs::chunk::Engine;
+use criterion::{
+    criterion_group, measurement::WallTime, BenchmarkGroup, Criterion, Throughput,
+    Throughput::Bytes,
+};
+use kisekifs::chunk::{
+    slice::{RSlice as RawRSlice, WSlice as RawWSlice},
+    slice2::{RSlice, WSlice},
+    Engine,
+};
 use tokio::runtime;
 
 async fn unsafe_page(size: usize, read_cnt: usize, engine: Engine) {
