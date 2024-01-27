@@ -23,12 +23,15 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use fuser::{FileType, TimeOrNow};
 use libc::{mode_t, open, EACCES, EBADF, EFBIG, EINTR, EINVAL, EPERM};
 use scopeguard::defer;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
+use crate::vfs::writer;
 use crate::{
     chunk,
     common::err::ToErrno,
@@ -44,19 +47,18 @@ use crate::{
         err::{Result, VFSError},
         handle::{Handle, HandleInner},
         reader::DataReader,
-        writer::DataWriter,
         VFSError::ErrLIBC,
     },
 };
 
-const MAX_FILE_SIZE: usize = chunk::MAX_CHUNK_SIZE << 31;
+const MAX_FILE_SIZE: usize = chunk::DEFAULT_CHUNK_SIZE << 31;
 
 #[derive(Debug)]
 pub struct KisekiVFS {
     config: VFSConfig,
     meta: MetaEngine,
     internal_nodes: PreInternalNodes,
-    pub(crate) writer: DataWriter,
+    pub(crate) writer: writer::DataManager,
     pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
@@ -89,11 +91,19 @@ impl KisekiVFS {
             internal_nodes.add_prefix();
         }
 
+        let write_buffer_pool: Arc<dyn MemoryPool> =
+            Arc::new(GreedyMemoryPool::new(vfs_config.write_buffer_size));
+        let cancel_token = CancellationToken::new();
+
         let vfs = Self {
+            writer: writer::DataManager::new(
+                write_buffer_pool,
+                cancel_token,
+                vfs_config.chunk_size,
+            ),
             internal_nodes,
             config: vfs_config,
             meta,
-            writer: DataWriter::default(),
             reader: DataReader::default(),
             modified_at: DashMap::new(),
             _next_fh: AtomicU64::new(1),
@@ -426,6 +436,7 @@ impl KisekiVFS {
                 TimeOrNow::Now => SystemTime::now(),
             };
             if flags.contains(SetAttrFlags::MTIME) || flags.contains(SetAttrFlags::MTIME_NOW) {
+                // TODO: whats wrong with this?
                 self.writer.update_mtime(ino, mtime)?;
             }
         }

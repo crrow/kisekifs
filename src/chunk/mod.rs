@@ -42,38 +42,21 @@ pub mod slice2;
 /// smallest storage unit for the object storage and
 /// disk cache.
 
-pub(crate) const MAX_CHUNK_SIZE: usize = 1 << 26; // 64 MB
-                                                  // pub(crate) const MAX_BLOCK_SIZE: usize = 1 << 22; // 4 MB TODO: we may need
-                                                  // to config the block size.
-pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1 << 20; // 1 MB
-pub(crate) const MIN_BLOCK_SIZE: usize = 1 << 16; // 64 KB
+pub fn cal_chunk_idx(offset: usize, chunk_size: usize) -> usize {
+    offset / chunk_size
+}
+pub fn cal_chunk_pos(offset: usize, chunk_size: usize) -> usize {
+    offset % chunk_size
+}
 
-pub(crate) fn chunk_id(offset: usize) -> ChunkID {
-    ChunkID(offset / MAX_CHUNK_SIZE)
-}
-pub(crate) fn chunk_pos(offset: usize) -> usize {
-    offset % MAX_CHUNK_SIZE
-}
+pub const DEFAULT_CHUNK_SIZE: usize = 1 << 26; // 64 MB
+                                               // pub(crate) const MAX_BLOCK_SIZE: usize = 1 << 22; // 4 MB TODO: we may need
+                                               // to config the block size.
+pub const BLOCK_SIZE: usize = 1 << 20; // 1 MB
+pub const PAGE_SIZE: usize = 1 << 16; // 64 KB
 
 pub(crate) type PageIdx = usize;
 pub(crate) type BlockIdx = usize;
-
-/// ChunkID is calculated by the offset / MAX_CHUNK_SIZE.
-#[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
-pub(crate) struct ChunkID(pub(crate) usize);
-
-impl ChunkID {
-    pub(crate) fn new(file_offset: usize) -> Self {
-        chunk_id(file_offset)
-    }
-}
-impl Into<usize> for ChunkID {
-    fn into(self) -> usize {
-        self.0
-    }
-}
-
+pub(crate) type ChunkID = usize;
 pub(crate) type ChunkOffset = usize;
-
-/// SliceID is a unique identifier for a slice.
 pub(crate) type SliceID = usize;

@@ -1,95 +1,691 @@
+use crate::chunk::{cal_chunk_idx, cal_chunk_pos};
+use crate::meta;
+use crate::meta::engine::MetaEngine;
+use crate::meta::types::Ino;
+use dashmap::{DashMap, DashSet};
+use datafusion_common::arrow::array::Array;
+use datafusion_common::DataFusionError;
+use datafusion_execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
+use libc::{EINTR, EIO};
+use rand::{Rng, SeedableRng};
+use snafu::{ResultExt, Snafu};
+use std::cmp::min;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    task::{Context, Poll},
-    time::SystemTime,
-};
+use std::time::SystemTime;
+use tokio::sync::{Mutex, Notify, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 
-use dashmap::DashMap;
-use tokio::{sync::Notify, time::Instant};
-use tracing::debug;
-
-use crate::chunk::{chunk_id, ChunkID};
-use crate::{
-    chunk::{ChunkError, ChunkOffset, Engine, SliceID},
-    meta::types::Ino,
-    vfs::{err::Result, handle::HandleWriteGuard},
-};
-
-#[derive(Debug, Default)]
-pub(crate) struct DataWriter {
-    engine: Engine,
-    file_writers: DashMap<Ino, Arc<FileWriter>>,
+#[derive(Debug, Snafu)]
+pub(crate) enum Error {
+    #[snafu(display("unknown error happened: {msg}",))]
+    Unknown { msg: String },
+    #[snafu(display("memory usage too high: {}", source))]
+    MemoryUsageTooHigh { source: DataFusionError },
+    #[snafu(display("wait too long: {}", msg))]
+    WaitTooLong { msg: String },
+    #[snafu(display("canceled: {msg}"))]
+    Canceled { msg: String },
 }
 
-impl DataWriter {
-    pub(crate) fn open(&self, inode: Ino, length: u64) -> Weak<FileWriter> {
-        debug!("data writer open do nothing: inode: {inode}, length: {length}");
-        let engine = self.engine.clone();
-        let x = self.file_writers.entry(inode).or_insert_with(|| {
-            Arc::new(FileWriter {
-                chunk_engine: engine,
-                offset: 0,
-                reference: AtomicU64::new(0),
-                chunk_writers: Default::default(),
-            })
-        });
-        Arc::downgrade(x.value())
+impl From<Error> for super::err::VFSError {
+    fn from(value: Error) -> Self {
+        super::err::VFSError::ErrLIBC { kind: EINTR }
     }
+}
+
+type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug)]
+pub struct WriteOp {
+    // The number of bytes written by this operation.
+    offset: usize,
+    // The data written by this operation.
+    data: *const u8,
+    // The expected length of the write operation.
+    expect_write_len: usize,
+    // The chunk manager.
+    chunk_manager: Weak<FileManager>,
+    meta_engine: Arc<MetaEngine>,
+}
+
+impl WriteOp {
+    fn new(
+        chunk_manager: Weak<FileManager>, // TODO: use weak instead.
+        offset: usize,
+        data: &[u8],
+        meta_engine: Arc<MetaEngine>,
+    ) -> Self {
+        assert!(data.len() > 0);
+        WriteOp {
+            offset,
+            data: data.as_ptr(),
+            expect_write_len: data.len(),
+            chunk_manager,
+            meta_engine,
+        }
+    }
+
+    // Run the write operation.
+    pub async fn run(&self) -> Result<usize> {
+        let file_manager = self.chunk_manager.upgrade().ok_or_else(|| Error::Unknown {
+            msg: "chunk manager is dropped".to_string(),
+        })?;
+
+        // 1. find the chunk
+        let handles = file_manager
+            .find_chunk_to_write(self.offset, self.expect_write_len)
+            .into_iter()
+            .map(|location| {
+                let file_manager = file_manager.clone();
+                let token = file_manager.cancel_token.clone();
+                let mem_pool = file_manager.memory_pool.clone();
+                let meta_engine = self.meta_engine.clone();
+                let data = &unsafe { std::slice::from_raw_parts(self.data, self.expect_write_len) }
+                    [location.buf_start_at..location.buf_start_at + location.need_write_len];
+                let handle = tokio::spawn(async move {
+                    let mut c = file_manager
+                        .chunks
+                        .entry(location.chunk_idx)
+                        .or_insert_with(|| {
+                            Chunk::new(location.chunk_idx, mem_pool, token, meta_engine)
+                        });
+                    let chunk = c.value_mut();
+
+                    // wait until we can write.
+                    if !chunk.wait_until_can_write(location.clone()).await {
+                        return Err(Error::Canceled {
+                            msg: format!("wait too long for writing chunk {}", chunk.chunk_idx),
+                        });
+                    }
+
+                    // mark here comes a writing
+                    chunk.inc_waiting_count();
+                    // wait if someone is flushing.
+                    if !chunk.wait_flush().await {
+                        return Err(Error::Canceled {
+                            msg: format!("wait too long for flushing chunk {}", chunk.chunk_idx),
+                        });
+                    }
+                    chunk.dec_waiting_count();
+
+                    // start writing.
+                    let write_len = chunk.write(location.chunk_offset, data).await?;
+                    Ok(write_len)
+                });
+                handle
+            })
+            .collect::<Vec<_>>();
+
+        let mut write_len = 0;
+        for r in futures::future::join_all(handles).await {
+            match r {
+                Ok(r) => match r {
+                    Ok(wl) => {
+                        debug!("write {} bytes", wl);
+                        write_len += wl
+                    }
+                    Err(e) => {
+                        return Err(Error::Unknown {
+                            msg: format!("internal write failed: {}", e),
+                        })
+                    }
+                },
+                Err(e) => {
+                    return Err(Error::Unknown {
+                        msg: format!("async error: {}", e),
+                    });
+                }
+            }
+        }
+
+        Ok(write_len)
+    }
+
+    fn get_locations(&self) -> impl Iterator<Item = ChunkWriteCtx> {
+        let file_manager = self
+            .chunk_manager
+            .upgrade()
+            .ok_or_else(|| Error::Unknown {
+                msg: "chunk manager is dropped".to_string(),
+            })
+            .unwrap();
+
+        // 1. find the chunk
+        file_manager
+            .find_chunk_to_write(self.offset, self.expect_write_len)
+            .into_iter()
+    }
+}
+
+/// The manager of all files.
+#[derive(Debug)]
+pub(crate) struct DataManager {
+    // config
+    chunk_size: usize,
+
+    write_buffer: Arc<dyn MemoryPool>,
+    cancel_token: CancellationToken,
+    files: DashMap<Ino, Arc<FileManager>>,
+}
+
+impl DataManager {
+    pub(crate) fn new(
+        memory_pool: Arc<dyn MemoryPool>,
+        cancel_token: CancellationToken,
+        chunk_size: usize,
+    ) -> DataManager {
+        DataManager {
+            write_buffer: memory_pool,
+            cancel_token,
+            files: Default::default(),
+            chunk_size,
+        }
+    }
+
+    pub(crate) fn new_file_manager(&self, ino: Ino) -> Weak<FileManager> {
+        let fm = Arc::new(FileManager::new(
+            self.chunk_size,
+            self.cancel_token.clone(),
+            self.write_buffer.clone(),
+        ));
+        self.files.insert(ino, fm.clone());
+        Arc::downgrade(&fm)
+    }
+
     pub(crate) fn get_length(&self, ino: Ino) -> u64 {
-        debug!("writer get_length do nothing, inode: {ino}");
-        return 0;
+        // TODO: don't know what this function do
+        0
     }
 
     pub(crate) fn update_mtime(&self, ino: Ino, mtime: SystemTime) -> Result<()> {
-        // TODO: implement me
-        return Ok(());
+        todo!()
     }
 }
 
-/// There may be multiple writers for a file.
+/// A file is composed of multiple chunks.
 #[derive(Debug)]
-pub(crate) struct FileWriter {
-    chunk_engine: Engine,
-    offset: usize, // set by user seek
+pub(crate) struct FileManager {
+    // config
+    // max size of each chunk bytes.
+    chunk_size: usize,
 
-    reference: AtomicU64,
-    chunk_writers: DashMap<ChunkID, ChunkWriter>,
-}
-
-impl FileWriter {
-    // We can only write data when we acquire the write lock.
+    // Key: chunk_idx
+    chunks: DashMap<usize, Chunk>,
+    // When we merge slice or append slice,
+    // we should update the slice counter.
     //
-    // But there may some background tasks, so we use shared
-    // reference here.
-    fn write(&self, guard: &HandleWriteGuard, offset: usize, data: &[u8]) -> Result<usize> {
-        let chunk_id = chunk_id(offset);
-        let mut entry = self
-            .chunk_writers
-            .entry(chunk_id)
-            .or_insert(ChunkWriter::new(chunk_id));
-        let mut chunk_writer = entry.value_mut();
+    // The slice counter is used for avoiding too
+    // many random writes.
+    slice_counter: AtomicUsize,
 
-        Ok(0)
+    // the total write buffer of this file.
+    memory_pool: Arc<dyn MemoryPool>,
+    // track the buffer usage of this file.
+    buffer_usage: Arc<Mutex<MemoryReservation>>,
+    cancel_token: CancellationToken,
+}
+
+impl FileManager {
+    fn new(
+        chunk_size: usize,
+        token: CancellationToken,
+        memory_pool: Arc<dyn MemoryPool>,
+    ) -> FileManager {
+        Self {
+            chunk_size,
+            chunks: Default::default(),
+            slice_counter: Default::default(),
+            buffer_usage: Arc::new(Mutex::new(
+                MemoryConsumer::new("FileChunkManager").register(&memory_pool),
+            )),
+            memory_pool,
+            cancel_token: token,
+        }
+    }
+    // Count the total number of slices in current file.
+    fn total_slices(&self) -> usize {
+        self.slice_counter.load(Ordering::SeqCst)
+    }
+
+    // This write may cross two chunks.
+    fn find_chunk_to_write(&self, offset: usize, expected_write_len: usize) -> Vec<ChunkWriteCtx> {
+        let start_chunk_idx = cal_chunk_idx(offset, self.chunk_size);
+        let end_chunk_idx = cal_chunk_idx(offset + expected_write_len - 1, self.chunk_size);
+
+        let mut chunk_pos = cal_chunk_pos(offset, self.chunk_size);
+        let mut buf_start_at = 0;
+        let mut left = expected_write_len;
+
+        (start_chunk_idx..=end_chunk_idx)
+            .into_iter()
+            .map(move |idx| {
+                let max_can_write = min(self.chunk_size - chunk_pos, left);
+                // debug!(
+                //     "chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max can write: {}",
+                //     self.chunk_size, idx, chunk_pos, left, buf_start_at, max_can_write,
+                // );
+
+                let ctx = ChunkWriteCtx {
+                    chunk_idx: idx,
+                    chunk_offset: chunk_pos,
+                    need_write_len: max_can_write,
+                    buf_start_at,
+                };
+                chunk_pos = cal_chunk_pos(chunk_pos + max_can_write, self.chunk_size);
+                buf_start_at = buf_start_at + max_can_write;
+                left = left - max_can_write;
+                ctx
+            })
+            .collect::<Vec<_>>()
     }
 }
 
-/// ChunkWriter is used for writing a chunk.
-#[derive(Debug)]
-struct ChunkWriter {
-    cid: ChunkID,
-    slices: Vec<SliceWriter>,
+#[derive(Debug, Eq, PartialEq, Clone)]
+struct ChunkWriteCtx {
+    // write to which chunk
+    chunk_idx: usize,
+    // the start offset of this write
+    chunk_offset: usize,
+    // the length of this write
+    need_write_len: usize,
+    // the start offset of the input buf
+    buf_start_at: usize,
 }
 
-impl ChunkWriter {
-    fn new(cid: ChunkID) -> Self {
-        Self {
-            cid,
-            slices: vec![],
+#[derive(Debug)]
+struct Chunk {
+    // the chunk_idx of this chunk.
+    chunk_idx: usize,
+    // current length of the chunk, which should be smaller
+    // than CHUNK_SIZE.
+    length: usize,
+    // one chunk can have multiple slices.
+    slice_manager: Arc<SliceManager>, // Make user can clone it.
+    // how many write operations are flushing this chunk right now.
+    flush_count: Arc<AtomicUsize>,
+    // this chunk is flushed. notify the waiting write operation to
+    // continue.
+    flush_finished: Arc<Notify>,
+    // how many write operations are waiting for flushing end.
+    write_waiting_count: Arc<AtomicUsize>,
+
+    // the total write buffer.
+    total_buffer: Arc<dyn MemoryPool>,
+    // track the buffer usage of this chunk.
+    buffer_usage: Arc<Mutex<MemoryReservation>>,
+    cancel_token: CancellationToken,
+    // the meta engine.
+    meta_engine: Arc<MetaEngine>,
+}
+
+impl Chunk {
+    fn new(
+        idx: usize,
+        memory_pool: Arc<dyn MemoryPool>,
+        cancellation_token: CancellationToken,
+        meta_engine: Arc<MetaEngine>,
+    ) -> Chunk {
+        Chunk {
+            chunk_idx: idx,
+            length: 0,
+            slice_manager: Arc::new(SliceManager::new(meta_engine.clone())),
+            flush_count: Arc::new(Default::default()),
+            flush_finished: Arc::new(Default::default()),
+            write_waiting_count: Arc::new(Default::default()),
+            buffer_usage: Arc::new(Mutex::new(
+                MemoryConsumer::new(format!("Chunk: {}", idx)).register(&memory_pool),
+            )),
+            total_buffer: memory_pool,
+            cancel_token: cancellation_token,
+            meta_engine,
+        }
+    }
+
+    async fn wait_flush(&self) -> bool {
+        let token = self.cancel_token.clone();
+        let notify = self.flush_finished.clone();
+        let flush_counter = self.flush_count.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                if flush_counter.load(Ordering::SeqCst) == 0 {
+                    break;
+                }
+                tokio::select! {
+                    _ = notify.notified() => {
+                        break;
+                    }
+                    _ = token.cancelled() => {
+                        debug!("wait_flush cancelled");
+                        break;
+                    }
+                }
+            }
+        });
+        handle.await.expect("wait_flush failed");
+        !self.cancel_token.is_cancelled()
+    }
+
+    fn inc_waiting_count(&self) {
+        self.write_waiting_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn dec_waiting_count(&self) {
+        self.write_waiting_count.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    async fn wait_until_can_write(&self, location: ChunkWriteCtx) -> bool {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
+        let cancel_token = self.cancel_token.clone();
+        let mr = self.buffer_usage.clone();
+        let size = self.cal_alloc_bytes(&location);
+        if size == 0 {
+            return true;
+        }
+        let pool = self.total_buffer.clone();
+        let handle = tokio::task::spawn(async move {
+            let mut guard = mr.lock().await;
+            loop {
+                if cancel_token.is_cancelled() {
+                    break;
+                }
+                tokio::select! {
+                    res1 = interval.tick() => {
+                        match guard.try_grow(size) {
+                            Ok(_) => {
+                                debug!("chunk: {} increase memory usage {}", location.chunk_idx, size);
+                                break;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    "this write operation is blocked since high memory usage: \
+                                    idx: {},
+                                    want: {}, current usage: {}, memory pool usage: {}",
+                                    location.chunk_idx,
+                                    size,
+                                    guard.size(),
+                                    pool.reserved(),
+                                );
+                            }
+                        }
+                    },
+                    res2 = cancel_token.cancelled() => {
+                        break;
+                    },
+                }
+            }
+        });
+        handle.await.expect("wait_until_can_write failed");
+        !self.cancel_token.is_cancelled()
+    }
+
+    // calculate how many bytes we need to allocate.
+    fn cal_alloc_bytes(&self, location: &ChunkWriteCtx) -> usize {
+        // TODO: we may not need to allocate memory if the location is overlapped.
+        location.need_write_len
+    }
+
+    async fn write(&self, chunk_pos: usize, data: &[u8]) -> Result<usize> {
+        let mut slice = self.slice_manager.find_writable_slice(chunk_pos).await;
+        // we should put this slice back after we finish writing.
+
+        slice.write(chunk_pos - slice.chunk_start_offset, data);
+
+        self.slice_manager.append_slice(slice).await;
+        self.slice_manager.start_background_commit_task();
+        Ok(data.len())
+    }
+}
+
+/// SliceManager is used for managing slices under a chunk.
+#[derive(Debug)]
+struct SliceManager {
+    slices: Arc<Mutex<Vec<SliceWriter>>>,
+    background_task_running: Arc<AtomicBool>,
+    meta_engine: Arc<meta::engine::MetaEngine>,
+}
+
+impl SliceManager {
+    fn new(meta_engine: Arc<meta::engine::MetaEngine>) -> SliceManager {
+        SliceManager {
+            slices: Default::default(),
+            background_task_running: Default::default(),
+            meta_engine,
+        }
+    }
+
+    // We try to find slice from the back to the front,
+    // if we find the slice hasn't been frozen, we try to check
+    // if the buffer still in memory, since once the slice upload
+    // to the background, it will try to release the buffer.
+    // Then we should choose the buffer alive one.
+    //
+    // If we can't find a slice to write for multiple times,
+    // we should try to flush the slice to the background, and
+    // release the memory.
+    async fn find_writable_slice(&self, chunk_offset: usize) -> SliceWriter {
+        let mut guard = self.slices.lock().await;
+        let mut idx = None;
+        for (i, slice) in guard.iter().rev().enumerate() {
+            if !slice.frozen.load(Ordering::SeqCst) {
+                if chunk_offset >= slice.offset + slice.flushed_len
+                    && chunk_offset <= slice.offset + slice.length
+                {
+                    // we can write to this slice.
+                    idx = Some(1);
+                    break;
+                }
+            }
+            if i >= 3 {
+                slice.flush();
+            }
+        }
+        if let Some(idx) = idx {
+            guard.remove(idx)
+        } else {
+            SliceWriter::new(chunk_offset)
+        }
+    }
+
+    async fn append_slice(&self, slice: SliceWriter) {
+        let mut guard = self.slices.lock().await;
+        guard.push(slice);
+    }
+
+    // Start a background task if there is no background task running,
+    // and there is some slice need to be flushed.
+    fn start_background_commit_task(&self) {
+        if self.background_task_running.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::spawn(async move { loop {} });
+        // TODO
+    }
+
+    // Before we flush data to the backend storage,
+    // we should generate a slice id.
+    async fn acquire_slice_id(&self) -> Result<usize> {
+        todo!()
+    }
+}
+/// A SliceWriter is build by a Writing operation,
+/// and it can be modified by other writing operation.
+#[derive(Debug)]
+struct SliceWriter {
+    // if this id equals to 0, means this slice hasn't been flushed yet.
+    slice_id: AtomicUsize,
+
+    // The chunk offset.
+    chunk_start_offset: usize,
+
+    // The slice it self's offset.
+    offset: usize,
+
+    // current length of the slice, which should be smaller
+    // than CHUNK_SIZE.
+    length: usize,
+
+    // the flushed data of the slice in the chunk.
+    flushed_len: usize,
+
+    // This slice is flushing right now.
+    frozen: AtomicBool,
+}
+
+impl SliceWriter {
+    fn new(offset: usize) -> SliceWriter {
+        SliceWriter {
+            slice_id: AtomicUsize::new(0),
+            chunk_start_offset: offset,
+            offset: 0,
+            length: 0,
+            flushed_len: 0,
+            frozen: Default::default(),
+        }
+    }
+
+    fn write(&mut self, slice_offset: usize, data: &[u8]) {}
+
+    fn flush(&self) {}
+}
+
+#[derive(Debug)]
+enum Block {
+    Full(Vec<u8>),         // a full block.
+    Partial(PartialBlock), // only a part of the block has been written.
+}
+
+#[derive(Debug)]
+struct PartialBlock {
+    // the written start offset inside the block.
+    start: usize,
+    // the written end offset inside the block.
+    end: usize,
+    // The data of the block.
+    data: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::meta::MetaConfig;
+    use datafusion_execution::memory_pool::GreedyMemoryPool;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Registry;
+
+    fn install_log() {
+        let stdout_log = tracing_subscriber::fmt::layer().pretty();
+        let subscriber = Registry::default().with(stdout_log);
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("Unable to set global subscriber");
+    }
+
+    #[test]
+    fn memory_pool_basic() {
+        let memory_pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(2048));
+        let mut reservation = MemoryConsumer::new("test").register(&memory_pool);
+        println!("{}", reservation.size());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_chunk_to_write() {
+        let memory_pool = Arc::new(GreedyMemoryPool::new(3048));
+        let chunk_size = 1024;
+        let data_manager = DataManager::new(memory_pool, CancellationToken::new(), chunk_size);
+        let file_manager = data_manager.new_file_manager(Ino(1));
+        let meta_engine = Arc::new(MetaConfig::default().open().unwrap());
+
+        struct TestCase {
+            offset: usize,
+            data: Vec<u8>,
+            want: Vec<ChunkWriteCtx>,
+        }
+
+        impl TestCase {
+            async fn run(&self, file_manager: Weak<FileManager>, meta_engine: Arc<MetaEngine>) {
+                let write_op =
+                    WriteOp::new(file_manager.clone(), self.offset, &self.data, meta_engine);
+                let locations = write_op.get_locations().collect::<Vec<_>>();
+                assert_eq!(locations, self.want);
+                let write_len = write_op.run().await;
+                assert!(write_len.is_ok());
+                assert_eq!(write_len.unwrap(), self.data.len());
+            }
+        }
+
+        for i in vec![
+            TestCase {
+                offset: chunk_size,
+                data: vec![1, 2, 3],
+                want: vec![ChunkWriteCtx {
+                    chunk_idx: 1,
+                    chunk_offset: 0,
+                    need_write_len: 3,
+                    buf_start_at: 0,
+                }],
+            },
+            TestCase {
+                offset: chunk_size - 3,
+                data: vec![1, 2, 3],
+                want: vec![ChunkWriteCtx {
+                    chunk_idx: 0,
+                    chunk_offset: chunk_size - 3,
+                    need_write_len: 3,
+                    buf_start_at: 0,
+                }],
+            },
+            TestCase {
+                offset: chunk_size - 3,
+                data: vec![1, 2, 3, 4],
+                want: vec![
+                    ChunkWriteCtx {
+                        chunk_idx: 0,
+                        chunk_offset: chunk_size - 3,
+                        need_write_len: 3,
+                        buf_start_at: 0,
+                    },
+                    ChunkWriteCtx {
+                        chunk_idx: 1,
+                        chunk_offset: 0,
+                        need_write_len: 1,
+                        buf_start_at: 3,
+                    },
+                ],
+            },
+            TestCase {
+                offset: 0,
+                data: vec![1, 2, 3, 4],
+                want: vec![ChunkWriteCtx {
+                    chunk_idx: 0,
+                    chunk_offset: 0,
+                    need_write_len: 4,
+                    buf_start_at: 0,
+                }],
+            },
+            TestCase {
+                // FIXME: at present we won't free the memory, then we will wait forever.
+                offset: 0,
+                data: vec![0; 2 * chunk_size],
+                want: vec![
+                    ChunkWriteCtx {
+                        chunk_idx: 0,
+                        chunk_offset: 0,
+                        need_write_len: chunk_size,
+                        buf_start_at: 0,
+                    },
+                    ChunkWriteCtx {
+                        chunk_idx: 1,
+                        chunk_offset: 0,
+                        need_write_len: chunk_size,
+                        buf_start_at: chunk_size,
+                    },
+                ],
+            },
+        ] {
+            i.run(file_manager.clone(), meta_engine.clone()).await;
         }
     }
 }
-
-/// SliceWriter is a wrapper for writing data to a slice.
-#[derive(Debug)]
-struct SliceWriter {}

@@ -36,7 +36,7 @@ use tracing::debug;
 
 use crate::{
     meta::types::{Entry, Ino},
-    vfs::{err::Result, reader::FileReader, writer::FileWriter, KisekiVFS, VFSError},
+    vfs::{err::Result, reader::FileReader, writer::FileManager, KisekiVFS, VFSError},
 };
 
 impl KisekiVFS {
@@ -73,7 +73,7 @@ impl KisekiVFS {
             libc::O_WRONLY | libc::O_RDWR => {
                 Handle::new_with(fh, inode, |h| {
                     h.reader = Some(self.reader.open(inode, length));
-                    h.writer = Some(self.writer.open(inode, length));
+                    h.writer = Some(self.writer.new_file_manager(inode));
                 });
             }
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
@@ -104,7 +104,7 @@ pub(crate) struct Handle {
     timeout: Duration,
 
     reader: Option<Weak<FileReader>>, // TODO: how to make it concurrent safe ?
-    writer: Option<Weak<FileWriter>>,
+    writer: Option<Weak<FileManager>>,
 }
 
 impl Handle {

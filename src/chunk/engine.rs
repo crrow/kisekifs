@@ -30,8 +30,7 @@ use tracing::{debug, instrument, Instrument};
 use crate::chunk::{
     config::Config,
     err::{Result, StoErrSnafu},
-    slice, BlockIdx, ChunkError, PageIdx, SliceID, DEFAULT_BLOCK_SIZE, MAX_CHUNK_SIZE,
-    MIN_BLOCK_SIZE,
+    slice, BlockIdx, ChunkError, PageIdx, SliceID, BLOCK_SIZE, DEFAULT_CHUNK_SIZE, PAGE_SIZE,
 };
 
 #[derive(Debug, Default)]
@@ -185,7 +184,7 @@ mod tests {
         let size = offset + data.len();
         assert_eq!(ws.length(), size);
 
-        ws.flush_to(DEFAULT_BLOCK_SIZE + 3).await.unwrap();
+        ws.flush_to(BLOCK_SIZE + 3).await.unwrap();
         ws.finish(size).await.unwrap();
 
         let mut rs = engine.reader(1, size);

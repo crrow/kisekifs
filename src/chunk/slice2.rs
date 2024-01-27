@@ -22,8 +22,8 @@ use opendal::raw::oio::StreamExt;
 use tracing::{debug, instrument, Instrument};
 
 use crate::chunk::{
-    err::Result, page, slice, BlockIdx, ChunkError, Engine, SliceID, DEFAULT_BLOCK_SIZE,
-    MAX_CHUNK_SIZE, MIN_BLOCK_SIZE,
+    err::Result, page, slice, BlockIdx, ChunkError, Engine, SliceID, BLOCK_SIZE,
+    DEFAULT_CHUNK_SIZE, PAGE_SIZE,
 };
 
 // #[derive(Debug)]
@@ -286,7 +286,7 @@ pub struct WSlice {
 impl WSlice {
     pub fn new(sid: SliceID, engine: Engine) -> Self {
         let config = engine.slice_config();
-        let block_cnt = MAX_CHUNK_SIZE / config.block_size;
+        let block_cnt = DEFAULT_CHUNK_SIZE / config.block_size;
         Self {
             inner: SliceInner::new(sid, config, 0, engine),
             uploaded: 0,
@@ -304,7 +304,7 @@ impl WSlice {
             self.inner.sid, offset, expected_write_len
         );
         assert!(
-            offset + buf.len() <= MAX_CHUNK_SIZE,
+            offset + buf.len() <= DEFAULT_CHUNK_SIZE,
             "slice size {} + write len {} will exceed maximum chunk size",
             buf.len(),
             expected_write_len
@@ -335,7 +335,7 @@ impl WSlice {
 
             let block_idx = new_pos / self.inner.config.block_size; // write at which block.
             let block_pos = new_pos % self.inner.config.block_size; // start write at which position of the block.
-            let mut page_size = MIN_BLOCK_SIZE;
+            let mut page_size = PAGE_SIZE;
             if block_idx > 0 || page_size > self.inner.config.block_size {
                 // decide the page size of this block.
                 // means we write to the sec block.
@@ -515,7 +515,7 @@ mod tests {
         let size = offset + data.len();
         assert_eq!(ws.length(), size);
 
-        ws.flush_to(DEFAULT_BLOCK_SIZE + 3).await.unwrap();
+        ws.flush_to(BLOCK_SIZE + 3).await.unwrap();
         ws.finish(size).await.unwrap();
 
         let mut rs = RSlice::new(1, size, engine.clone());
