@@ -21,6 +21,8 @@ enum Error {
     MemoryUsageTooHigh { source: DataFusionError },
     #[snafu(display("wait too long: {}", msg))]
     WaitTooLong { msg: String },
+    #[snafu(display("canceled: {msg}"))]
+    Canceled { msg: String },
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -59,14 +61,14 @@ impl WriteOp {
         })?;
 
         // FIXME
-        if file_manager
-            .wait_until_can_write(self.expect_write_len)
-            .await
-        {
-            return Err(Error::WaitTooLong {
-                msg: format!("wait too long for writing {} bytes", self.expect_write_len),
-            });
-        }
+        // if file_manager
+        //     .wait_until_can_write(self.expect_write_len)
+        //     .await
+        // {
+        //     return Err(Error::WaitTooLong {
+        //         msg: format!("wait too long for writing {} bytes", self.expect_write_len),
+        //     });
+        // }
 
         // 1. find the chunk
         let handles = file_manager
@@ -75,27 +77,34 @@ impl WriteOp {
             .map(|location| {
                 let file_manager = file_manager.clone();
                 let token = file_manager.cancel_token.clone();
+                let mem_pool = file_manager.memory_pool.clone();
                 let data = &unsafe { std::slice::from_raw_parts(self.data, self.expect_write_len) }
                     [location.buf_start_at..location.buf_start_at + location.need_write_len];
                 let handle = tokio::spawn(async move {
                     let mut c = file_manager
                         .chunks
                         .entry(location.chunk_idx)
-                        .or_insert_with(|| Chunk::new(location.chunk_idx, token));
-
+                        .or_insert_with(|| Chunk::new(location.chunk_idx, mem_pool, token));
                     let chunk = c.value_mut();
+
+                    // wait until we can write.
+                    if !chunk.wait_until_can_write(location.clone()).await {
+                        return Err(Error::Canceled {
+                            msg: format!("wait too long for writing chunk {}", chunk.chunk_idx),
+                        });
+                    }
 
                     // mark here comes a writing
                     chunk.inc_waiting_count();
-                    // 2. wait if someone is flushing.
-                    if chunk.wait_flush().await {
-                        return Err(Error::WaitTooLong {
+                    // wait if someone is flushing.
+                    if !chunk.wait_flush().await {
+                        return Err(Error::Canceled {
                             msg: format!("wait too long for flushing chunk {}", chunk.chunk_idx),
                         });
                     }
                     chunk.dec_waiting_count();
 
-                    // 3. start writing.
+                    // start writing.
                     let write_len = chunk.write(location.chunk_offset, data).await?;
                     Ok(write_len)
                 });
@@ -146,10 +155,12 @@ impl WriteOp {
 
 /// The manager of all files.
 struct DataManager {
+    // config
+    chunk_size: usize,
+
     memory_pool: Arc<dyn MemoryPool>,
     cancel_token: CancellationToken,
     files: DashMap<Ino, Arc<FileManager>>,
-    chunk_size: usize,
 }
 
 impl DataManager {
@@ -180,7 +191,10 @@ impl DataManager {
 /// A file is composed of multiple chunks.
 #[derive(Debug)]
 struct FileManager {
+    // config
+    // max size of each chunk bytes.
     chunk_size: usize,
+
     // Key: chunk_idx
     chunks: DashMap<usize, Chunk>,
     // When we merge slice or append slice,
@@ -190,7 +204,9 @@ struct FileManager {
     // many random writes.
     slice_counter: AtomicUsize,
 
-    /// Our memory reservation.
+    // The total memory usage of all files.
+    memory_pool: Arc<dyn MemoryPool>,
+    // Current file's memory usage.
     mem_reservation: Arc<Mutex<MemoryReservation>>,
     cancel_token: CancellationToken,
 }
@@ -208,50 +224,13 @@ impl FileManager {
             mem_reservation: Arc::new(Mutex::new(
                 MemoryConsumer::new("FileChunkManager").register(&memory_pool),
             )),
+            memory_pool,
             cancel_token: token,
         }
     }
     // Count the total number of slices in current file.
     fn total_slices(&self) -> usize {
         self.slice_counter.load(Ordering::SeqCst)
-    }
-
-    /// Wait until we can write `size` bytes.
-    /// TODO: should we add timeout on it ?
-    /// FIXME: we should be able to write at the same location.
-    async fn wait_until_can_write(&self, size: usize) -> bool {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
-        let mem_reservation = self.mem_reservation.clone();
-        let cancel_token = self.cancel_token.clone();
-        let handle = tokio::task::spawn(async move {
-            loop {
-                if cancel_token.is_cancelled() {
-                    break;
-                }
-                tokio::select! {
-                    res1 = interval.tick() => {
-                        let mut guard=  mem_reservation.lock().await;
-                        match guard.try_grow(size) {
-                            Ok(_) => {
-                                debug!("increase memory usage {}", size);
-                                break;
-                            }
-                            Err(_) => {
-                                warn!("this write operation is blocked since high memory usage");
-                            }
-                        }
-                    },
-                    res2 = cancel_token.cancelled() => {
-                        // TODO: identify this file to help debug.
-                        debug!("this write operation is blocked since high memory usage, \
-                        and then cancelled");
-                        break;
-                    },
-                }
-            }
-        });
-        handle.await.expect("block_until_can_write failed");
-        self.cancel_token.is_cancelled()
     }
 
     // This write may cross two chunks.
@@ -287,7 +266,7 @@ impl FileManager {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 struct ChunkWriteCtx {
     // write to which chunk
     chunk_idx: usize,
@@ -315,12 +294,17 @@ struct Chunk {
     flush_finished: Arc<Notify>,
     // how many write operations are waiting for flushing end.
     write_waiting_count: Arc<AtomicUsize>,
-
+    memory_pool: Arc<dyn MemoryPool>,
+    memory_reservation: Arc<Mutex<MemoryReservation>>,
     cancel_token: CancellationToken,
 }
 
 impl Chunk {
-    fn new(idx: usize, cancellation_token: CancellationToken) -> Chunk {
+    fn new(
+        idx: usize,
+        memory_pool: Arc<dyn MemoryPool>,
+        cancellation_token: CancellationToken,
+    ) -> Chunk {
         Chunk {
             chunk_idx: idx,
             length: 0,
@@ -328,12 +312,15 @@ impl Chunk {
             flush_count: Arc::new(Default::default()),
             flush_finished: Arc::new(Default::default()),
             write_waiting_count: Arc::new(Default::default()),
+            memory_reservation: Arc::new(Mutex::new(
+                MemoryConsumer::new(format!("Chunk: {}", idx)).register(&memory_pool),
+            )),
+            memory_pool,
             cancel_token: cancellation_token,
         }
     }
 
     async fn wait_flush(&self) -> bool {
-        debug!("chunk {}: wait_flush", self.chunk_idx);
         let token = self.cancel_token.clone();
         let notify = self.flush_finished.clone();
         let flush_counter = self.flush_count.clone();
@@ -342,6 +329,7 @@ impl Chunk {
                 if flush_counter.load(Ordering::SeqCst) == 0 {
                     break;
                 }
+                debug!("chunk {}: wait_flush", self.chunk_idx);
                 tokio::select! {
                     _ = notify.notified() => {
                         break;
@@ -354,7 +342,7 @@ impl Chunk {
             }
         });
         handle.await.expect("wait_flush failed");
-        self.cancel_token.is_cancelled()
+        !self.cancel_token.is_cancelled()
     }
 
     fn inc_waiting_count(&self) {
@@ -363,6 +351,56 @@ impl Chunk {
 
     fn dec_waiting_count(&self) {
         self.write_waiting_count.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    async fn wait_until_can_write(&self, location: ChunkWriteCtx) -> bool {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
+        let cancel_token = self.cancel_token.clone();
+        let mr = self.memory_reservation.clone();
+        let size = self.cal_alloc_bytes(&location);
+        if size == 0 {
+            return true;
+        }
+        let pool = self.memory_pool.clone();
+        let handle = tokio::task::spawn(async move {
+            let mut guard = mr.lock().await;
+            loop {
+                if cancel_token.is_cancelled() {
+                    break;
+                }
+                tokio::select! {
+                    res1 = interval.tick() => {
+                        match guard.try_grow(size) {
+                            Ok(_) => {
+                                debug!("chunk: {} increase memory usage {}", location.chunk_idx, size);
+                                break;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    "this write operation is blocked since high memory usage: \
+                                    idx: {},
+                                    want: {}, current usage: {}, memory pool usage: {}",
+                                    location.chunk_idx,
+                                    size,
+                                    guard.size(),
+                                    pool.reserved(),
+                                );
+                            }
+                        }
+                    },
+                    res2 = cancel_token.cancelled() => {
+                        break;
+                    },
+                }
+            }
+        });
+        handle.await.expect("wait_until_can_write failed");
+        !self.cancel_token.is_cancelled()
+    }
+
+    // calculate how many bytes we need to allocate.
+    fn cal_alloc_bytes(&self, location: &ChunkWriteCtx) -> usize {
+        location.need_write_len
     }
 
     async fn write(&self, chunk_pos: usize, data: &[u8]) -> Result<usize> {
@@ -444,6 +482,13 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
 
+    #[test]
+    fn memory_pool_basic() {
+        let memory_pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(2048));
+        let mut reservation = MemoryConsumer::new("test").register(&memory_pool);
+        println!("{}", reservation.size());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {
         let stdout_log = tracing_subscriber::fmt::layer().pretty();
@@ -451,7 +496,7 @@ mod tests {
         tracing::subscriber::set_global_default(subscriber)
             .expect("Unable to set global subscriber");
 
-        let memory_pool = Arc::new(GreedyMemoryPool::new(2048));
+        let memory_pool = Arc::new(GreedyMemoryPool::new(3048));
         let chunk_size = 1024;
         let data_manager = DataManager::new(memory_pool, CancellationToken::new(), chunk_size);
         let file_manager = data_manager.new_file_manager(Ino(1));
