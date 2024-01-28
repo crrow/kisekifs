@@ -24,15 +24,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::{
-    chunk::{cal_chunk_idx, cal_chunk_pos},
     meta,
     meta::{engine::MetaEngine, types::Ino},
     vfs::err::{Result, VFSError},
+    vfs::storage::{cal_chunk_idx, cal_chunk_offset, BufferManager, WriteBuffer},
 };
 
 #[derive(Debug)]
 pub struct WriteOp {
-    chunk_size: usize,
     // The number of bytes written by this operation.
     offset: usize,
     // The data written by this operation.
@@ -40,29 +39,27 @@ pub struct WriteOp {
     // The expected length of the write operation.
     expect_write_len: usize,
     // Current file's manager.
-    file_manager: Weak<FileManager>,
+    file_manager: Weak<ChunkManager>,
     meta_engine: Arc<MetaEngine>,
-    chunk_engine: Arc<ChunkEngine>,
+    buffer_manager: Arc<BufferManager>,
 }
 
 impl WriteOp {
     fn new(
-        chunk_size: usize,
-        chunk_manager: Weak<FileManager>, // TODO: use weak instead.
+        chunk_manager: Weak<ChunkManager>, // TODO: use weak instead.
         offset: usize,
         data: &[u8],
         meta_engine: Arc<MetaEngine>,
-        chunk_engine: Arc<ChunkEngine>,
+        buffer_manager: Arc<BufferManager>,
     ) -> Self {
         assert!(data.len() > 0);
         WriteOp {
-            chunk_size,
             offset,
             data: data.as_ptr(),
             expect_write_len: data.len(),
             file_manager: chunk_manager,
             meta_engine,
-            chunk_engine,
+            buffer_manager,
         }
     }
 
@@ -83,8 +80,7 @@ impl WriteOp {
                 let token = file_manager.cancel_token.clone();
                 let mem_pool = file_manager.memory_pool.clone();
                 let meta_engine = self.meta_engine.clone();
-                let chunk_engine = self.chunk_engine.clone();
-                let chunk_size = self.chunk_size;
+                let buffer_manager = self.buffer_manager.clone();
                 let data = &unsafe { std::slice::from_raw_parts(self.data, self.expect_write_len) }
                     [location.buf_start_at..location.buf_start_at + location.need_write_len];
                 let handle = tokio::spawn(async move {
@@ -93,12 +89,11 @@ impl WriteOp {
                         .entry(location.chunk_idx)
                         .or_insert_with(|| {
                             Chunk::new(
-                                chunk_size,
                                 location.chunk_idx,
                                 mem_pool,
                                 token,
                                 meta_engine,
-                                chunk_engine,
+                                buffer_manager,
                             )
                         });
                     let chunk = c.value_mut();
@@ -164,8 +159,6 @@ impl WriteOp {
     }
 }
 
-use crate::chunk::{slice::WSlice, Engine as ChunkEngine};
-
 /// The manager of all files.
 #[derive(Debug)]
 pub(crate) struct DataManager {
@@ -174,8 +167,8 @@ pub(crate) struct DataManager {
 
     write_buffer: Arc<dyn MemoryPool>,
     cancel_token: CancellationToken,
-    files: DashMap<Ino, Arc<FileManager>>,
-    chunk_engine: Arc<ChunkEngine>,
+    files: DashMap<Ino, Arc<ChunkManager>>,
+    chunk_engine: Arc<BufferManager>,
     meta_engine: Arc<MetaEngine>,
 }
 
@@ -185,7 +178,7 @@ impl DataManager {
         cancel_token: CancellationToken,
         chunk_size: usize,
         meta_engine: Arc<MetaEngine>,
-        chunk_engine: Arc<ChunkEngine>,
+        chunk_engine: Arc<BufferManager>,
     ) -> DataManager {
         DataManager {
             write_buffer: memory_pool,
@@ -199,7 +192,6 @@ impl DataManager {
 
     pub(crate) fn new_write_op(&self, offset: usize, data: &[u8]) -> WriteOp {
         WriteOp::new(
-            self.chunk_size,
             self.new_file_manager(Ino(1)),
             offset,
             data,
@@ -208,8 +200,8 @@ impl DataManager {
         )
     }
 
-    pub(crate) fn new_file_manager(&self, ino: Ino) -> Weak<FileManager> {
-        let fm = Arc::new(FileManager::new(
+    pub(crate) fn new_file_manager(&self, ino: Ino) -> Weak<ChunkManager> {
+        let fm = Arc::new(ChunkManager::new(
             self.chunk_size,
             self.cancel_token.clone(),
             self.write_buffer.clone(),
@@ -231,11 +223,7 @@ impl DataManager {
 
 /// A file is composed of multiple chunks.
 #[derive(Debug)]
-pub(crate) struct FileManager {
-    // config
-    // max size of each chunk bytes.
-    chunk_size: usize,
-
+pub(crate) struct ChunkManager {
     // Key: chunk_idx
     chunks: DashMap<usize, Chunk>,
     // When we merge slice or append slice,
@@ -250,18 +238,17 @@ pub(crate) struct FileManager {
     // track the buffer usage of this file.
     buffer_usage: Arc<Mutex<MemoryReservation>>,
     cancel_token: CancellationToken,
-    chunk_engine: Arc<ChunkEngine>,
+    buffer_manager: Arc<BufferManager>,
 }
 
-impl FileManager {
+impl ChunkManager {
     fn new(
         chunk_size: usize,
         token: CancellationToken,
         memory_pool: Arc<dyn MemoryPool>,
-        chunk_engine: Arc<ChunkEngine>,
-    ) -> FileManager {
+        chunk_engine: Arc<BufferManager>,
+    ) -> ChunkManager {
         Self {
-            chunk_size,
             chunks: Default::default(),
             slice_counter: Default::default(),
             buffer_usage: Arc::new(Mutex::new(
@@ -269,7 +256,7 @@ impl FileManager {
             )),
             memory_pool,
             cancel_token: token,
-            chunk_engine,
+            buffer_manager: chunk_engine,
         }
     }
     // Count the total number of slices in current file.
@@ -279,17 +266,18 @@ impl FileManager {
 
     // This write may cross two chunks.
     fn find_chunk_to_write(&self, offset: usize, expected_write_len: usize) -> Vec<ChunkWriteCtx> {
-        let start_chunk_idx = cal_chunk_idx(offset, self.chunk_size);
-        let end_chunk_idx = cal_chunk_idx(offset + expected_write_len - 1, self.chunk_size);
+        let chunk_size = self.buffer_manager.chunk_size();
+        let start_chunk_idx = cal_chunk_idx(offset, chunk_size);
+        let end_chunk_idx = cal_chunk_idx(offset + expected_write_len - 1, chunk_size);
 
-        let mut chunk_pos = cal_chunk_pos(offset, self.chunk_size);
+        let mut chunk_pos = cal_chunk_offset(offset, chunk_size);
         let mut buf_start_at = 0;
         let mut left = expected_write_len;
 
         (start_chunk_idx..=end_chunk_idx)
             .into_iter()
             .map(move |idx| {
-                let max_can_write = min(self.chunk_size - chunk_pos, left);
+                let max_can_write = min(chunk_size - chunk_pos, left);
                 // debug!(
                 //     "chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max
                 // can write: {}",     self.chunk_size, idx, chunk_pos, left,
@@ -301,7 +289,7 @@ impl FileManager {
                     need_write_len: max_can_write,
                     buf_start_at,
                 };
-                chunk_pos = cal_chunk_pos(chunk_pos + max_can_write, self.chunk_size);
+                chunk_pos = cal_chunk_offset(chunk_pos + max_can_write, chunk_size);
                 buf_start_at = buf_start_at + max_can_write;
                 left = left - max_can_write;
                 ctx
@@ -324,7 +312,6 @@ struct ChunkWriteCtx {
 
 #[derive(Debug)]
 struct Chunk {
-    chunk_size: usize,
     // the chunk_idx of this chunk.
     chunk_idx: usize,
     // current length of the chunk, which should be smaller
@@ -348,20 +335,18 @@ struct Chunk {
     cancel_token: CancellationToken,
     // the meta engine.
     meta_engine: Arc<MetaEngine>,
-    chunk_engine: Arc<ChunkEngine>,
+    buffer_manager: Arc<BufferManager>,
 }
 
 impl Chunk {
     fn new(
         idx: usize,
-        chunk_size: usize,
         memory_pool: Arc<dyn MemoryPool>,
         cancellation_token: CancellationToken,
         meta_engine: Arc<MetaEngine>,
-        chunk_engine: Arc<ChunkEngine>,
+        chunk_engine: Arc<BufferManager>,
     ) -> Chunk {
         Chunk {
-            chunk_size,
             chunk_idx: idx,
             length: 0,
             slices: Arc::new(Mutex::new(vec![])),
@@ -375,7 +360,7 @@ impl Chunk {
             cancel_token: cancellation_token,
             meta_engine,
             background_task_running: Arc::new(Default::default()),
-            chunk_engine,
+            buffer_manager: chunk_engine,
         }
     }
 
@@ -546,13 +531,13 @@ struct SliceWriter {
     frozen: AtomicBool,
 
     // the underlying write buffer.
-    write_buffer: WSlice,
+    write_buffer: WriteBuffer,
 
     last_modified: Option<Instant>,
 }
 
 impl SliceWriter {
-    fn new(chunk_size: usize, offset: usize, w_slice: WSlice) -> SliceWriter {
+    fn new(chunk_size: usize, offset: usize, write_buffer: WriteBuffer) -> SliceWriter {
         SliceWriter {
             mu: Default::default(),
             slice_id: AtomicUsize::new(0),
@@ -562,7 +547,7 @@ impl SliceWriter {
             length: 0,
             flushed_len: 0,
             frozen: Default::default(),
-            write_buffer: w_slice,
+            write_buffer,
             last_modified: None,
         }
     }
@@ -595,6 +580,7 @@ mod tests {
 
     use super::*;
     use crate::meta::MetaConfig;
+    use crate::vfs::storage::{new_debug_sto, BufferManagerConfig};
 
     fn install_log() {
         let stdout_log = tracing_subscriber::fmt::layer().pretty();
@@ -613,7 +599,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn find_chunk_to_write() {
         install_log();
-        let chunk_engine = Arc::new(ChunkEngine::default());
+        let buffer_manager_config = BufferManagerConfig::default();
+
+        let buffer_manager = Arc::new(BufferManager::new(buffer_manager_config, new_debug_sto()));
         let memory_pool = Arc::new(GreedyMemoryPool::new(3048));
         let chunk_size = 1024;
         let data_manager = Arc::new(DataManager::new(
@@ -621,7 +609,7 @@ mod tests {
             CancellationToken::new(),
             chunk_size,
             Arc::new(MetaConfig::default().open().unwrap()),
-            chunk_engine.clone(),
+            buffer_manager.clone(),
         ));
 
         struct TestCase {

@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use opendal::Operator;
@@ -6,7 +7,7 @@ use snafu::{ResultExt, Snafu};
 use super::err::*;
 
 /// StoEngine is a trait for backend storage engines.
-pub(crate) trait StoEngine {
+pub(crate) trait StoEngine: 'static + Debug + Send + Sync {
     /// Put data into storage.
     fn put(&self, key: &str, data: Vec<u8>) -> Result<()>;
     /// Delete data from storage.
@@ -16,6 +17,7 @@ pub(crate) trait StoEngine {
 }
 
 /// The very underlying storage engine.
+#[derive(Debug)]
 pub(crate) struct ObjectSto {
     operator: Operator,
 }

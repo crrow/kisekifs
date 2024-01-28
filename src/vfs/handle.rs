@@ -33,7 +33,7 @@ use tracing::debug;
 
 use crate::{
     meta::types::{Entry, Ino},
-    vfs::{err::Result, reader::FileReader, writer::FileManager, KisekiVFS, VFSError},
+    vfs::{err::Result, reader::FileReader, writer::ChunkManager, KisekiVFS, VFSError},
 };
 
 impl KisekiVFS {
@@ -70,7 +70,7 @@ impl KisekiVFS {
             libc::O_WRONLY | libc::O_RDWR => {
                 Handle::new_with(fh, inode, |h| {
                     h.reader = Some(self.reader.open(inode, length));
-                    h.writer = Some(self.writer.new_file_manager(inode));
+                    h.chunk_manager = Some(self.writer.new_file_manager(inode));
                 });
             }
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
@@ -101,7 +101,7 @@ pub(crate) struct Handle {
     timeout: Duration,
 
     reader: Option<Weak<FileReader>>, // TODO: how to make it concurrent safe ?
-    writer: Option<Weak<FileManager>>,
+    chunk_manager: Option<Weak<ChunkManager>>,
 }
 
 impl Handle {
@@ -117,7 +117,7 @@ impl Handle {
             readers: Default::default(),
             timeout: Duration::from_secs(1),
             reader: None,
-            writer: None,
+            chunk_manager: None,
         }
     }
     pub(crate) fn new_with<F: FnMut(&mut Handle)>(fh: u64, inode: Ino, mut f: F) -> Self {
@@ -129,7 +129,7 @@ impl Handle {
             readers: Default::default(),
             timeout: Duration::from_secs(1),
             reader: None,
-            writer: None,
+            chunk_manager: None,
         };
         f(&mut h);
         h
@@ -142,7 +142,7 @@ impl Handle {
     }
 
     pub(crate) fn can_write(&self) -> bool {
-        if let Some(x) = &self.writer {
+        if let Some(x) = &self.chunk_manager {
             return x.upgrade().is_some();
         }
         return false;
@@ -242,7 +242,7 @@ impl Handle {
         offset: u64,
         data: &[u8],
     ) -> Result<u32> {
-        let mut writer = self.writer.as_ref().unwrap().upgrade().unwrap();
+        let mut writer = self.chunk_manager.as_ref().unwrap().upgrade().unwrap();
 
         todo!()
     }

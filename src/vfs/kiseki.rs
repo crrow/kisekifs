@@ -29,8 +29,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
+use crate::vfs::storage;
+use crate::vfs::storage::BufferManager;
 use crate::{
-    chunk,
     common::err::ToErrno,
     meta,
     meta::{
@@ -44,12 +45,11 @@ use crate::{
         err::{Result, VFSError},
         handle::{Handle, HandleInner},
         reader::DataReader,
+        storage::MAX_FILE_SIZE,
         writer,
         VFSError::ErrLIBC,
     },
 };
-
-const MAX_FILE_SIZE: usize = chunk::DEFAULT_CHUNK_SIZE << 31;
 
 #[derive(Debug)]
 pub struct KisekiVFS {
@@ -91,9 +91,12 @@ impl KisekiVFS {
 
         let meta = Arc::new(meta);
         let write_buffer_pool: Arc<dyn MemoryPool> =
-            Arc::new(GreedyMemoryPool::new(vfs_config.write_buffer_size));
+            Arc::new(GreedyMemoryPool::new(vfs_config.total_buffer_cap));
         let cancel_token = CancellationToken::new();
-        let chunk_engine = Arc::new(chunk::Engine::default());
+        let buffer_manager = Arc::new(BufferManager::new(
+            vfs_config.buffer_manager_config(),
+            vfs_config.debug_sto_engine(),
+        ));
 
         let vfs = Self {
             writer: writer::DataManager::new(
@@ -101,7 +104,7 @@ impl KisekiVFS {
                 cancel_token,
                 vfs_config.chunk_size,
                 meta.clone(),
-                chunk_engine.clone(),
+                buffer_manager,
             ),
             internal_nodes,
             config: vfs_config,

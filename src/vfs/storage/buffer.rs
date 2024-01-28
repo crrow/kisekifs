@@ -14,12 +14,11 @@ use snafu::{ResultExt, Snafu};
 use tracing::debug;
 
 use super::err::*;
-use crate::vfs::storage::sto::StoEngine;
+use crate::vfs::storage::{
+    sto::StoEngine, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
+};
 
 const DEFAULT_BUFFER_CAPACITY: usize = 300 << 20; // 300 MiB
-const DEFAULT_CHUNK_SIZE: usize = 64 << 20; // 64 MiB
-const DEFAULT_BLOCK_SIZE: usize = 4 << 20; // 4 MiB
-const DEFAULT_PAGE_SIZE: usize = 64 << 10; // 64 KiB
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Config {
@@ -81,6 +80,7 @@ struct BufferConfig {
 ///
 /// And when the buffer is full, it should wait for
 /// enough space to write/read.
+#[derive(Debug)]
 pub(crate) struct BufferManager {
     config: Config,
     // the memory pool is used to tracking buffer memory usage.
@@ -116,6 +116,10 @@ impl BufferManager {
     pub(crate) fn new_read_buffer(&self, sid: usize, length: usize) -> ReadBuffer {
         let config = self.config.get_buffer_config();
         ReadBuffer::new(config, self.sto.clone(), sid, length)
+    }
+
+    pub(crate) fn chunk_size(&self) -> usize {
+        self.config.chunk_size
     }
 }
 
@@ -206,6 +210,7 @@ impl ReadBuffer {
     }
 }
 
+#[derive(Debug)]
 enum Block {
     // The block is empty, means we have not write
     // it yet.
@@ -220,6 +225,7 @@ enum Block {
 /// A write buffer can only be hold by one slice.
 /// And the max size of the write buffer is equal
 /// to the the given chunk size.
+#[derive(Debug)]
 pub(crate) struct WriteBuffer {
     config: BufferConfig,
     // the buffer id, for tracking memory usage.
@@ -482,8 +488,6 @@ fn generate_slice_key(sid: usize, block_idx: usize, block_size: usize) -> String
 
 #[cfg(test)]
 mod tests {
-    use crate::chunk::slice2::RSlice;
-    use crate::chunk::BLOCK_SIZE;
     use rand::RngCore;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
