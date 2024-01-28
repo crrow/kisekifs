@@ -17,12 +17,14 @@ use libc::{EINTR, EIO};
 use rand::{Rng, SeedableRng};
 use snafu::{ResultExt, Snafu};
 use tokio::{
+    select,
     sync::{Mutex, Notify, RwLock},
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::vfs::storage::{DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE};
 use crate::{
     meta,
     meta::{engine::MetaEngine, types::Ino},
@@ -32,9 +34,33 @@ use crate::{
     },
 };
 
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct DataManagerConfig {
+    // for writer
+    pub total_buffer_cap: usize,
+    // the size of chunk.
+    pub chunk_size: usize,
+    // the size of block which will be uploaded to object storage.
+    pub block_size: usize,
+    // the smallest alloc size of the write buffer.
+    pub page_size: usize,
+}
+
+impl Default for DataManagerConfig {
+    fn default() -> Self {
+        DataManagerConfig {
+            total_buffer_cap: 300 << 20,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            block_size: DEFAULT_BLOCK_SIZE,
+            page_size: DEFAULT_PAGE_SIZE,
+        }
+    }
+}
+
 /// The manager of all writer buffers.
 #[derive(Debug)]
 pub(crate) struct DataManager {
+    config: DataManagerConfig,
     meta_engine: Arc<MetaEngine>,
     buffer_manager: Arc<BufferManager>,
     ino_chunk_map: DashMap<Ino, Arc<ChunkManager>>,
@@ -42,17 +68,19 @@ pub(crate) struct DataManager {
 
 impl DataManager {
     pub(crate) fn new(
+        config: DataManagerConfig,
         meta_engine: Arc<MetaEngine>,
         buffer_manager: Arc<BufferManager>,
     ) -> DataManager {
         DataManager {
+            config,
             ino_chunk_map: Default::default(),
             buffer_manager,
             meta_engine,
         }
     }
 
-    pub(crate) fn new_write_op(&self, offset: usize, data: &[u8]) -> WriteOp {
+    pub(crate) fn new_write_op(self: &Arc<Self>, offset: usize, data: &[u8]) -> WriteOp {
         WriteOp::new(
             self.new_chunk_manager(Ino(1)),
             offset,
@@ -62,8 +90,8 @@ impl DataManager {
         )
     }
 
-    pub(crate) fn new_chunk_manager(&self, ino: Ino) -> Weak<ChunkManager> {
-        let fm = Arc::new(ChunkManager::new(self.buffer_manager.clone()));
+    pub(crate) fn new_chunk_manager(self: &Arc<Self>, ino: Ino) -> Weak<ChunkManager> {
+        let fm = Arc::new(ChunkManager::new(self));
         self.ino_chunk_map.insert(ino, fm.clone());
         Arc::downgrade(&fm)
     }
@@ -145,20 +173,13 @@ impl WriteOp {
         let handles = write_locations
             .into_iter()
             .map(|location| {
-                let file_manager = chunk_manager.clone();
-                let token = file_manager.cancel_token.clone();
-                let meta_engine = self.meta_engine.clone();
-                let buffer_manager = self.buffer_manager.clone();
                 let data = &unsafe { std::slice::from_raw_parts(self.data, self.expect_write_len) }
                     [location.buf_start_at..location.buf_start_at + location.need_write_len];
+                let chunk_manager = chunk_manager.clone();
                 let handle = tokio::spawn(async move {
-                    let mut c = file_manager
-                        .chunks
-                        .entry(location.chunk_idx)
-                        .or_insert_with(|| {
-                            Chunk::new(location.chunk_idx, token, meta_engine, buffer_manager)
-                        });
-                    let chunk = c.value_mut();
+                    let chunk = chunk_manager.get_chunk(location.chunk_idx);
+                    let chunk =
+                        Weak::upgrade(&chunk).expect("should not fail, we just downgrade it");
 
                     // wait until we can write.
                     if !chunk.wait_write_buffer(location.clone()).await {
@@ -246,38 +267,50 @@ impl WriteOp {
 /// It has a background task to flush all slices in the chunk.
 #[derive(Debug)]
 pub(crate) struct ChunkManager {
-    // the buffer manager to allocate write buffer.
-    buffer_manager: Arc<BufferManager>,
+    config: DataManagerConfig,
+    data_manager: Weak<DataManager>,
     // Key: chunk_idx
-    chunks: DashMap<usize, Chunk>,
-    // When we remove slice or append slice,
-    // we should update the slice counter.
-    //
-    // The slice counter is used for avoiding too
-    // many random writes.
-    slice_counter: AtomicUsize,
+    chunks: DashMap<usize, Arc<Chunk>>,
     // Make someone can wait until all slices are flushed,
     // or just cancel the background task.
     cancel_token: CancellationToken,
 }
 
 impl ChunkManager {
-    fn new(buffer_manager: Arc<BufferManager>) -> ChunkManager {
+    fn new(data_manager: &Arc<DataManager>) -> ChunkManager {
         Self {
+            config: data_manager.config.clone(),
+            data_manager: Arc::downgrade(data_manager),
             chunks: Default::default(),
-            slice_counter: Default::default(),
             cancel_token: CancellationToken::new(),
-            buffer_manager,
         }
     }
-    // Count the total number of slices in current file.
-    fn total_slices(&self) -> usize {
-        self.slice_counter.load(Ordering::SeqCst)
+
+    fn get_chunk(self: &Arc<Self>, chunk_idx: usize) -> Weak<Chunk> {
+        let c = self
+            .chunks
+            .entry(chunk_idx)
+            .or_insert_with(|| Arc::new(Chunk::new(chunk_idx, self)));
+        Arc::downgrade(c.value())
+    }
+
+    // commit_task will exit once it founds no more slice need to flush.
+    async fn commit_task(&self) {
+        loop {
+            select! {
+                _ = self.cancel_token.cancelled() => {
+                    debug!("commit_task cancelled");
+                    break;
+                }
+            }
+        }
     }
 }
 
 #[derive(Debug)]
 struct Chunk {
+    chunk_manager: Weak<ChunkManager>,
+    config: DataManagerConfig,
     // the chunk_idx of this chunk.
     chunk_idx: usize,
     // current length of the chunk, which should be smaller
@@ -295,34 +328,28 @@ struct Chunk {
     // is there a background task running.
     background_task_running: Arc<AtomicBool>,
     cancel_token: CancellationToken,
-    // the meta engine.
-    meta_engine: Arc<MetaEngine>,
-    buffer_manager: Arc<BufferManager>,
 }
 
 impl Chunk {
-    fn new(
-        idx: usize,
-        cancellation_token: CancellationToken,
-        meta_engine: Arc<MetaEngine>,
-        buffer_manager: Arc<BufferManager>,
-    ) -> Chunk {
+    fn new(idx: usize, chunk_manager: &Arc<ChunkManager>) -> Chunk {
+        let cancel_token = chunk_manager.cancel_token.clone();
+        let config = chunk_manager.config.clone();
         Chunk {
+            chunk_manager: Arc::downgrade(chunk_manager),
+            config,
             chunk_idx: idx,
             length: 0,
             slice_controllers: Arc::new(Mutex::new(vec![])),
             flush_count: Arc::new(Default::default()),
             flush_finished: Arc::new(Default::default()),
             write_waiting_count: Arc::new(Default::default()),
-            cancel_token: cancellation_token,
-            meta_engine,
             background_task_running: Arc::new(Default::default()),
-            buffer_manager,
+            cancel_token,
         }
     }
 
     async fn wait_flush(&self) -> bool {
-        let token = self.cancel_token.clone();
+        let cancel_token = self.cancel_token.clone();
         let notify = self.flush_finished.clone();
         let flush_counter = self.flush_count.clone();
         let handle = tokio::spawn(async move {
@@ -330,11 +357,11 @@ impl Chunk {
                 if flush_counter.load(Ordering::SeqCst) == 0 {
                     break;
                 }
-                tokio::select! {
+                select! {
                     _ = notify.notified() => {
                         break;
                     }
-                    _ = token.cancelled() => {
+                    _ = cancel_token.cancelled() => {
                         debug!("wait_flush cancelled");
                         break;
                     }
@@ -440,10 +467,20 @@ impl Chunk {
                 }
             }
         }
+
+        let cm = self
+            .chunk_manager
+            .upgrade()
+            .expect("chunk manager may be dropped");
+
         let sw = Arc::new(SliceController::new(
-            self.buffer_manager.chunk_size(),
+            self.config.chunk_size,
             chunk_offset,
-            self.buffer_manager.new_write_buffer(),
+            cm.data_manager
+                .upgrade()
+                .expect("the data manager should not be dropped")
+                .buffer_manager
+                .new_write_buffer(),
         ));
         guard.push(sw.clone());
         sw
@@ -495,7 +532,7 @@ impl SliceController {
         }
     }
 
-    async fn write(&self, slice_offset: usize, data: &[u8]) -> Result<usize> {
+    async fn write(self: &Arc<Self>, slice_offset: usize, data: &[u8]) -> Result<usize> {
         let mut guard = self.write_buffer.write().await;
         let write_len = guard
             .write_at(slice_offset, data)
@@ -538,6 +575,7 @@ impl SliceController {
 #[cfg(test)]
 mod tests {
     use datafusion_execution::memory_pool::GreedyMemoryPool;
+    use std::collections::HashMap;
 
     use super::*;
     use crate::common::install_fmt_log;
@@ -559,6 +597,7 @@ mod tests {
         let buffer_manager_config = BufferManagerConfig::default();
         let buffer_manager = Arc::new(BufferManager::new(buffer_manager_config, new_debug_sto()));
         let data_manager = Arc::new(DataManager::new(
+            DataManagerConfig::default(),
             Arc::new(MetaConfig::default().open().unwrap()),
             buffer_manager.clone(),
         ));

@@ -28,6 +28,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
+use crate::vfs::writer::DataManager;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -52,7 +53,7 @@ pub struct KisekiVFS {
     config: VFSConfig,
     meta: Arc<MetaEngine>,
     internal_nodes: PreInternalNodes,
-    pub(crate) data_manager: writer::DataManager,
+    pub(crate) data_manager: Arc<DataManager>,
     pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
@@ -91,7 +92,11 @@ impl KisekiVFS {
         ));
 
         let vfs = Self {
-            data_manager: writer::DataManager::new(meta.clone(), buffer_manager),
+            data_manager: Arc::new(DataManager::new(
+                vfs_config.data_manager_config(),
+                meta.clone(),
+                buffer_manager,
+            )),
             internal_nodes,
             config: vfs_config,
             meta,

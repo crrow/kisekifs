@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
+use crate::vfs::writer::DataManagerConfig;
 use crate::vfs::{
     storage,
     storage::{BufferManagerConfig, StoEngine},
@@ -27,6 +28,14 @@ pub struct VFSConfig {
 }
 
 impl VFSConfig {
+    pub(crate) fn data_manager_config(&self) -> DataManagerConfig {
+        DataManagerConfig {
+            total_buffer_cap: self.total_buffer_cap,
+            chunk_size: self.chunk_size,
+            block_size: self.block_size,
+            page_size: self.page_size,
+        }
+    }
     pub(crate) fn buffer_manager_config(&self) -> BufferManagerConfig {
         BufferManagerConfig {
             total_buffer_capacity: self.total_buffer_cap,
