@@ -3,7 +3,6 @@ use criterion::{
     criterion_group, measurement::WallTime, BenchmarkGroup, Criterion, Throughput,
     Throughput::Bytes,
 };
-
 use tokio::runtime;
 
 // async fn unsafe_page(size: usize, read_cnt: usize, engine: Engine) {

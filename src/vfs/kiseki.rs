@@ -23,29 +23,25 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use fuser::{FileType, TimeOrNow};
-use libc::{mode_t, open, EACCES, EBADF, EFBIG, EINTR, EINVAL, EPERM};
-use scopeguard::defer;
+use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
-use crate::vfs::storage;
-use crate::vfs::storage::BufferManager;
 use crate::{
     common::err::ToErrno,
-    meta,
     meta::{
         engine::{access, MetaEngine},
-        internal_nodes::{InternalNode, PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+        internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
         types::*,
         MetaContext, SetAttrFlags, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W,
     },
     vfs::{
         config::VFSConfig,
         err::{Result, VFSError},
-        handle::{Handle, HandleInner},
+        handle::Handle,
         reader::DataReader,
-        storage::MAX_FILE_SIZE,
+        storage::{BufferManager, MAX_FILE_SIZE},
         writer,
         VFSError::ErrLIBC,
     },
@@ -56,11 +52,10 @@ pub struct KisekiVFS {
     config: VFSConfig,
     meta: Arc<MetaEngine>,
     internal_nodes: PreInternalNodes,
-    pub(crate) writer: writer::DataManager,
+    pub(crate) data_manager: writer::DataManager,
     pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
-    // FIXME: use rwlock rather than mutex.
     pub(crate) handles: DashMap<Ino, DashMap<FH, Handle>>,
 }
 
@@ -90,22 +85,13 @@ impl KisekiVFS {
         }
 
         let meta = Arc::new(meta);
-        let write_buffer_pool: Arc<dyn MemoryPool> =
-            Arc::new(GreedyMemoryPool::new(vfs_config.total_buffer_cap));
-        let cancel_token = CancellationToken::new();
         let buffer_manager = Arc::new(BufferManager::new(
             vfs_config.buffer_manager_config(),
             vfs_config.debug_sto_engine(),
         ));
 
         let vfs = Self {
-            writer: writer::DataManager::new(
-                write_buffer_pool,
-                cancel_token,
-                vfs_config.chunk_size,
-                meta.clone(),
-                buffer_manager,
-            ),
+            data_manager: writer::DataManager::new(meta.clone(), buffer_manager),
             internal_nodes,
             config: vfs_config,
             meta,
@@ -169,7 +155,7 @@ impl KisekiVFS {
 
     pub fn update_length(&self, entry: &mut Entry) {
         if entry.attr.full && entry.is_file() {
-            let len = self.writer.get_length(entry.inode);
+            let len = self.data_manager.get_length(entry.inode);
             if len > entry.attr.length {
                 entry.attr.length = len;
             }
@@ -178,7 +164,7 @@ impl KisekiVFS {
     }
     pub fn update_length_by_attr(&self, inode: Ino, attr: &mut InodeAttr) {
         if attr.full && attr.is_file() {
-            let len = self.writer.get_length(inode);
+            let len = self.data_manager.get_length(inode);
             if len > attr.length {
                 attr.length = len;
             }
@@ -442,7 +428,7 @@ impl KisekiVFS {
             };
             if flags.contains(SetAttrFlags::MTIME) || flags.contains(SetAttrFlags::MTIME_NOW) {
                 // TODO: whats wrong with this?
-                self.writer.update_mtime(ino, mtime)?;
+                self.data_manager.update_mtime(ino, mtime)?;
             }
         }
 
@@ -611,7 +597,7 @@ impl KisekiVFS {
 
         let write_guard = handle.acquire_write_lock().await?;
         let write_length = handle.write(&write_guard, offset as u64, data)?;
-        self.reader.truncate(ino, self.writer.get_length(ino));
+        self.reader.truncate(ino, self.data_manager.get_length(ino));
         Ok(write_length)
     }
 }

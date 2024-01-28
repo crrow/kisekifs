@@ -15,20 +15,15 @@
 use std::{
     fmt::Debug,
     sync::{
-        atomic::{AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicI64, Ordering},
         Arc, RwLock, Weak,
     },
     time::Duration,
 };
 
 use dashmap::DashMap;
-use libc::{EBADF, EPERM};
-use snafu::Snafu;
-use tokio::{
-    select,
-    sync::Notify,
-    time::{timeout, Instant},
-};
+use libc::EPERM;
+use tokio::{sync::Notify, time::Instant};
 use tracing::debug;
 
 use crate::{
@@ -70,7 +65,7 @@ impl KisekiVFS {
             libc::O_WRONLY | libc::O_RDWR => {
                 Handle::new_with(fh, inode, |h| {
                     h.reader = Some(self.reader.open(inode, length));
-                    h.chunk_manager = Some(self.writer.new_file_manager(inode));
+                    h.chunk_manager = Some(self.data_manager.new_chunk_manager(inode));
                 });
             }
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),

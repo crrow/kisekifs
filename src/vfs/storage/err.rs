@@ -13,4 +13,10 @@ pub(crate) enum StorageError {
     ObjectStorageError { source: opendal::Error },
 }
 
+impl From<StorageError> for crate::vfs::err::VFSError {
+    fn from(value: StorageError) -> Self {
+        crate::vfs::err::VFSError::ErrLIBC { kind: libc::EINTR }
+    }
+}
+
 pub(crate) type Result<T> = std::result::Result<T, StorageError>;

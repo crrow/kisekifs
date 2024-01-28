@@ -1,16 +1,10 @@
-use std::io::{Cursor, Write};
 use std::{
     cmp::{max, min},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    io::{Cursor, Write},
+    sync::Arc,
 };
 
-use datafusion_execution::memory_pool::{
-    GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
-};
-use snafu::{ResultExt, Snafu};
+use snafu::ResultExt;
 use tracing::debug;
 
 use super::err::*;
@@ -86,31 +80,17 @@ pub(crate) struct BufferManager {
     // the memory pool is used to tracking buffer memory usage.
     // When alloc new buffer, we should make a memory reservation
     // for it.
-    memory_pool: Arc<dyn MemoryPool>,
-    // the next buffer id.
-    next_buffer_id: Arc<AtomicUsize>,
-
     sto: Arc<dyn StoEngine>,
 }
 
 impl BufferManager {
     pub(crate) fn new(config: Config, sto: Arc<dyn StoEngine>) -> BufferManager {
-        BufferManager {
-            config,
-            memory_pool: Arc::new(GreedyMemoryPool::new(config.total_buffer_capacity)),
-            next_buffer_id: Arc::new(AtomicUsize::new(1)),
-            sto,
-        }
+        BufferManager { config, sto }
     }
 
     pub(crate) fn new_write_buffer(&self) -> WriteBuffer {
         let config = self.config.get_buffer_config();
-        WriteBuffer::new(
-            config,
-            self.next_buffer_id.fetch_add(1, Ordering::SeqCst),
-            &self.memory_pool,
-            self.sto.clone(),
-        )
+        WriteBuffer::new(config, self.sto.clone())
     }
 
     pub(crate) fn new_read_buffer(&self, sid: usize, length: usize) -> ReadBuffer {
@@ -228,13 +208,9 @@ enum Block {
 #[derive(Debug)]
 pub(crate) struct WriteBuffer {
     config: BufferConfig,
-    // the buffer id, for tracking memory usage.
-    id: usize,
     // who owns this buffer, this id need to be
     // set if we need to upload the buffer to the cloud.
     slice_id: Option<usize>,
-    // tracking current buffer usage.
-    memory_reservation: MemoryReservation,
     // current length of this buffer.
     length: usize,
     // the length of bytes that has been released.
@@ -245,18 +221,10 @@ pub(crate) struct WriteBuffer {
 }
 
 impl WriteBuffer {
-    fn new(
-        config: BufferConfig,
-        id: usize,
-        memory_pool: &Arc<dyn MemoryPool>,
-        sto_engine: Arc<dyn StoEngine>,
-    ) -> WriteBuffer {
-        let r = MemoryConsumer::new(format!("w-slice-id:{}", id)).register(&memory_pool);
+    fn new(config: BufferConfig, sto_engine: Arc<dyn StoEngine>) -> WriteBuffer {
         WriteBuffer {
             config,
-            id,
             slice_id: None,
-            memory_reservation: r,
             length: 0,
             flushed_length: 0,
             block_slots: (0..(config.chunk_size / config.block_size))
@@ -278,8 +246,8 @@ impl WriteBuffer {
         }
 
         debug!(
-            "writing buffer: {} at offset: {}, expect write len: {}",
-            self.id, offset, expected_write_len
+            "writing buffer, at offset: {}, expect write len: {}",
+            offset, expected_write_len
         );
         debug_assert!(
             offset + expected_write_len <= self.config.chunk_size,
@@ -322,11 +290,6 @@ impl WriteBuffer {
                         )
                     };
 
-                    // caller should handle the oom problem.
-                    self.memory_reservation
-                        .try_grow(alloc_size)
-                        .context(OOMSnafu)?;
-
                     let mut buf = vec![0; alloc_size];
                     buf[block_offset..(block_offset + write_len)]
                         .copy_from_slice(&data[total_write_len..(total_write_len + write_len)]);
@@ -337,10 +300,6 @@ impl WriteBuffer {
                     if buf.len() < block_offset + write_len {
                         // we need to alloc more memory.
                         let alloc_size = round_to(block_offset + write_len, self.config.page_size);
-                        // caller should handle the oom problem.
-                        self.memory_reservation
-                            .try_grow(alloc_size)
-                            .context(OOMSnafu)?;
                         buf.resize(alloc_size, 0);
                         debug_assert!(buf.len() <= self.config.block_size);
                     }
@@ -367,8 +326,8 @@ impl WriteBuffer {
         }
 
         debug!(
-            "reading buffer: {} at offset: {}, expect read len: {}",
-            self.id, offset, expected_read_len
+            "reading buffer, at offset: {}, expect read len: {}",
+            offset, expected_read_len
         );
         debug_assert!(
             offset + expected_read_len <= self.config.chunk_size,
@@ -459,8 +418,16 @@ impl WriteBuffer {
         self.length
     }
 
+    pub(crate) fn flushed_length(&self) -> usize {
+        self.flushed_length
+    }
+
     pub(crate) fn block_size(&self) -> usize {
         self.config.block_size
+    }
+
+    pub(crate) fn chunk_size(&self) -> usize {
+        self.config.chunk_size
     }
 }
 
@@ -489,18 +456,9 @@ fn generate_slice_key(sid: usize, block_idx: usize, block_size: usize) -> String
 #[cfg(test)]
 mod tests {
     use rand::RngCore;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
 
     use super::*;
     use crate::vfs::storage::sto::new_debug_sto;
-
-    fn install_log() {
-        let stdout_log = tracing_subscriber::fmt::layer().pretty();
-        let subscriber = Registry::default().with(stdout_log);
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Unable to set global subscriber");
-    }
 
     #[test]
     fn buffer_write() {
@@ -542,7 +500,8 @@ mod tests {
 
     #[test]
     fn read_and_write() {
-        install_log();
+        use crate::common::install_fmt_log;
+        install_fmt_log();
 
         let config = Config::default();
 
@@ -561,7 +520,7 @@ mod tests {
         let size = offset + data.len();
         assert_eq!(wb.length(), size);
 
-        wb.flush_to(BLOCK_SIZE + 3).unwrap();
+        wb.flush_to(config.block_size + 3).unwrap();
         wb.finish().unwrap();
 
         let mut rb = bm.new_read_buffer(1, size);

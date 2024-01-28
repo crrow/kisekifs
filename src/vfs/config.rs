@@ -1,9 +1,11 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use crate::vfs::storage;
-use crate::vfs::storage::{BufferManager, BufferManagerConfig, StoEngine};
 use serde::{Deserialize, Serialize};
+
+use crate::vfs::{
+    storage,
+    storage::{BufferManagerConfig, StoEngine},
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VFSConfig {
