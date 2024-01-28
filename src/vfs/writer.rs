@@ -16,6 +16,7 @@ use datafusion_execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReserv
 use libc::{EINTR, EIO};
 use rand::{Rng, SeedableRng};
 use snafu::{ResultExt, Snafu};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::{
     select,
     sync::{Mutex, Notify, RwLock},
@@ -178,8 +179,6 @@ impl WriteOp {
                 let chunk_manager = chunk_manager.clone();
                 let handle = tokio::spawn(async move {
                     let chunk = chunk_manager.get_chunk(location.chunk_idx);
-                    let chunk =
-                        Weak::upgrade(&chunk).expect("should not fail, we just downgrade it");
 
                     // wait until we can write.
                     if !chunk.wait_write_buffer(location.clone()).await {
@@ -274,6 +273,14 @@ pub(crate) struct ChunkManager {
     // Make someone can wait until all slices are flushed,
     // or just cancel the background task.
     cancel_token: CancellationToken,
+    // mark if the background task is still running.
+    background_task_running: Arc<AtomicBool>,
+    // how many slices are flushing right now.
+    flushing_cnt: Arc<AtomicUsize>,
+    // notify the waiting write operation to continue.
+    flushing_finished_notify: Arc<Notify>,
+    flush_ch: (Sender<Arc<SliceController>>, Receiver<Arc<SliceController>>),
+    release_ch: (Sender<Arc<SliceController>>, Receiver<Arc<SliceController>>),
 }
 
 impl ChunkManager {
@@ -283,15 +290,31 @@ impl ChunkManager {
             data_manager: Arc::downgrade(data_manager),
             chunks: Default::default(),
             cancel_token: CancellationToken::new(),
+            background_task_running: Arc::new(Default::default()),
+            // only 5 slices can be flushed at the same time.
+            flush_ch: tokio::sync::mpsc::channel(5),
+            // only 5 slices can be released at the same time.
+            release_ch: tokio::sync::mpsc::channel(5),
         }
     }
 
-    fn get_chunk(self: &Arc<Self>, chunk_idx: usize) -> Weak<Chunk> {
+    fn get_chunk(self: &Arc<Self>, chunk_idx: usize) -> Arc<Chunk> {
         let c = self
             .chunks
             .entry(chunk_idx)
             .or_insert_with(|| Arc::new(Chunk::new(chunk_idx, self)));
-        Arc::downgrade(c.value())
+        c.value().clone()
+    }
+
+    // Start the background task.
+    async fn start_background_task(self: &Arc<Self>) {
+        if self.background_task_running.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::spawn(async move {
+            self.commit_task().await;
+            self.background_task_running.store(false, Ordering::SeqCst);
+        });
     }
 
     // commit_task will exit once it founds no more slice need to flush.
@@ -325,8 +348,6 @@ struct Chunk {
     flush_finished: Arc<Notify>,
     // how many write operations are waiting for flushing end.
     write_waiting_count: Arc<AtomicUsize>,
-    // is there a background task running.
-    background_task_running: Arc<AtomicBool>,
     cancel_token: CancellationToken,
 }
 
@@ -343,7 +364,6 @@ impl Chunk {
             flush_count: Arc::new(Default::default()),
             flush_finished: Arc::new(Default::default()),
             write_waiting_count: Arc::new(Default::default()),
-            background_task_running: Arc::new(Default::default()),
             cancel_token,
         }
     }
@@ -433,12 +453,20 @@ impl Chunk {
         location.need_write_len
     }
 
-    async fn write(&self, chunk_pos: usize, data: &[u8]) -> Result<usize> {
+    // Write data to the specified slice, according to the buffer length,
+    // we need to flush and release memory.
+    async fn write(self: &Arc<Self>, chunk_pos: usize, data: &[u8]) -> Result<usize> {
         let mut slice = self.find_writable_slice(chunk_pos).await;
-        let write_len = slice
+        let (write_len, total_write_len, flushed_len) = slice
             .write(chunk_pos - slice.chunk_start_offset, data)
             .await?;
-        self.start_background_commit_task();
+
+        if total_write_len == self.config.chunk_size {
+            self.flush_and_release(slice).await;
+        } else {
+            self.flush(slice).await;
+        }
+
         Ok(write_len)
     }
 
@@ -486,17 +514,9 @@ impl Chunk {
         sw
     }
 
-    // Start a background task if there is no background task running,
-    // and there is some slice need to be flushed.
-    //
-    // Once flush all slices, we should exit this task.
-    fn start_background_commit_task(&self) {
-        // TODO
-        // if self.background_task_running.load(Ordering::SeqCst) {
-        //     return;
-        // }
-        // tokio::spawn(async move { loop {} });
-    }
+    async fn flush(self: &Arc<Self>, sc: Arc<SliceController>) {}
+
+    async fn flush_and_release(self: &Arc<Self>, sc: Arc<SliceController>) {}
 }
 
 /// SliceController is used to control the write to the write buffer.
@@ -532,22 +552,19 @@ impl SliceController {
         }
     }
 
-    async fn write(self: &Arc<Self>, slice_offset: usize, data: &[u8]) -> Result<usize> {
+    // Write will return the current write len to this buffer,
+    // the buffer total length, and the flushed length.
+    async fn write(
+        self: &Arc<Self>,
+        slice_offset: usize,
+        data: &[u8],
+    ) -> Result<(usize, usize, usize)> {
         let mut guard = self.write_buffer.write().await;
         let write_len = guard
             .write_at(slice_offset, data)
             .expect("write data failed");
         self.last_modified.write().await.replace(Instant::now());
-        let len = guard.length();
-        if len == guard.chunk_size() {
-            // TODO: try to acquire the slice id.
-            guard.set_slice_id(1);
-            guard.finish()?;
-        } else if len > guard.block_size() {
-            guard.set_slice_id(1);
-            guard.flush_to(len)?;
-        }
-        Ok(write_len)
+        Ok((write_len, guard.length(), guard.flushed_length()))
     }
 
     async fn get_flushed_length_and_write_length(&self) -> (usize, usize) {
@@ -557,12 +574,12 @@ impl SliceController {
         (flushed_len, write_len)
     }
 
-    async fn flushed_length(&self) -> usize {
+    async fn get_flushed_length(&self) -> usize {
         let guard = self.write_buffer.read().await;
         guard.length()
     }
 
-    async fn length(&self) -> usize {
+    async fn get_write_length(&self) -> usize {
         let guard = self.write_buffer.read().await;
         guard.length()
     }
