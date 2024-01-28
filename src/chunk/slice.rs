@@ -191,6 +191,8 @@ fn generate_slice_key(
 // Return the possible read block size, it should always be MAX_BLOCK_SIZE,
 // or a small one when it reach to the end.
 fn possible_read_block_size(block_size: usize, length: usize, block_idx: BlockIdx) -> usize {
+    // min(1023 - 0 * 1024, 1024)
+    // min(2049 - 2 * 1024, 1024) = min(1, 1024) = 1
     min(length - block_idx * block_size, block_size)
 }
 

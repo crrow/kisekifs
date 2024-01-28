@@ -1,7 +1,6 @@
-use bytes::BufMut;
-use std::io::Write;
 use std::{
     cmp::{max, min},
+    io::Write,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
@@ -10,6 +9,7 @@ use std::{
     time::SystemTime,
 };
 
+use bytes::BufMut;
 use dashmap::{DashMap, DashSet};
 use datafusion_common::{arrow::array::Array, DataFusionError};
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
