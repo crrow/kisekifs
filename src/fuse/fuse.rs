@@ -458,7 +458,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
+    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
     fn write(
         &mut self,
         _req: &Request<'_>,

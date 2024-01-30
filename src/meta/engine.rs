@@ -27,7 +27,6 @@ use std::{
     time::SystemTime,
 };
 
-use bitflags::bitflags;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;

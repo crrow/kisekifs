@@ -2,11 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::vfs::writer::DataManagerConfig;
-use crate::vfs::{
-    storage,
-    storage::{BufferManagerConfig, StoEngine},
-};
+use crate::vfs::storage::{self, EngineConfig};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VFSConfig {
@@ -17,35 +13,11 @@ pub struct VFSConfig {
     pub prefix_internal: bool,
     pub hide_internal: bool,
 
-    // for writer
-    pub total_buffer_cap: usize,
-    // the size of chunk.
-    pub chunk_size: usize,
-    // the size of block which will be uploaded to object storage.
-    pub block_size: usize,
-    // the smallest alloc size of the write buffer.
-    pub page_size: usize,
+    pub engine_config: EngineConfig,
 }
 
 impl VFSConfig {
-    pub(crate) fn data_manager_config(&self) -> DataManagerConfig {
-        DataManagerConfig {
-            total_buffer_cap: self.total_buffer_cap,
-            chunk_size: self.chunk_size,
-            block_size: self.block_size,
-            page_size: self.page_size,
-        }
-    }
-    pub(crate) fn buffer_manager_config(&self) -> BufferManagerConfig {
-        BufferManagerConfig {
-            total_buffer_capacity: self.total_buffer_cap,
-            chunk_size: self.chunk_size,
-            block_size: self.block_size,
-            page_size: self.page_size,
-        }
-    }
-
-    pub(crate) fn debug_sto_engine(&self) -> Arc<dyn StoEngine> {
+    pub(crate) fn debug_sto_engine(&self) -> Arc<dyn storage::StoEngine> {
         storage::new_debug_sto()
     }
 }

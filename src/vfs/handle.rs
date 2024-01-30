@@ -24,11 +24,11 @@ use std::{
 use dashmap::DashMap;
 use libc::EPERM;
 use tokio::{sync::Notify, time::Instant};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::{
     meta::types::{Entry, Ino},
-    vfs::{err::Result, reader::FileReader, writer::ChunkManager, KisekiVFS, VFSError},
+    vfs::{err::Result, reader::FileReader, KisekiVFS, VFSError},
 };
 
 impl KisekiVFS {
@@ -54,22 +54,23 @@ impl KisekiVFS {
         fh
     }
 
+    #[instrument(skip(self))]
     pub(crate) fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<u64> {
         let fh = self.next_fh();
-        match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => {
-                Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(self.reader.open(inode, length));
-                });
-            }
-            libc::O_WRONLY | libc::O_RDWR => {
-                Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(self.reader.open(inode, length));
-                    h.chunk_manager = Some(self.data_manager.new_chunk_manager(inode));
-                });
-            }
+        let h = match flags & libc::O_ACCMODE {
+            libc::O_RDONLY => Handle::new_with(fh, inode, |h| {
+                h.reader = Some(self.reader.open(inode, length));
+            }),
+            libc::O_WRONLY | libc::O_RDWR => Handle::new_with(fh, inode, |h| {
+                h.reader = Some(self.reader.open(inode, length));
+                self.data_engine.new_file_writer(h.fh);
+            }),
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
-        }
+        };
+        self.handles
+            .entry(inode)
+            .or_insert_with(DashMap::new)
+            .insert(fh, h);
 
         Ok(fh)
     }
@@ -96,7 +97,6 @@ pub(crate) struct Handle {
     timeout: Duration,
 
     reader: Option<Weak<FileReader>>, // TODO: how to make it concurrent safe ?
-    chunk_manager: Option<Weak<ChunkManager>>,
 }
 
 impl Handle {
@@ -112,7 +112,6 @@ impl Handle {
             readers: Default::default(),
             timeout: Duration::from_secs(1),
             reader: None,
-            chunk_manager: None,
         }
     }
     pub(crate) fn new_with<F: FnMut(&mut Handle)>(fh: u64, inode: Ino, mut f: F) -> Self {
@@ -124,7 +123,6 @@ impl Handle {
             readers: Default::default(),
             timeout: Duration::from_secs(1),
             reader: None,
-            chunk_manager: None,
         };
         f(&mut h);
         h
@@ -136,12 +134,6 @@ impl Handle {
         self.inode
     }
 
-    pub(crate) fn can_write(&self) -> bool {
-        if let Some(x) = &self.chunk_manager {
-            return x.upgrade().is_some();
-        }
-        return false;
-    }
     pub(crate) fn can_read(&self) -> bool {
         return self.reader.is_some();
     }
@@ -229,17 +221,6 @@ impl Handle {
 
         // get the lock already, we should build a guard for it.
         Ok(HandleWriteGuard { inner: self, seq })
-    }
-
-    pub(crate) fn write(
-        &self,
-        handle_write_guard: &HandleWriteGuard,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<u32> {
-        let mut writer = self.chunk_manager.as_ref().unwrap().upgrade().unwrap();
-
-        todo!()
     }
 }
 

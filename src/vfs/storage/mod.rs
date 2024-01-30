@@ -1,12 +1,20 @@
 mod buffer;
 
-pub(crate) use buffer::{BufferManager, Config as BufferManagerConfig, WriteBuffer};
+pub(crate) use buffer::WriteBuffer;
 
 mod cache;
-mod err;
-mod sto;
+mod engine;
 
-pub(crate) use sto::{new_debug_sto, StoEngine};
+pub use engine::Config as EngineConfig;
+pub(crate) use engine::Engine;
+
+mod err;
+pub(crate) mod scheduler;
+mod sto;
+mod worker;
+mod writer;
+
+pub(crate) use sto::{new_debug_sto, ObjectSto, StoEngine};
 
 pub(crate) const DEFAULT_CHUNK_SIZE: usize = 64 << 20; // 64 MiB
 pub(crate) const DEFAULT_BLOCK_SIZE: usize = 4 << 20; // 4 MiB

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::{
     fmt::{Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
@@ -28,7 +29,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
-use crate::vfs::writer::DataManager;
+use crate::vfs::storage::Engine;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -42,25 +43,28 @@ use crate::{
         err::{Result, VFSError},
         handle::Handle,
         reader::DataReader,
-        storage::{BufferManager, MAX_FILE_SIZE},
-        writer,
+        storage::MAX_FILE_SIZE,
         VFSError::ErrLIBC,
+        FH,
     },
 };
 
-#[derive(Debug)]
 pub struct KisekiVFS {
     config: VFSConfig,
     meta: Arc<MetaEngine>,
     internal_nodes: PreInternalNodes,
-    pub(crate) data_manager: Arc<DataManager>,
+    pub(crate) data_engine: Arc<Engine>,
     pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
     pub(crate) handles: DashMap<Ino, DashMap<FH, Handle>>,
 }
 
-type FH = u64;
+impl Debug for KisekiVFS {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KisekiFS based on {}", self.meta.config.scheme)
+    }
+}
 
 impl Display for KisekiVFS {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -86,20 +90,18 @@ impl KisekiVFS {
         }
 
         let meta = Arc::new(meta);
-        let buffer_manager = Arc::new(BufferManager::new(
-            vfs_config.buffer_manager_config(),
-            vfs_config.debug_sto_engine(),
+        let sto_engine = vfs_config.debug_sto_engine();
+        let storage_engine = Arc::new(Engine::new(
+            Arc::new(vfs_config.engine_config.clone()),
+            sto_engine,
+            meta.clone(),
         ));
 
         let vfs = Self {
-            data_manager: Arc::new(DataManager::new(
-                vfs_config.data_manager_config(),
-                meta.clone(),
-                buffer_manager,
-            )),
-            internal_nodes,
             config: vfs_config,
-            meta,
+            internal_nodes,
+            data_engine: storage_engine,
+            meta: meta.clone(),
             reader: DataReader::default(),
             modified_at: DashMap::new(),
             _next_fh: AtomicU64::new(1),
@@ -160,7 +162,7 @@ impl KisekiVFS {
 
     pub fn update_length(&self, entry: &mut Entry) {
         if entry.attr.full && entry.is_file() {
-            let len = self.data_manager.get_length(entry.inode);
+            let len = self.data_engine.get_length(entry.inode);
             if len > entry.attr.length {
                 entry.attr.length = len;
             }
@@ -169,7 +171,7 @@ impl KisekiVFS {
     }
     pub fn update_length_by_attr(&self, inode: Ino, attr: &mut InodeAttr) {
         if attr.full && attr.is_file() {
-            let len = self.data_manager.get_length(inode);
+            let len = self.data_engine.get_length(inode);
             if len > attr.length {
                 attr.length = len;
             }
@@ -433,7 +435,7 @@ impl KisekiVFS {
             };
             if flags.contains(SetAttrFlags::MTIME) || flags.contains(SetAttrFlags::MTIME_NOW) {
                 // TODO: whats wrong with this?
-                self.data_manager.update_mtime(ino, mtime)?;
+                self.data_engine.update_mtime(ino, mtime)?;
             }
         }
 
@@ -580,12 +582,9 @@ impl KisekiVFS {
         lock_owner: Option<u64>,
     ) -> Result<u32> {
         let size = data.len();
-        trace!(
-            "fs:write with ino {:?} fh {:?} offset {:?} size {:?}",
-            ino,
-            fh,
-            offset,
-            size
+        debug!(
+            "fs:write with {:?} fh {:?} offset {:?} size {:?}",
+            ino, fh, offset, size
         );
 
         let offset = offset as usize;
@@ -596,14 +595,21 @@ impl KisekiVFS {
         if ino == CONTROL_INODE {
             todo!()
         }
-        if !handle.can_write() {
+        if !self.data_engine.can_write(fh) {
+            debug!(
+                "fs:write with ino {:?} fh {:?} offset {:?} size {:?} failed; maybe open flag contains problem",
+                ino, fh, offset, size
+            );
             return Err(ErrLIBC { kind: EBADF });
         }
 
-        let write_guard = handle.acquire_write_lock().await?;
-        let write_length = handle.write(&write_guard, offset as u64, data)?;
-        self.reader.truncate(ino, self.data_manager.get_length(ino));
-        Ok(write_length)
+        debug!("fs:write with ino {:?} fh {:?}", ino, fh);
+        let len = self.data_engine.write(fh, offset, data).await?;
+
+        // let write_guard = handle.acquire_write_lock().await?;
+        // let write_length = handle.write(&write_guard, offset as u64, data)?;
+        self.reader.truncate(ino, self.data_engine.get_length(ino));
+        Ok(len as u32)
     }
 }
 

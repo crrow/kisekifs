@@ -8,120 +8,27 @@ use snafu::ResultExt;
 use tracing::debug;
 
 use super::err::*;
-use crate::vfs::storage::{
-    sto::StoEngine, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
-};
-
-const DEFAULT_BUFFER_CAPACITY: usize = 300 << 20; // 300 MiB
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Config {
-    /// The total memory size for the write/read buffer.
-    pub(crate) total_buffer_capacity: usize,
-    /// chunk_size is the max size can one buffer
-    /// hold no matter it is for reading or writing.
-    pub(crate) chunk_size: usize,
-    /// block_size is the max size when we upload
-    /// the data to the cloud.
-    ///
-    /// When the data is not enough to fill the block,
-    /// then the block size is equal to the data size,
-    /// for example, the last block of the file.
-    pub(crate) block_size: usize,
-    /// The page_size can be also called as the MIN_BLOCK_SIZE,
-    /// which is the min size of the block.
-    ///
-    /// And under the hood, the block is divided into pages.
-    pub(crate) page_size: usize,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            total_buffer_capacity: DEFAULT_BUFFER_CAPACITY, // 300 MiB
-            chunk_size: DEFAULT_CHUNK_SIZE,                 // 64 MiB
-            block_size: DEFAULT_BLOCK_SIZE,                 // 4 MiB
-            page_size: DEFAULT_PAGE_SIZE,                   // 64 KiB
-        }
-    }
-}
-
-impl Config {
-    #[inline]
-    fn get_buffer_config(&self) -> BufferConfig {
-        BufferConfig {
-            chunk_size: self.chunk_size,
-            block_size: self.block_size,
-            page_size: self.page_size,
-        }
-    }
-
-    fn with_total_buffer_capacity(mut self, total_buffer_capacity: usize) -> Self {
-        self.total_buffer_capacity = total_buffer_capacity;
-        self
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct BufferConfig {
-    chunk_size: usize,
-    block_size: usize,
-    page_size: usize,
-}
-
-/// The buffer manager is responsible for managing
-/// the read and write buffer.
-///
-/// And when the buffer is full, it should wait for
-/// enough space to write/read.
-#[derive(Debug)]
-pub(crate) struct BufferManager {
-    config: Config,
-    // the memory pool is used to tracking buffer memory usage.
-    // When alloc new buffer, we should make a memory reservation
-    // for it.
-    sto: Arc<dyn StoEngine>,
-}
-
-impl BufferManager {
-    pub(crate) fn new(config: Config, sto: Arc<dyn StoEngine>) -> BufferManager {
-        BufferManager { config, sto }
-    }
-
-    pub(crate) fn new_write_buffer(&self) -> WriteBuffer {
-        let config = self.config.get_buffer_config();
-        WriteBuffer::new(config, self.sto.clone())
-    }
-
-    pub(crate) fn new_read_buffer(&self, sid: usize, length: usize) -> ReadBuffer {
-        let config = self.config.get_buffer_config();
-        ReadBuffer::new(config, self.sto.clone(), sid, length)
-    }
-
-    pub(crate) fn chunk_size(&self) -> usize {
-        self.config.chunk_size
-    }
-}
+use crate::vfs::storage::{sto::StoEngine, EngineConfig};
 
 pub(crate) struct ReadBuffer {
-    config: BufferConfig,
+    config: Arc<EngineConfig>,
     slice_id: usize,
     length: usize,
     sto: Arc<dyn StoEngine>,
 }
 
 impl ReadBuffer {
-    fn new(
-        config: BufferConfig,
+    pub(crate) fn new(
+        config: Arc<EngineConfig>,
         sto: Arc<dyn StoEngine>,
         slice_id: usize,
         length: usize,
     ) -> ReadBuffer {
         ReadBuffer {
             config,
-            sto,
             slice_id,
             length,
+            sto,
         }
     }
 
@@ -207,7 +114,7 @@ enum Block {
 /// to the the given chunk size.
 #[derive(Debug)]
 pub(crate) struct WriteBuffer {
-    config: BufferConfig,
+    config: Arc<EngineConfig>,
     // who owns this buffer, this id need to be
     // set if we need to upload the buffer to the cloud.
     slice_id: Option<usize>,
@@ -217,21 +124,21 @@ pub(crate) struct WriteBuffer {
     flushed_length: usize,
     // the buffer is divided into blocks.
     block_slots: Vec<Block>,
-    sto_engine: Arc<dyn StoEngine>,
+    sto: Arc<dyn StoEngine>,
 }
 
 impl WriteBuffer {
-    fn new(config: BufferConfig, sto_engine: Arc<dyn StoEngine>) -> WriteBuffer {
+    pub(crate) fn new(config: Arc<EngineConfig>, sto: Arc<dyn StoEngine>) -> WriteBuffer {
         WriteBuffer {
-            config,
-            slice_id: None,
-            length: 0,
-            flushed_length: 0,
             block_slots: (0..(config.chunk_size / config.block_size))
                 .into_iter()
                 .map(|_| Block::Empty)
                 .collect(),
-            sto_engine,
+            config,
+            slice_id: None,
+            length: 0,
+            flushed_length: 0,
+            sto,
         }
     }
 
@@ -401,7 +308,7 @@ impl WriteBuffer {
             })
             .try_for_each(|(key, block_data)| -> Result<()> {
                 debug!("flushing block: {}", key);
-                self.sto_engine.put(&key, block_data)
+                self.sto.put(&key, block_data)
             })?;
 
         Ok(())
@@ -462,10 +369,9 @@ mod tests {
 
     #[test]
     fn buffer_write() {
-        let config = Config::default();
-
-        let bm = BufferManager::new(config.clone(), new_debug_sto());
-        let mut wb = bm.new_write_buffer();
+        let config = Arc::new(EngineConfig::default());
+        let sto = new_debug_sto();
+        let mut wb = WriteBuffer::new(config.clone(), sto);
 
         let write_data = b"hello" as &[u8];
         let expected_write_len = write_data.len();
@@ -503,10 +409,9 @@ mod tests {
         use crate::common::install_fmt_log;
         install_fmt_log();
 
-        let config = Config::default();
-
-        let bm = BufferManager::new(config.clone(), new_debug_sto());
-        let mut wb = bm.new_write_buffer();
+        let config = Arc::new(EngineConfig::default());
+        let sto = new_debug_sto();
+        let mut wb = WriteBuffer::new(config.clone(), sto.clone());
         wb.set_slice_id(1);
 
         let data = b"hello world" as &[u8];
@@ -523,7 +428,7 @@ mod tests {
         wb.flush_to(config.block_size + 3).unwrap();
         wb.finish().unwrap();
 
-        let mut rb = bm.new_read_buffer(1, size);
+        let mut rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
         let dst = &mut [0; 5];
         let n = rb.read_at(6, dst).unwrap();
         assert_eq!(n, 5);
