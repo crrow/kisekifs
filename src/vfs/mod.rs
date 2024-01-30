@@ -3,7 +3,9 @@ mod err;
 mod handle;
 pub mod kiseki;
 mod reader;
-mod writer;
+pub mod storage;
 
 pub use err::VFSError;
 pub use kiseki::KisekiVFS;
+
+pub(crate) type FH = u64;

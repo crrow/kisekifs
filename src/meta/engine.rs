@@ -1,18 +1,16 @@
-/*
- * JuiceFS, Copyright 2020 Juicedata, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// JuiceFS, Copyright 2020 Juicedata, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use std::{
     cmp::{max, min},
@@ -29,7 +27,6 @@ use std::{
     time::SystemTime,
 };
 
-use bitflags::bitflags;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
@@ -44,6 +41,7 @@ use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::{
     common::err::ToErrno,
+    meta,
     meta::{
         config::{Format, MetaConfig},
         engine_sto::generate_sto_entry_key_str,

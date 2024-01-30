@@ -3,11 +3,7 @@ use std::time::Duration;
 use libc::c_int;
 use snafu::Snafu;
 
-use crate::{
-    common,
-    common::err::ToErrno,
-    meta::{types::Ino, MetaError},
-};
+use crate::{common, common::err::ToErrno, meta::MetaError};
 
 // FIXME: its ugly
 
@@ -15,7 +11,7 @@ use crate::{
 #[snafu(visibility(pub(crate)))]
 pub enum VFSError {
     ErrMeta {
-        source: crate::meta::MetaError,
+        source: MetaError,
     },
     ErrLIBC {
         kind: c_int,
@@ -29,8 +25,8 @@ pub enum VFSError {
 impl From<VFSError> for common::err::Error {
     fn from(value: VFSError) -> Self {
         match value {
-            VFSError::ErrMeta { source } => common::err::Error::MetaError { source },
-            _ => common::err::Error::VFSError { source: value },
+            VFSError::ErrMeta { source } => common::err::Error::_MetaError { source },
+            _ => common::err::Error::_VFSError { source: value },
         }
     }
 }

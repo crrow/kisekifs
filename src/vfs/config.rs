@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
+
+use crate::vfs::storage::{self, EngineConfig};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VFSConfig {
@@ -10,4 +12,12 @@ pub struct VFSConfig {
     pub backup_meta_interval: Duration,
     pub prefix_internal: bool,
     pub hide_internal: bool,
+
+    pub engine_config: EngineConfig,
+}
+
+impl VFSConfig {
+    pub(crate) fn debug_sto_engine(&self) -> Arc<dyn storage::StoEngine> {
+        storage::new_debug_sto()
+    }
 }

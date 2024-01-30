@@ -1,5 +1,4 @@
 pub mod build_info;
-mod chunk;
 pub mod cmd;
 pub mod common;
 pub mod fuse;

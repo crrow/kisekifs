@@ -1,19 +1,18 @@
-/*
- * JuiceFS, Copyright 2020 Juicedata, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// JuiceFS, Copyright 2020 Juicedata, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+use std::fmt::Debug;
 use std::{
     fmt::{Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
@@ -23,48 +22,49 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use fuser::{FileType, TimeOrNow};
-use libc::{mode_t, open, EACCES, EBADF, EFBIG, EINTR, EINVAL, EPERM};
-use scopeguard::defer;
+use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
+use crate::vfs::storage::Engine;
 use crate::{
-    chunk,
     common::err::ToErrno,
-    meta,
     meta::{
         engine::{access, MetaEngine},
-        internal_nodes::{InternalNode, PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+        internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
         types::*,
         MetaContext, SetAttrFlags, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W,
     },
     vfs::{
         config::VFSConfig,
         err::{Result, VFSError},
-        handle::{Handle, HandleInner},
+        handle::Handle,
         reader::DataReader,
-        writer::DataWriter,
+        storage::MAX_FILE_SIZE,
         VFSError::ErrLIBC,
+        FH,
     },
 };
 
-const MAX_FILE_SIZE: usize = chunk::MAX_CHUNK_SIZE << 31;
-
-#[derive(Debug)]
 pub struct KisekiVFS {
     config: VFSConfig,
-    meta: MetaEngine,
+    meta: Arc<MetaEngine>,
     internal_nodes: PreInternalNodes,
-    pub(crate) writer: DataWriter,
+    pub(crate) data_engine: Arc<Engine>,
     pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
-    // FIXME: use rwlock rather than mutex.
     pub(crate) handles: DashMap<Ino, DashMap<FH, Handle>>,
 }
 
-type FH = u64;
+impl Debug for KisekiVFS {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KisekiFS based on {}", self.meta.config.scheme)
+    }
+}
 
 impl Display for KisekiVFS {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -89,11 +89,19 @@ impl KisekiVFS {
             internal_nodes.add_prefix();
         }
 
+        let meta = Arc::new(meta);
+        let sto_engine = vfs_config.debug_sto_engine();
+        let storage_engine = Arc::new(Engine::new(
+            Arc::new(vfs_config.engine_config.clone()),
+            sto_engine,
+            meta.clone(),
+        ));
+
         let vfs = Self {
-            internal_nodes,
             config: vfs_config,
-            meta,
-            writer: DataWriter::default(),
+            internal_nodes,
+            data_engine: storage_engine,
+            meta: meta.clone(),
             reader: DataReader::default(),
             modified_at: DashMap::new(),
             _next_fh: AtomicU64::new(1),
@@ -154,7 +162,7 @@ impl KisekiVFS {
 
     pub fn update_length(&self, entry: &mut Entry) {
         if entry.attr.full && entry.is_file() {
-            let len = self.writer.get_length(entry.inode);
+            let len = self.data_engine.get_length(entry.inode);
             if len > entry.attr.length {
                 entry.attr.length = len;
             }
@@ -163,7 +171,7 @@ impl KisekiVFS {
     }
     pub fn update_length_by_attr(&self, inode: Ino, attr: &mut InodeAttr) {
         if attr.full && attr.is_file() {
-            let len = self.writer.get_length(inode);
+            let len = self.data_engine.get_length(inode);
             if len > attr.length {
                 attr.length = len;
             }
@@ -426,7 +434,8 @@ impl KisekiVFS {
                 TimeOrNow::Now => SystemTime::now(),
             };
             if flags.contains(SetAttrFlags::MTIME) || flags.contains(SetAttrFlags::MTIME_NOW) {
-                self.writer.update_mtime(ino, mtime)?;
+                // TODO: whats wrong with this?
+                self.data_engine.update_mtime(ino, mtime)?;
             }
         }
 
@@ -573,30 +582,34 @@ impl KisekiVFS {
         lock_owner: Option<u64>,
     ) -> Result<u32> {
         let size = data.len();
-        trace!(
-            "fs:write with ino {:?} fh {:?} offset {:?} size {:?}",
-            ino,
-            fh,
-            offset,
-            size
+        debug!(
+            "fs:write with {:?} fh {:?} offset {:?} size {:?}",
+            ino, fh, offset, size
         );
 
         let offset = offset as usize;
         if offset >= MAX_FILE_SIZE || offset + size >= MAX_FILE_SIZE {
             return Err(ErrLIBC { kind: EFBIG });
         }
-        let handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        let mut handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
         if ino == CONTROL_INODE {
             todo!()
         }
-        if !handle.can_write() {
+        if !self.data_engine.can_write(fh) {
+            debug!(
+                "fs:write with ino {:?} fh {:?} offset {:?} size {:?} failed; maybe open flag contains problem",
+                ino, fh, offset, size
+            );
             return Err(ErrLIBC { kind: EBADF });
         }
 
-        let write_guard = handle.acquire_write_lock().await?;
-        let write_length = handle.write(&write_guard, offset as u64, data)?;
-        self.reader.truncate(ino, self.writer.get_length(ino));
-        Ok(write_length)
+        debug!("fs:write with ino {:?} fh {:?}", ino, fh);
+        let len = self.data_engine.write(fh, offset, data).await?;
+
+        // let write_guard = handle.acquire_write_lock().await?;
+        // let write_length = handle.write(&write_guard, offset as u64, data)?;
+        self.reader.truncate(ino, self.data_engine.get_length(ino));
+        Ok(len as u32)
     }
 }
 

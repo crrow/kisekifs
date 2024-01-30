@@ -1,41 +1,34 @@
-/*
- * JuiceFS, Copyright 2020 Juicedata, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// JuiceFS, Copyright 2020 Juicedata, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use std::{
     fmt::Debug,
     sync::{
-        atomic::{AtomicI64, AtomicU64, Ordering},
-        Arc, RwLock,
+        atomic::{AtomicI64, Ordering},
+        Arc, RwLock, Weak,
     },
     time::Duration,
 };
 
 use dashmap::DashMap;
-use libc::{EBADF, EPERM};
-use snafu::Snafu;
-use tokio::{
-    select,
-    sync::Notify,
-    time::{timeout, Instant},
-};
-use tracing::debug;
+use libc::EPERM;
+use tokio::{sync::Notify, time::Instant};
+use tracing::{debug, instrument};
 
 use crate::{
     meta::types::{Entry, Ino},
-    vfs::{err::Result, reader::FileReader, writer::FileWriter, KisekiVFS, VFSError},
+    vfs::{err::Result, reader::FileReader, KisekiVFS, VFSError},
 };
 
 impl KisekiVFS {
@@ -61,22 +54,23 @@ impl KisekiVFS {
         fh
     }
 
+    #[instrument(skip(self))]
     pub(crate) fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<u64> {
         let fh = self.next_fh();
-        match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => {
-                Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(Arc::new(self.reader.open(inode, length)));
-                });
-            }
-            libc::O_WRONLY | libc::O_RDWR => {
-                Handle::new_with(fh, inode, |h| {
-                    h.reader = Some(Arc::new(self.reader.open(inode, length)));
-                    h.writer = Some(Arc::new(self.writer.open(inode, length)));
-                });
-            }
+        let h = match flags & libc::O_ACCMODE {
+            libc::O_RDONLY => Handle::new_with(fh, inode, |h| {
+                h.reader = Some(self.reader.open(inode, length));
+            }),
+            libc::O_WRONLY | libc::O_RDWR => Handle::new_with(fh, inode, |h| {
+                h.reader = Some(self.reader.open(inode, length));
+                self.data_engine.new_file_writer(h.fh);
+            }),
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
-        }
+        };
+        self.handles
+            .entry(inode)
+            .or_insert_with(DashMap::new)
+            .insert(fh, h);
 
         Ok(fh)
     }
@@ -102,8 +96,7 @@ pub(crate) struct Handle {
     notify: Arc<Notify>,
     timeout: Duration,
 
-    reader: Option<Arc<FileReader>>, // TODO: how to make it concurrent safe ?
-    writer: Option<Arc<FileWriter>>,
+    reader: Option<Weak<FileReader>>, // TODO: how to make it concurrent safe ?
 }
 
 impl Handle {
@@ -119,7 +112,6 @@ impl Handle {
             readers: Default::default(),
             timeout: Duration::from_secs(1),
             reader: None,
-            writer: None,
         }
     }
     pub(crate) fn new_with<F: FnMut(&mut Handle)>(fh: u64, inode: Ino, mut f: F) -> Self {
@@ -131,7 +123,6 @@ impl Handle {
             readers: Default::default(),
             timeout: Duration::from_secs(1),
             reader: None,
-            writer: None,
         };
         f(&mut h);
         h
@@ -143,9 +134,6 @@ impl Handle {
         self.inode
     }
 
-    pub(crate) fn can_write(&self) -> bool {
-        return self.writer.is_some();
-    }
     pub(crate) fn can_read(&self) -> bool {
         return self.reader.is_some();
     }
@@ -233,15 +221,6 @@ impl Handle {
 
         // get the lock already, we should build a guard for it.
         Ok(HandleWriteGuard { inner: self, seq })
-    }
-
-    pub(crate) fn write(
-        &self,
-        handle_write_guard: &HandleWriteGuard,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<u32> {
-        todo!()
     }
 }
 
