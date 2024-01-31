@@ -20,6 +20,7 @@ use fuser::Request;
 mod config;
 pub use config::{Compression, Format, MetaConfig};
 pub mod engine;
+pub use engine::SliceInfo;
 mod err;
 pub use err::MetaError;
 mod engine_quota;

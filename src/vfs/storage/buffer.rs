@@ -1,3 +1,4 @@
+use scopeguard::defer;
 use std::{
     cmp::{max, min},
     io::{Cursor, Write},
@@ -146,6 +147,10 @@ impl WriteBuffer {
         self.slice_id = Some(sid);
     }
 
+    pub(crate) fn get_slice_id(&self) -> Option<usize> {
+        self.slice_id
+    }
+
     pub(crate) fn write_at(&mut self, offset: usize, data: &[u8]) -> Result<usize> {
         let expected_write_len = data.len();
         if expected_write_len <= 0 {
@@ -279,6 +284,7 @@ impl WriteBuffer {
     /// Try to flush the buffer to the given offset.
     pub(crate) fn flush_to(&mut self, offset: usize) -> Result<()> {
         debug_assert!(self.flushed_length <= offset);
+        defer!(debug!("flushing buffer succeed {offset}"););
 
         self.block_slots
             .iter_mut()

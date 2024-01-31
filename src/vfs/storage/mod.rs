@@ -9,6 +9,7 @@ pub use engine::Config as EngineConfig;
 pub(crate) use engine::Engine;
 
 mod err;
+mod reader;
 pub(crate) mod scheduler;
 mod sto;
 mod worker;

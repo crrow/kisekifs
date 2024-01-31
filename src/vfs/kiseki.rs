@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
 use std::{
-    fmt::{Display, Formatter},
+    fmt::{Debug, Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
     time,
     time::SystemTime,
@@ -29,7 +28,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
-use crate::vfs::storage::Engine;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -43,7 +41,7 @@ use crate::{
         err::{Result, VFSError},
         handle::Handle,
         reader::DataReader,
-        storage::MAX_FILE_SIZE,
+        storage::{Engine, MAX_FILE_SIZE},
         VFSError::ErrLIBC,
         FH,
     },
@@ -169,6 +167,7 @@ impl KisekiVFS {
             self.reader.truncate(entry.inode, entry.attr.length);
         }
     }
+
     pub fn update_length_by_attr(&self, inode: Ino, attr: &mut InodeAttr) {
         if attr.full && attr.is_file() {
             let len = self.data_engine.get_length(inode);
@@ -595,7 +594,7 @@ impl KisekiVFS {
         if ino == CONTROL_INODE {
             todo!()
         }
-        if !self.data_engine.can_write(fh) {
+        if !self.data_engine.check_file_writer(ino) {
             debug!(
                 "fs:write with ino {:?} fh {:?} offset {:?} size {:?} failed; maybe open flag contains problem",
                 ino, fh, offset, size
@@ -603,13 +602,39 @@ impl KisekiVFS {
             return Err(ErrLIBC { kind: EBADF });
         }
 
-        debug!("fs:write with ino {:?} fh {:?}", ino, fh);
-        let len = self.data_engine.write(fh, offset, data).await?;
-
-        // let write_guard = handle.acquire_write_lock().await?;
-        // let write_length = handle.write(&write_guard, offset as u64, data)?;
+        let len = self.data_engine.write(ino, offset, data).await?;
         self.reader.truncate(ino, self.data_engine.get_length(ino));
         Ok(len as u32)
+    }
+
+    pub async fn flush(&self, ctx: &MetaContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
+        debug!("do flush manually on ino {:?} fh {:?}", ino, fh);
+        let mut h = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        if ino.is_special() {
+            return Ok(());
+        };
+
+        if let Some(fw) = self.data_engine.get_file_writer(ino) {
+            fw.do_flush().await?;
+        }
+
+        if lock_owner != h.ofd_owner {
+            h.ofd_owner = 0;
+        }
+        if h.locks & 2 != 0 {
+            self.meta
+                .set_lk(
+                    ctx,
+                    ino,
+                    lock_owner,
+                    false,
+                    libc::F_UNLCK,
+                    0,
+                    0x7FFFFFFFFFFFFFFF,
+                )
+                .await?;
+        }
+        Ok(())
     }
 }
 

@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::vfs::FH;
 use std::cmp::Ordering;
+
+use crate::meta::types::Ino;
+
 pub(crate) enum WorkerRequest {
     FlushBlock(FlushBlockRequest),
     FlushReleaseSlice(FlushAndReleaseSliceRequest),
@@ -24,13 +26,13 @@ pub(crate) enum WorkerRequest {
 
 impl WorkerRequest {
     pub(crate) fn new_flush_block_request(
-        fh: FH,
+        ino: Ino,
         chunk_idx: usize,
         internal_slice_seq: u64,
         flush_to: usize,
     ) -> Self {
         WorkerRequest::FlushBlock(FlushBlockRequest {
-            fh,
+            ino,
             chunk_idx,
             internal_slice_seq,
             flush_to,
@@ -38,28 +40,28 @@ impl WorkerRequest {
     }
 
     pub(crate) fn new_flush_and_release_slice_request(
-        fh: FH,
+        ino: Ino,
         chunk_idx: usize,
         internal_slice_seq: u64,
         reason: FlushAndReleaseSliceReason,
     ) -> Self {
         WorkerRequest::FlushReleaseSlice(FlushAndReleaseSliceRequest {
-            fh,
+            ino,
             chunk_idx,
             internal_slice_seq,
             reason,
         })
     }
 
-    pub(crate) fn new_commit_chunk_request(fh: FH, chunk_idx: usize) -> Self {
-        WorkerRequest::CommitChunk(CommitChunkRequest { fh, chunk_idx })
+    pub(crate) fn new_commit_chunk_request(ino: Ino, chunk_idx: usize) -> Self {
+        WorkerRequest::CommitChunk(CommitChunkRequest { ino, chunk_idx })
     }
 }
 
 /// Try to flush some blocks in the current slice.
 #[derive(Clone)]
 pub(crate) struct FlushBlockRequest {
-    pub(crate) fh: FH,
+    pub(crate) ino: Ino,
     pub(crate) chunk_idx: usize,
     pub(crate) internal_slice_seq: u64,
     pub(crate) flush_to: usize,
@@ -92,7 +94,7 @@ impl Ord for FlushBlockRequest {
 /// to flush this slice.
 #[derive(Debug)]
 pub(crate) struct FlushAndReleaseSliceRequest {
-    pub(crate) fh: FH,
+    pub(crate) ino: Ino,
     pub(crate) chunk_idx: usize,
     pub(crate) internal_slice_seq: u64,
     pub(crate) reason: FlushAndReleaseSliceReason,
@@ -116,6 +118,6 @@ pub(crate) enum FlushAndReleaseSliceReason {
 /// Then we should try to free this chunk is no one is writing.
 #[derive(Debug)]
 pub(crate) struct CommitChunkRequest {
-    pub(crate) fh: FH,
+    pub(crate) ino: Ino,
     pub(crate) chunk_idx: usize,
 }

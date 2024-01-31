@@ -20,8 +20,8 @@ use std::{
 };
 
 use fuser::{
-    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
 use libc::{c_int, open};
 use snafu::{ResultExt, Snafu, Whatever};
@@ -489,6 +489,19 @@ impl Filesystem for KisekiFuse {
             Ok(bytes_written) => {
                 reply.written(bytes_written);
             }
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
+    fn flush(&mut self, req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
+        let ctx = MetaContext::from(req);
+        match self.runtime.block_on(
+            self.vfs
+                .flush(&ctx, Ino(ino), fh, lock_owner)
+                .in_current_span(),
+        ) {
+            Ok(()) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         }
     }

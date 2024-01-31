@@ -17,19 +17,17 @@ mod listener;
 pub(crate) use listener::WorkerListener;
 mod request;
 
-pub(crate) use request::FlushAndReleaseSliceReason;
-pub(crate) use request::WorkerRequest;
-use std::collections::{HashMap, HashSet};
-
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
-use crate::common;
-use crate::vfs::FH;
 use dashmap::DashMap;
 use itertools::Itertools;
+pub(crate) use request::{FlushAndReleaseSliceReason, WorkerRequest};
 use snafu::{ensure, ResultExt};
 use tokio::{
     sync::{
@@ -41,14 +39,19 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::vfs::storage::engine::FileWritersRef;
-use crate::vfs::storage::worker::request::{FlushAndReleaseSliceRequest, FlushBlockRequest};
-use crate::vfs::storage::writer::FileWriter;
-use crate::vfs::storage::{
-    engine::Config as EngineConfig,
-    err::{JoinSnafu, Result, WorkerStoppedSnafu},
-    scheduler::BackgroundTaskPoolRef,
-    worker::listener::EventListenerRef,
+use crate::{
+    common,
+    meta::types::Ino,
+    vfs::{
+        storage::{
+            engine::Config as EngineConfig,
+            err::{JoinSnafu, Result, WorkerStoppedSnafu},
+            scheduler::BackgroundTaskPoolRef,
+            worker::request::{CommitChunkRequest, FlushAndReleaseSliceRequest, FlushBlockRequest},
+            writer::{FileWriter, FileWritersRef},
+        },
+        FH,
+    },
 };
 
 /// Identifier for a worker.
@@ -84,6 +87,7 @@ impl WorkerStarter {
             task_pool_ref: self.task_pool_ref.clone(),
             listener: self.listener,
             file_writers: self.file_writers,
+            commit_chunk_handles: Default::default(),
         };
 
         let handle = common::runtime::spawn(async move {
@@ -176,6 +180,7 @@ pub(crate) struct WorkerLoop {
     /// Event listener
     listener: WorkerListener,
     file_writers: FileWritersRef,
+    commit_chunk_handles: HashMap<(Ino, usize), JoinHandle<()>>,
 }
 
 impl WorkerLoop {
@@ -215,7 +220,7 @@ impl WorkerLoop {
     ///
     /// We should drain the buffer.
     async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) {
-        let mut fb_map: HashMap<(FH, usize, u64), usize> = HashMap::new();
+        let mut fb_map: HashMap<(Ino, usize, u64), usize> = HashMap::new();
         let mut fr_vec = Vec::with_capacity(buffer.capacity());
         for wr in buffer.drain(..) {
             match wr {
@@ -228,7 +233,7 @@ impl WorkerLoop {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
                 WorkerRequest::FlushBlock(fb) => {
-                    let key3 = (fb.fh, fb.chunk_idx, fb.internal_slice_seq);
+                    let key3 = (fb.ino, fb.chunk_idx, fb.internal_slice_seq);
                     if let Some(old) = fb_map.get(&key3) {
                         if fb.flush_to > *old {
                             fb_map.insert(key3, fb.flush_to);
@@ -239,11 +244,10 @@ impl WorkerLoop {
                 }
                 WorkerRequest::FlushReleaseSlice(fl) => {
                     // remove the single block flush req, since we still need to flush the full one.
-                    fb_map.remove(&(fl.fh, fl.chunk_idx, fl.internal_slice_seq));
+                    fb_map.remove(&(fl.ino, fl.chunk_idx, fl.internal_slice_seq));
                 }
                 WorkerRequest::CommitChunk(cc) => {
-                    // TODO:
-                    debug!("commit chunk: {:?}", cc);
+                    self.handle_commit_chunk_req(cc).await;
                 }
             }
         }
@@ -252,16 +256,16 @@ impl WorkerLoop {
         self.handle_flush_and_release(fr_vec.into_iter()).await;
     }
 
-    async fn handle_flush_block_reqs(&self, fb_reqs: HashMap<(FH, usize, u64), usize>) {
-        let mut cache: HashMap<FH, Arc<FileWriter>> = HashMap::new();
+    async fn handle_flush_block_reqs(&self, fb_reqs: HashMap<(Ino, usize, u64), usize>) {
+        let mut cache: HashMap<Ino, Arc<FileWriter>> = HashMap::new();
 
         let mut handles = Vec::new();
-        for ((fh, chunk_idx, slice_seq), flush_to) in fb_reqs.into_iter() {
-            let fw = if let Some(fw) = cache.get(&fh) {
+        for ((ino, chunk_idx, slice_seq), flush_to) in fb_reqs.into_iter() {
+            let fw = if let Some(fw) = cache.get(&ino) {
                 fw.clone()
             } else {
-                let fw = self.file_writers.get(&fh).unwrap().clone();
-                cache.insert(fh, fw.clone());
+                let fw = self.file_writers.get(&ino).unwrap().clone();
+                cache.insert(ino, fw.clone());
                 fw
             };
 
@@ -285,9 +289,30 @@ impl WorkerLoop {
         fl_reqs: impl Iterator<Item = FlushAndReleaseSliceRequest>,
     ) {
         for fl_req in fl_reqs {
-            // TODO: do really flush and release
+            // TODO: do really flush and release buffer.
             debug!("flush and release: {:?}", fl_req);
         }
+    }
+
+    async fn handle_commit_chunk_req(&mut self, req: CommitChunkRequest) {
+        debug!("ino: {} commit chunk: {}", req.ino, req.chunk_idx);
+        // if self
+        //     .commit_chunk_handles
+        //     .contains_key(&(req.ino, req.chunk_idx))
+        // {
+        //     return;
+        // }
+        //
+        // if let Some(fw) = self.file_writers.get(&req.ino) {
+        //     let fw = fw.value().clone();
+        //     if let Some(cw) = fw.find_chunk_writer(req.chunk_idx) {
+        //         let handle = common::runtime::spawn(async move {
+        //             let read_guard = cw.slices.read().await;
+        //         });
+        //         self.commit_chunk_handles
+        //             .insert((req.ino, req.chunk_idx), handle);
+        //     }
+        // }
     }
 }
 

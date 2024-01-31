@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::{
     cmp::{max, min},
     collections::HashMap,
@@ -30,15 +32,18 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
-use futures::TryStream;
+use futures::{future::ok, TryStream};
 use lazy_static::lazy_static;
 use libc::{c_int, EACCES};
-use opendal::{ErrorKind, Operator};
+use opendal::{raw::oio::WriteExt, ErrorKind, Operator};
 use scopeguard::defer;
 use snafu::{ResultExt, Snafu};
+use tokio::sync::Notify;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
+use crate::meta::types::{make_slice_buf, SLICE_BYTES};
+use crate::vfs::storage::DEFAULT_CHUNK_SIZE;
 use crate::{
     common::err::ToErrno,
     meta,
@@ -55,39 +60,43 @@ use crate::{
 
 // Slice is a slice of a chunk.
 // Multiple slices could be combined together as a chunk.
-pub struct Slice {
-    id: u64,
-    size: u32,
-    off: u32,
-    len: u32,
+#[derive(Debug)]
+pub struct SliceInfo {
+    pub(crate) id: u64,
+    pub(crate) size: u32,
+    pub(crate) off: u32,
+    pub(crate) len: u32,
 }
 
 pub(crate) const INODE_BATCH: u64 = 1 << 10;
+pub(crate) const SLICE_ID_BATCH: u64 = 4 << 10;
 
 lazy_static! {
-    static ref COUNTER_LOCKERS: DashMap<Counter, RwLock<()>> = {
+    static ref COUNTER_LOCKERS: DashMap<Counter, tokio::sync::RwLock<()>> = {
         let mut map = DashMap::new();
         for counter in COUNTER_ENUMS.iter() {
-            map.insert(counter.clone(), RwLock::new(()));
+            map.insert(counter.clone(), tokio::sync::RwLock::new(()));
         }
         map
     };
 }
 
 // FIXME: use a better way.
-const COUNTER_ENUMS: [Counter; 5] = [
+const COUNTER_ENUMS: [Counter; 6] = [
     Counter::UsedSpace,
     Counter::TotalInodes,
     Counter::LegacySessions,
     Counter::NextTrash,
     Counter::NextInode,
+    Counter::NextSlice,
 ];
-const COUNTER_STRINGS: [&str; 5] = [
+const COUNTER_STRINGS: [&str; 6] = [
     "used_space",
     "total_inodes",
     "legacy_sessions",
     "next_trash",
     "next_inode",
+    "next_slice",
 ];
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub(crate) enum Counter {
@@ -96,6 +105,7 @@ pub(crate) enum Counter {
     LegacySessions,
     NextTrash,
     NextInode,
+    NextSlice,
 }
 
 impl Counter {
@@ -106,6 +116,7 @@ impl Counter {
             Counter::LegacySessions => COUNTER_STRINGS[2],
             Counter::NextTrash => COUNTER_STRINGS[3],
             Counter::NextInode => COUNTER_STRINGS[4],
+            Counter::NextSlice => COUNTER_STRINGS[5],
         }
     }
     // FIXME: do we actually need it ?
@@ -116,7 +127,7 @@ impl Counter {
         let counter_key = self.generate_sto_key();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
-        let guard = locker_ref.read().unwrap();
+        let guard = locker_ref.read().await;
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => buf
                 .as_slice()
@@ -170,7 +181,7 @@ impl Counter {
         let counter_key = self.generate_sto_key();
         let locker_ref = COUNTER_LOCKERS.get(self).unwrap();
         let locker_ref = locker_ref.value();
-        let guard = locker_ref.write().unwrap();
+        let guard = locker_ref.write().await;
         defer!(drop(guard));
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => {
@@ -203,7 +214,7 @@ impl Counter {
 /// A table for allocating inode numbers.
 /// It starts at 2 since the root inode is 1.
 pub struct IdTable {
-    next_max_pair: RwLock<(u64, u64)>,
+    next_max_pair: tokio::sync::RwLock<(u64, u64)>,
     operator: Arc<Operator>,
     counter: Counter,
     step: u64,
@@ -213,7 +224,7 @@ impl IdTable {
     /// Return a new empty `IdTable`.
     pub fn new(operator: Arc<Operator>, counter: Counter, step: u64) -> Self {
         Self {
-            next_max_pair: RwLock::new((0, 0)),
+            next_max_pair: tokio::sync::RwLock::new((0, 0)),
             operator,
             counter,
             step,
@@ -222,7 +233,7 @@ impl IdTable {
 
     /// Return the next unused ID from the table.
     pub async fn next(&self) -> std::result::Result<u64, opendal::Error> {
-        let mut next_max_pair = self.next_max_pair.write().unwrap();
+        let mut next_max_pair = self.next_max_pair.write().await;
         if next_max_pair.0 >= next_max_pair.1 {
             let new_max = self
                 .counter
@@ -245,13 +256,13 @@ pub struct OpenFile {
     pub attr: InodeAttr,
     pub reference_count: usize,
     pub last_check: std::time::Instant,
-    pub chunks: HashMap<u32, Vec<Slice>>,
+    pub chunks: HashMap<u32, Vec<SliceInfo>>,
 }
 
 pub struct OpenFiles {
     ttl: Duration,
     limit: usize,
-    files: DashMap<Ino, OpenFile>,
+    pub(crate) files: DashMap<Ino, OpenFile>,
     // TODO: background clean up
 }
 
@@ -303,6 +314,7 @@ impl OpenFiles {
                 );
             }
             Some(mut op) => {
+                let mut op = op.value_mut();
                 if op.attr.mtime == attr.mtime {
                     attr.keep_cache = op.attr.keep_cache;
                 }
@@ -315,6 +327,7 @@ impl OpenFiles {
 
     pub(crate) fn open_check(&self, ino: Ino) -> Option<InodeAttr> {
         if let Some(mut of) = self.files.get_mut(&ino) {
+            let mut of = of.value_mut();
             if of.last_check.elapsed() < self.ttl {
                 of.reference_count += 1;
                 return Some(of.attr.clone());
@@ -336,7 +349,7 @@ pub(crate) struct FSStatesInner {
 /// MetaEngine describes a meta service for file system.
 pub struct MetaEngine {
     pub(crate) config: MetaConfig,
-    pub(crate) format: RwLock<Format>,
+    pub(crate) format: tokio::sync::RwLock<Format>,
     root: Ino,
     pub(crate) operator: Arc<Operator>,
     sub_trash: Option<InternalNode>,
@@ -344,6 +357,7 @@ pub struct MetaEngine {
     dir_parents: DashMap<Ino, Ino>,
     pub(crate) fs_states: FSStatesInner,
     free_inodes: IdTable,
+    free_slices: IdTable,
     pub(crate) dir_stats: DashMap<Ino, DirStat>,
 }
 
@@ -355,7 +369,7 @@ impl MetaEngine {
         );
         let m = MetaEngine {
             config: config.clone(),
-            format: RwLock::new(Format::default()),
+            format: tokio::sync::RwLock::new(Format::default()),
             root: ROOT_INO,
             operator: op.clone(),
             sub_trash: None,
@@ -363,6 +377,7 @@ impl MetaEngine {
             dir_parents: DashMap::new(),
             fs_states: Default::default(),
             free_inodes: IdTable::new(op.clone(), Counter::NextInode, INODE_BATCH),
+            free_slices: IdTable::new(op.clone(), Counter::NextSlice, SLICE_ID_BATCH),
             dir_stats: DashMap::new(),
         };
         Ok(m)
@@ -381,7 +396,7 @@ impl MetaEngine {
             need_init_root = true;
         }
 
-        let mut guard = self.format.write().unwrap();
+        let mut guard = self.format.write().await;
         *guard = format.clone();
 
         let mut basic_attr = InodeAttr::default()
@@ -413,6 +428,15 @@ impl MetaEngine {
     }
     pub fn info(&self) -> String {
         format!("meta-{}", self.config.scheme)
+    }
+
+    pub async fn next_slice_id(&self) -> Result<usize> {
+        let s = self
+            .free_slices
+            .next()
+            .await
+            .context(ErrFailedToDoCounterSnafu)?;
+        Ok(s as usize)
     }
 
     /// StatFS returns summary statistics of a volume.
@@ -473,7 +497,7 @@ impl MetaEngine {
         inodes = max(inodes, 0);
         let iused = inodes as u64;
 
-        let format = self.format.read().unwrap();
+        let format = self.format.read().await;
 
         let total_space = if format.capacity_in_bytes > 0 {
             min(format.capacity_in_bytes, used_space as u64)
@@ -1184,6 +1208,103 @@ impl MetaEngine {
     }
 
     fn touch_atime(&self, ctx: &MetaContext, inode: Ino) {}
+
+    // Write put a slice of data on top of the given chunk.
+    pub async fn write_slice(
+        &self,
+        inode: Ino,
+        chunk_idx: u32,
+        chunk_pos: u32,
+        slice: SliceInfo,
+        mtime: Instant,
+    ) -> Result<()> {
+        trace!(
+            "write with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
+            inode,
+            chunk_idx,
+            chunk_pos,
+            slice,
+            mtime
+        );
+
+        let of = self.open_files.files.get_mut(&inode);
+        defer!(drop(of););
+
+        let mut attr = self.sto_get_attr(inode).await?.unwrap_or(
+            InodeAttr::default()
+                .set_kind(FileType::RegularFile)
+                .to_owned(),
+        );
+        if !attr.is_file() {
+            return Err(MetaError::ErrLibc { kind: libc::EPERM })?;
+        }
+
+        let mut chunk_info = self
+            .sto_get_chunk_info(inode, chunk_idx)
+            .await?
+            .unwrap_or(vec![]);
+        if chunk_info.len() % SLICE_BYTES != 0 {
+            error!(
+                "Invalid chunk value for inode {} chunk_idx {}: {}",
+                inode,
+                chunk_idx,
+                chunk_info.len()
+            );
+            return Err(MetaError::ErrLibc { kind: libc::EIO });
+        }
+
+        let mut dir_stat_length: i64 = 0;
+        let mut dir_stat_space: i64 = 0;
+        let new_len =
+            chunk_idx as u64 * DEFAULT_CHUNK_SIZE as u64 + chunk_pos as u64 + slice.len as u64;
+        if new_len > attr.length {
+            dir_stat_length = new_len as i64 - attr.length as i64;
+            dir_stat_space = align4k(new_len - attr.length);
+            attr.length = new_len;
+        }
+        let now = SystemTime::now();
+        attr.mtime = now;
+        attr.ctime = now;
+        let val = make_slice_buf(chunk_pos, slice.id, slice.size, slice.off, slice.len);
+        if chunk_info.eq(&val) {
+            warn!(
+                "{inode} try to write the same slice {:?} at {chunk_idx}",
+                slice
+            );
+            return Ok(());
+        }
+        chunk_info.extend_from_slice(&val);
+        self.sto_set_attr(inode, &attr).await?;
+        let slice_cnt = chunk_info.len() / SLICE_BYTES; // number of slices
+        self.sto_set_chunk_info(inode, chunk_idx, chunk_info)
+            .await?;
+
+        if slice_cnt > 350 || slice_cnt % 100 == 99 {
+            // start a background task to compact these slices
+        }
+        self.update_parent_stats(inode, attr.parent, dir_stat_length, dir_stat_space)
+            .await?;
+
+        Ok(())
+    }
+
+    /// [MetaEngine::set_lk] sets a file range lock on given file.
+    pub async fn set_lk(
+        &self,
+        ctx: &MetaContext,
+        inode: Ino,
+        owner: u64,
+        block: bool,
+        ltype: libc::c_int,
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
+        debug!(
+            "set_lk with inode {:?}, owner {:?}, block {:?}, ltype {:?}, start {:?}, end {:?}",
+            inode, owner, block, ltype, start, end
+        );
+        Ok(())
+    }
 }
 
 pub fn access(ctx: &MetaContext, inode: Ino, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
@@ -1277,7 +1398,7 @@ mod tests {
 
         let meta_engine = MetaEngine {
             config: MetaConfig::default(),
-            format: RwLock::new(Format::default()),
+            format: tokio::sync::RwLock::new(Format::default()),
             root: ROOT_INO,
             operator: op.clone(),
             sub_trash: None,
@@ -1285,6 +1406,7 @@ mod tests {
             dir_parents: DashMap::new(),
             fs_states: Default::default(),
             free_inodes: IdTable::new(op.clone(), Counter::NextInode, INODE_BATCH),
+            free_slices: IdTable::new(op.clone(), Counter::NextSlice, SLICE_ID_BATCH),
             dir_stats: DashMap::new(),
         };
 
