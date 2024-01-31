@@ -146,6 +146,10 @@ impl WriteBuffer {
         self.slice_id = Some(sid);
     }
 
+    pub(crate) fn get_slice_id(&self) -> Option<usize> {
+        self.slice_id
+    }
+
     pub(crate) fn write_at(&mut self, offset: usize, data: &[u8]) -> Result<usize> {
         let expected_write_len = data.len();
         if expected_write_len <= 0 {

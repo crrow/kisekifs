@@ -1,45 +1,50 @@
-use std::default::Default;
-use std::fmt::{Debug, Formatter};
+use std::future::Future;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
+    default::Default,
+    fmt::{Debug, Formatter},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Weak,
     },
 };
 
-use crate::common;
 use dashmap::DashMap;
-use lazy_static::lazy::Lazy;
 use libc::EIO;
 use scopeguard::defer;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::{
     sync::{Mutex, Notify, RwLock},
     time::Instant,
 };
 use tracing::debug;
-use unique_id::sequence::SequenceGenerator;
 use unique_id::Generator;
 
-use crate::vfs::storage::worker::FlushAndReleaseSliceReason;
-use crate::vfs::{
-    err::Result,
-    storage::{
-        cal_chunk_idx, cal_chunk_offset, err::InvalidFHSnafu, worker::WorkerRequest, Engine,
-        EngineConfig, WriteBuffer,
+use crate::meta::engine::MetaEngine;
+use crate::{
+    common,
+    meta::types::Ino,
+    vfs::{
+        err::Result,
+        storage::{
+            cal_chunk_idx, cal_chunk_offset,
+            err::InvalidInoSnafu,
+            worker::{FlushAndReleaseSliceReason, WorkerRequest},
+            Engine, EngineConfig, WriteBuffer,
+        },
+        VFSError, FH,
     },
-    VFSError, FH,
 };
 
 impl Engine {
     /// Creates a new [FileWriter] for the file handle.
-    pub(crate) fn new_file_writer(self: &Arc<Self>, fh: FH) {
+    pub(crate) fn new_file_writer(self: &Arc<Self>, ino: Ino, len: u64) {
         let fw = FileWriter {
-            fh,
+            ino,
             engine: Arc::downgrade(self),
             config: self.config.clone(),
+            length: Arc::new(AtomicUsize::new(len as usize)),
             chunk_writers: Arc::new(Default::default()),
             total_slice_cnt: Arc::new(Default::default()),
             write_cnt: Arc::new(Default::default()),
@@ -49,18 +54,33 @@ impl Engine {
             id_generator: self.id_generator.clone(),
         };
 
-        self.file_writers.insert(fh, Arc::new(fw));
+        self.file_writers.insert(ino, Arc::new(fw));
     }
 
     /// Checks whether the file handle is writable.
-    pub(crate) fn can_write(&self, fh: FH) -> bool {
-        self.file_writers.contains_key(&fh)
+    pub(crate) fn check_file_writer(&self, ino: Ino) -> bool {
+        self.file_writers.contains_key(&ino)
+    }
+
+    pub(crate) fn get_file_writer(&self, ino: Ino) -> Option<Arc<FileWriter>> {
+        self.file_writers.get(&ino).map(|r| r.value().clone())
     }
 
     /// Use the [FileWriter] to write data to the file.
-    pub(crate) async fn write(&self, fh: FH, offset: usize, data: &[u8]) -> Result<usize> {
-        let fw = self.file_writers.get(&fh).context(InvalidFHSnafu { fh })?;
+    pub(crate) async fn write(
+        self: &Arc<Self>,
+        ino: Ino,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<usize> {
+        debug!("write {} bytes to ino {}", data.len(), ino);
+        let fw = self
+            .file_writers
+            .get(&ino)
+            .context(InvalidInoSnafu { ino })?;
         let write_len = fw.write(offset, data).await?;
+        self.truncate_reader(ino, fw.get_length());
+
         Ok(write_len)
     }
 
@@ -69,6 +89,8 @@ impl Engine {
         todo!()
     }
 }
+
+pub(crate) type FileWritersRef = Arc<DashMap<Ino, Arc<FileWriter>>>;
 
 /// [FileWriter] is responsible for writing data to the file,
 /// and flushing the data to the backend object storage.
@@ -83,9 +105,10 @@ impl Engine {
 /// For [FileWriter::write], we can have multiple write on it at the same time,
 /// as long as they write to different slices.
 pub(crate) struct FileWriter {
-    fh: FH,
+    ino: Ino,
     engine: Weak<Engine>,
     config: Arc<EngineConfig>,
+    length: Arc<AtomicUsize>,
     // chunks that are being written.
     chunk_writers: Arc<DashMap<usize, Arc<ChunkWriter>>>,
     // total slice count is used to count the number of slices.
@@ -151,15 +174,25 @@ impl FileWriter {
             }
         }
 
+        let len = self.length.load(Ordering::Acquire);
+        if offset + write_len > len {
+            self.length.store(offset + write_len, Ordering::Release);
+        }
         Ok(write_len)
     }
 
     pub(crate) async fn do_flush(&self) -> Result<()> {
+        debug!(
+            "do flush on {}, length: {}",
+            self.ino,
+            self.length.load(Ordering::Acquire)
+        );
         defer!(self.notify_write.notify_one();); // then we notify the write thread.
         defer!(self.notify_flush.notify_one();); // then we notify the flush thread.
         defer!(self.flushing_cnt.fetch_sub(1, Ordering::AcqRel);); // we first sub,
 
         // wait until the last manually flush finished.
+        // TODO: we may should cancel the unfinished flush.
         while self.flushing_cnt.fetch_add(1, Ordering::AcqRel) != 0 {
             // wait for the last flush job to notify me.
             self.notify_flush.notified().await;
@@ -171,7 +204,6 @@ impl FileWriter {
             self.notify_flush.notified().await;
         }
 
-        let chunk_writers_ref = self.chunk_writers.clone();
         while !self.chunk_writers.is_empty() {
             let handles = self
                 .chunk_writers
@@ -205,7 +237,7 @@ impl FileWriter {
     fn get_chunk_writer(&self, idx: usize) -> Arc<ChunkWriter> {
         let c = self.chunk_writers.entry(idx).or_insert_with(|| {
             Arc::new(ChunkWriter::new(
-                self.fh,
+                self.ino,
                 self.engine.clone(),
                 self.config.clone(),
                 idx,
@@ -218,6 +250,10 @@ impl FileWriter {
 
     pub(crate) fn find_chunk_writer(&self, idx: usize) -> Option<Arc<ChunkWriter>> {
         self.chunk_writers.get(&idx).map(|r| r.value().clone())
+    }
+
+    pub(crate) fn get_length(&self) -> usize {
+        self.length.load(Ordering::Acquire)
     }
 }
 
@@ -274,8 +310,8 @@ fn find_write_location(
 pub(crate) struct ChunkWriter {
     engine: Weak<Engine>,
     engine_config: Arc<EngineConfig>,
-    // which fh ?
-    fh: FH,
+    // which inode?
+    ino: Ino,
     // the chunk_idx of this chunk.
     chunk_idx: usize,
     // current length of the chunk, which should be smaller
@@ -294,7 +330,7 @@ pub(crate) struct ChunkWriter {
 
 impl ChunkWriter {
     fn new(
-        fh: FH,
+        ino: Ino,
         engine: Weak<Engine>,
         engine_config: Arc<EngineConfig>,
         chunk_idx: usize,
@@ -302,9 +338,9 @@ impl ChunkWriter {
         seq_generator: sonyflake::Sonyflake,
     ) -> ChunkWriter {
         ChunkWriter {
+            ino,
             engine,
             engine_config,
-            fh,
             chunk_idx,
             length: 0,
             slices: Mutex::new(BTreeMap::new()),
@@ -335,7 +371,7 @@ impl ChunkWriter {
             let engine = self.engine.upgrade().expect("engine should not be dropped");
             engine
                 .submit_request(WorkerRequest::new_commit_chunk_request(
-                    self.fh,
+                    self.ino,
                     self.chunk_idx,
                 ))
                 .await;
@@ -378,7 +414,7 @@ impl ChunkWriter {
         let seq = self.seq_generator.next_id().expect("generate seq failed");
         let sw = Arc::new(SliceWriter {
             internal_seq: seq,
-            slice_id: RwLock::new(None),
+            slice_id_prepared: AtomicBool::new(false),
             chunk_start_offset: chunk_offset,
             write_buffer: RwLock::new(engine.new_write_buffer()),
             frozen: Arc::new(AtomicBool::new(false)),
@@ -393,7 +429,7 @@ impl ChunkWriter {
     async fn submit_flush_block_req(self: &Arc<Self>, sw: &Arc<SliceWriter>, flush_to: usize) {
         let e = self.engine.upgrade().expect("engine should not be dropped");
         e.submit_request(WorkerRequest::new_flush_block_request(
-            self.fh,
+            self.ino,
             self.chunk_idx,
             sw.internal_seq,
             flush_to,
@@ -409,7 +445,7 @@ impl ChunkWriter {
         let e = self.engine.upgrade().expect("engine should not be dropped");
         sw.freeze(); // freeze this slice, make others cannot write to it.
         e.submit_request(WorkerRequest::new_flush_and_release_slice_request(
-            self.fh,
+            self.ino,
             self.chunk_idx,
             sw.internal_seq,
             reason,
@@ -420,9 +456,11 @@ impl ChunkWriter {
     async fn do_flush(self: &Arc<Self>) -> Result<()> {
         let mut guard = self.slices.lock().await;
         let mut need_remove = vec![];
+        let engine = self.engine.upgrade().expect("engine should not be dropped");
         for (_, sw) in guard.iter() {
             if !sw.frozen() {
                 sw.freeze();
+                sw.prepare_slice_id(engine.meta_engine.clone()).await?;
                 sw.do_flush_and_release().await?;
             }
             if sw.done.load(Ordering::Acquire) {
@@ -451,8 +489,10 @@ impl ChunkWriter {
 pub(crate) struct SliceWriter {
     // the internal seq id.
     internal_seq: u64,
-    // the slice id.
-    slice_id: RwLock<Option<usize>>,
+
+    // did we prepare the slice id?
+    slice_id_prepared: AtomicBool,
+
     // The chunk offset.
     chunk_start_offset: usize,
     // the underlying write buffer.
@@ -500,7 +540,12 @@ impl SliceWriter {
     }
 
     async fn do_flush_and_release(self: &Arc<Self>) -> Result<()> {
+        debug!("do flush and release on {}", self.internal_seq);
         let mut guard = self.write_buffer.write().await;
+        if guard.length() == 0 {
+            return Ok(());
+        }
+
         guard.finish()?;
         self.done.store(true, Ordering::Release);
         Ok(())
@@ -509,6 +554,27 @@ impl SliceWriter {
     pub(crate) async fn do_flush_to(self: &Arc<Self>, offset: usize) -> Result<()> {
         let mut guard = self.write_buffer.write().await;
         guard.flush_to(offset)?;
+        Ok(())
+    }
+
+    async fn prepare_slice_id(self: &Arc<Self>, meta_engine: Arc<MetaEngine>) -> Result<()> {
+        if !self.slice_id_prepared.load(Ordering::Acquire) {
+            let guard = self.write_buffer.read().await;
+            if let None = guard.get_slice_id() {
+                drop(guard);
+                if self.slice_id_prepared.load(Ordering::Acquire) {
+                    // load again
+                    return Ok(());
+                }
+                let mut write_guard = self.write_buffer.write().await;
+                if write_guard.get_slice_id().is_none() {
+                    let sid = meta_engine.next_slice_id().await?;
+                    debug!("assign slice id {} to slice {}", sid, self.internal_seq);
+                    write_guard.set_slice_id(sid);
+                }
+                self.slice_id_prepared.store(true, Ordering::Release);
+            }
+        }
         Ok(())
     }
 }
@@ -544,15 +610,15 @@ mod tests {
         }
 
         impl TestCase {
-            async fn run(&self, fh: FH, data_engine: Arc<Engine>) {
-                data_engine.new_file_writer(fh);
+            async fn run(&self, ino: Ino, data_engine: Arc<Engine>) {
+                data_engine.new_file_writer(ino, 0);
                 let locations = find_write_location(
                     data_engine.config.chunk_size,
                     self.offset,
                     self.data.len(),
                 );
                 assert_eq!(locations, self.want);
-                let write_len = data_engine.write(fh, self.offset, &self.data).await;
+                let write_len = data_engine.write(ino, self.offset, &self.data).await;
                 assert!(write_len.is_ok());
                 assert_eq!(write_len.unwrap(), self.data.len());
             }
@@ -627,7 +693,7 @@ mod tests {
                 ],
             },
         ] {
-            i.run(1, engine.clone()).await;
+            i.run(Ino(1), engine.clone()).await;
         }
     }
 }

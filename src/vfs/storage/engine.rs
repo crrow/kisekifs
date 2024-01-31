@@ -1,21 +1,26 @@
-use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::{
+    fmt::{Debug, Formatter},
+    sync::Arc,
+    time::SystemTime,
+};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::meta::types::Ino;
-use crate::vfs::storage::scheduler::BackgroundTaskPool;
-use crate::vfs::storage::worker::Worker;
-use crate::vfs::storage::ObjectSto;
 use crate::{
-    meta::engine::MetaEngine,
+    meta::{engine::MetaEngine, types::Ino},
     vfs::{
         storage::{
-            buffer::ReadBuffer, err::Result, sto::StoEngine, worker, writer::FileWriter,
-            WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
+            buffer::ReadBuffer,
+            err::Result,
+            reader::FileReadersRef,
+            scheduler::BackgroundTaskPool,
+            sto::StoEngine,
+            worker,
+            worker::Worker,
+            writer::{FileWriter, FileWritersRef},
+            ObjectSto, WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
         },
         FH,
     },
@@ -77,15 +82,14 @@ fn divide_num_cpus(divisor: usize) -> usize {
     (cores + divisor - 1) / divisor
 }
 
-pub(crate) type FileWritersRef = Arc<DashMap<FH, Arc<FileWriter>>>;
-
 /// The core logic of the storage engine which support the vfs.
 pub(crate) struct Engine {
     pub(crate) config: Arc<Config>,
     object_sto: Arc<dyn StoEngine>,
-    meta_engine: Arc<MetaEngine>,
+    pub(crate) meta_engine: Arc<MetaEngine>,
     workers: Worker,
     pub(crate) file_writers: FileWritersRef,
+    pub(crate) file_readers: FileReadersRef,
     pub(crate) id_generator: sonyflake::Sonyflake,
 }
 
@@ -112,6 +116,7 @@ impl Engine {
             meta_engine,
             workers: worker,
             file_writers,
+            file_readers: Arc::new(DashMap::new()),
             id_generator,
         }
     }
@@ -143,8 +148,9 @@ impl Engine {
 
 impl Engine {
     pub(crate) fn get_length(self: &Arc<Self>, ino: Ino) -> u64 {
-        debug!("get_length do nothing");
-        0
+        self.file_writers
+            .get(&ino)
+            .map_or(0, |w| w.value().get_length() as u64)
     }
 
     pub(crate) fn update_mtime(self: &Arc<Self>, ino: Ino, mtime: SystemTime) -> Result<()> {

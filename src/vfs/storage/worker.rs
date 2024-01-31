@@ -17,19 +17,17 @@ mod listener;
 pub(crate) use listener::WorkerListener;
 mod request;
 
-pub(crate) use request::FlushAndReleaseSliceReason;
-pub(crate) use request::WorkerRequest;
-use std::collections::{HashMap, HashSet};
-
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
-use crate::common;
-use crate::vfs::FH;
 use dashmap::DashMap;
 use itertools::Itertools;
+pub(crate) use request::{FlushAndReleaseSliceReason, WorkerRequest};
 use snafu::{ensure, ResultExt};
 use tokio::{
     sync::{
@@ -41,14 +39,19 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::vfs::storage::engine::FileWritersRef;
-use crate::vfs::storage::worker::request::{FlushAndReleaseSliceRequest, FlushBlockRequest};
-use crate::vfs::storage::writer::FileWriter;
-use crate::vfs::storage::{
-    engine::Config as EngineConfig,
-    err::{JoinSnafu, Result, WorkerStoppedSnafu},
-    scheduler::BackgroundTaskPoolRef,
-    worker::listener::EventListenerRef,
+use crate::{
+    common,
+    meta::types::Ino,
+    vfs::{
+        storage::{
+            engine::Config as EngineConfig,
+            err::{JoinSnafu, Result, WorkerStoppedSnafu},
+            scheduler::BackgroundTaskPoolRef,
+            worker::request::{FlushAndReleaseSliceRequest, FlushBlockRequest},
+            writer::{FileWriter, FileWritersRef},
+        },
+        FH,
+    },
 };
 
 /// Identifier for a worker.
@@ -215,7 +218,7 @@ impl WorkerLoop {
     ///
     /// We should drain the buffer.
     async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) {
-        let mut fb_map: HashMap<(FH, usize, u64), usize> = HashMap::new();
+        let mut fb_map: HashMap<(Ino, usize, u64), usize> = HashMap::new();
         let mut fr_vec = Vec::with_capacity(buffer.capacity());
         for wr in buffer.drain(..) {
             match wr {
@@ -228,7 +231,7 @@ impl WorkerLoop {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
                 WorkerRequest::FlushBlock(fb) => {
-                    let key3 = (fb.fh, fb.chunk_idx, fb.internal_slice_seq);
+                    let key3 = (fb.ino, fb.chunk_idx, fb.internal_slice_seq);
                     if let Some(old) = fb_map.get(&key3) {
                         if fb.flush_to > *old {
                             fb_map.insert(key3, fb.flush_to);
@@ -239,7 +242,7 @@ impl WorkerLoop {
                 }
                 WorkerRequest::FlushReleaseSlice(fl) => {
                     // remove the single block flush req, since we still need to flush the full one.
-                    fb_map.remove(&(fl.fh, fl.chunk_idx, fl.internal_slice_seq));
+                    fb_map.remove(&(fl.ino, fl.chunk_idx, fl.internal_slice_seq));
                 }
                 WorkerRequest::CommitChunk(cc) => {
                     // TODO:
@@ -252,16 +255,16 @@ impl WorkerLoop {
         self.handle_flush_and_release(fr_vec.into_iter()).await;
     }
 
-    async fn handle_flush_block_reqs(&self, fb_reqs: HashMap<(FH, usize, u64), usize>) {
-        let mut cache: HashMap<FH, Arc<FileWriter>> = HashMap::new();
+    async fn handle_flush_block_reqs(&self, fb_reqs: HashMap<(Ino, usize, u64), usize>) {
+        let mut cache: HashMap<Ino, Arc<FileWriter>> = HashMap::new();
 
         let mut handles = Vec::new();
-        for ((fh, chunk_idx, slice_seq), flush_to) in fb_reqs.into_iter() {
-            let fw = if let Some(fw) = cache.get(&fh) {
+        for ((ino, chunk_idx, slice_seq), flush_to) in fb_reqs.into_iter() {
+            let fw = if let Some(fw) = cache.get(&ino) {
                 fw.clone()
             } else {
-                let fw = self.file_writers.get(&fh).unwrap().clone();
-                cache.insert(fh, fw.clone());
+                let fw = self.file_writers.get(&ino).unwrap().clone();
+                cache.insert(ino, fw.clone());
                 fw
             };
 

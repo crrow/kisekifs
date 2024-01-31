@@ -1,6 +1,6 @@
 use snafu::{Location, Snafu};
 
-use crate::vfs::FH;
+use crate::{meta::types::Ino, vfs::FH};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -29,11 +29,17 @@ pub(crate) enum StorageError {
         location: Location,
     },
     // ====VFS====
-    #[snafu(display("invalid file handle {}", fh))]
-    InvalidFH {
-        fh: FH,
+    #[snafu(display("invalid file handle {}", ino))]
+    InvalidIno {
+        ino: Ino,
         #[snafu(implicit)]
         location: Location,
+    },
+    #[snafu(display("failed to acquire next slice id"))]
+    FailedToGetNextSliceID {
+        #[snafu(implicit)]
+        location: Location,
+        source: opendal::Error,
     },
 }
 

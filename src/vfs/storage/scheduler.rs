@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use once_cell::sync::Lazy;
 use std::{
     future::Future,
     pin::Pin,
@@ -22,9 +21,11 @@ use std::{
     },
 };
 
-use crate::common;
+use once_cell::sync::Lazy;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+use crate::common;
 
 #[derive(Debug, Ord, PartialOrd, PartialEq, Eq, Clone, Copy)]
 #[repr(u8)]

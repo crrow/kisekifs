@@ -63,7 +63,7 @@ impl KisekiVFS {
             }),
             libc::O_WRONLY | libc::O_RDWR => Handle::new_with(fh, inode, |h| {
                 h.reader = Some(self.reader.open(inode, length));
-                self.data_engine.new_file_writer(h.fh);
+                self.data_engine.new_file_writer(inode, length);
             }),
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
         };
@@ -96,6 +96,10 @@ pub(crate) struct Handle {
     notify: Arc<Notify>,
     timeout: Duration,
 
+    pub(crate) locks: u8,
+    flock_owner: u64,          // kernel 3.1- does not pass lock_owner in release()
+    pub(crate) ofd_owner: u64, // OFD lock
+
     reader: Option<Weak<FileReader>>, // TODO: how to make it concurrent safe ?
 }
 
@@ -111,6 +115,9 @@ impl Handle {
             notify,
             readers: Default::default(),
             timeout: Duration::from_secs(1),
+            locks: 0,
+            flock_owner: 0,
+            ofd_owner: 0,
             reader: None,
         }
     }
@@ -122,6 +129,9 @@ impl Handle {
             notify: Arc::new(Notify::new()),
             readers: Default::default(),
             timeout: Duration::from_secs(1),
+            locks: 0,
+            flock_owner: 0,
+            ofd_owner: 0,
             reader: None,
         };
         f(&mut h);
