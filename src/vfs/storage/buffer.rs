@@ -1,3 +1,4 @@
+use scopeguard::defer;
 use std::{
     cmp::{max, min},
     io::{Cursor, Write},
@@ -283,6 +284,7 @@ impl WriteBuffer {
     /// Try to flush the buffer to the given offset.
     pub(crate) fn flush_to(&mut self, offset: usize) -> Result<()> {
         debug_assert!(self.flushed_length <= offset);
+        defer!(debug!("flushing buffer succeed {offset}"););
 
         self.block_slots
             .iter_mut()

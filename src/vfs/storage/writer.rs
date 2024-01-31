@@ -87,6 +87,7 @@ impl Engine {
             .file_writers
             .get(&ino)
             .context(InvalidInoSnafu { ino })?;
+        debug!("get file write success");
         let write_len = fw.write(offset, data).await?;
         self.truncate_reader(ino, fw.get_length());
 
@@ -141,6 +142,7 @@ pub(crate) struct FileWriter {
 impl FileWriter {
     pub(crate) async fn write(self: &Arc<Self>, offset: usize, data: &[u8]) -> Result<usize> {
         let write_location = find_write_location(self.config.chunk_size, offset, data.len());
+        debug!("write location: {:?}", write_location);
 
         self.write_cnt.fetch_add(1, Ordering::AcqRel);
         defer!(self.notify_write.notify_one(););
@@ -424,6 +426,7 @@ impl ChunkWriterBackgroundTask {
                     None => continue,            // no slice, we can continue.
                     Some((_, sw)) => sw.clone(), // we release the read guard here.
                 };
+                drop(read_guard);
 
                 let mut wait_possible_writer = tokio::time::interval(Duration::from_millis(100));
                 while !sw.done.load(Ordering::Acquire) {
@@ -541,13 +544,15 @@ impl ChunkWriter {
         self.write_cnt.fetch_add(1, Ordering::AcqRel);
         defer!(self.write_cnt.fetch_sub(1, Ordering::AcqRel););
 
+        debug!("write {} bytes to chunk {}", data.len(), self.chunk_idx);
         let slice = self.find_writable_slice(chunk_pos).await;
+        debug!("write to slice {}", slice.internal_seq);
         let (write_len, total_write_len, flushed_len) = slice
             .write(chunk_pos - slice.chunk_start_offset, data)
             .await?;
 
         if total_write_len == self.engine_config.chunk_size {
-            self.submit_flush_and_release_slice_req(&slice, FlushAndReleaseSliceReason::Full)
+            self.submit_flush_and_release_slice_req(slice, FlushAndReleaseSliceReason::Full)
                 .await;
         } else {
             self.submit_flush_block_req(&slice, total_write_len).await;
@@ -567,9 +572,12 @@ impl ChunkWriter {
     // we should try to flush the slice to the background, and
     // release the memory.
     async fn find_writable_slice(self: &Arc<Self>, chunk_offset: usize) -> Arc<SliceWriter> {
+        debug!("try to find writable slice for chunk {}", self.chunk_idx);
         let read_guard = self.slices.read().await;
+        debug!("get slices lock succeed");
         let mut iter_cnt = 0;
         for (seq, sw) in read_guard.iter().rev() {
+            let sw = sw.clone();
             if !sw.frozen() {
                 let (flushed, length) = sw.get_flushed_length_and_total_write_length().await;
                 if chunk_offset >= sw.chunk_start_offset + flushed
@@ -580,7 +588,7 @@ impl ChunkWriter {
                 }
                 if iter_cnt > 3 {
                     self.submit_flush_and_release_slice_req(
-                        sw,
+                        sw.clone(),
                         FlushAndReleaseSliceReason::RandomWrite,
                     )
                     .await;
@@ -588,6 +596,8 @@ impl ChunkWriter {
             }
             iter_cnt += 1;
         }
+        drop(read_guard);
+
         let engine = self.engine.upgrade().expect("engine should not be dropped");
         self.total_slice_counter.fetch_add(1, Ordering::AcqRel);
         let seq = self.seq_generator.next_id().expect("generate seq failed");
@@ -622,7 +632,7 @@ impl ChunkWriter {
 
     async fn submit_flush_and_release_slice_req(
         self: &Arc<Self>,
-        sw: &Arc<SliceWriter>,
+        sw: Arc<SliceWriter>,
         reason: FlushAndReleaseSliceReason,
     ) {
         let e = self.engine.upgrade().expect("engine should not be dropped");
