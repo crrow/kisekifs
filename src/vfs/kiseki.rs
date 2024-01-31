@@ -603,14 +603,12 @@ impl KisekiVFS {
         }
 
         let len = self.data_engine.write(ino, offset, data).await?;
-
-        // let write_guard = handle.acquire_write_lock().await?;
-        // let write_length = handle.write(&write_guard, offset as u64, data)?;
         self.reader.truncate(ino, self.data_engine.get_length(ino));
         Ok(len as u32)
     }
 
     pub async fn flush(&self, ctx: &MetaContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
+        debug!("do flush manually on ino {:?} fh {:?}", ino, fh);
         let mut h = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
         if ino.is_special() {
             return Ok(());

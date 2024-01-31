@@ -47,7 +47,7 @@ use crate::{
             engine::Config as EngineConfig,
             err::{JoinSnafu, Result, WorkerStoppedSnafu},
             scheduler::BackgroundTaskPoolRef,
-            worker::request::{FlushAndReleaseSliceRequest, FlushBlockRequest},
+            worker::request::{CommitChunkRequest, FlushAndReleaseSliceRequest, FlushBlockRequest},
             writer::{FileWriter, FileWritersRef},
         },
         FH,
@@ -87,6 +87,7 @@ impl WorkerStarter {
             task_pool_ref: self.task_pool_ref.clone(),
             listener: self.listener,
             file_writers: self.file_writers,
+            commit_chunk_handles: Default::default(),
         };
 
         let handle = common::runtime::spawn(async move {
@@ -179,6 +180,7 @@ pub(crate) struct WorkerLoop {
     /// Event listener
     listener: WorkerListener,
     file_writers: FileWritersRef,
+    commit_chunk_handles: HashMap<(Ino, usize), JoinHandle<()>>,
 }
 
 impl WorkerLoop {
@@ -245,8 +247,7 @@ impl WorkerLoop {
                     fb_map.remove(&(fl.ino, fl.chunk_idx, fl.internal_slice_seq));
                 }
                 WorkerRequest::CommitChunk(cc) => {
-                    // TODO:
-                    debug!("commit chunk: {:?}", cc);
+                    self.handle_commit_chunk_req(cc).await;
                 }
             }
         }
@@ -288,9 +289,30 @@ impl WorkerLoop {
         fl_reqs: impl Iterator<Item = FlushAndReleaseSliceRequest>,
     ) {
         for fl_req in fl_reqs {
-            // TODO: do really flush and release
+            // TODO: do really flush and release buffer.
             debug!("flush and release: {:?}", fl_req);
         }
+    }
+
+    async fn handle_commit_chunk_req(&mut self, req: CommitChunkRequest) {
+        debug!("ino: {} commit chunk: {}", req.ino, req.chunk_idx);
+        // if self
+        //     .commit_chunk_handles
+        //     .contains_key(&(req.ino, req.chunk_idx))
+        // {
+        //     return;
+        // }
+        //
+        // if let Some(fw) = self.file_writers.get(&req.ino) {
+        //     let fw = fw.value().clone();
+        //     if let Some(cw) = fw.find_chunk_writer(req.chunk_idx) {
+        //         let handle = common::runtime::spawn(async move {
+        //             let read_guard = cw.slices.read().await;
+        //         });
+        //         self.commit_chunk_handles
+        //             .insert((req.ino, req.chunk_idx), handle);
+        //     }
+        // }
     }
 }
 

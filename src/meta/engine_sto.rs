@@ -20,6 +20,7 @@ use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};
 
+use crate::meta::types::Slice;
 use crate::meta::{
     engine::{Counter, MetaEngine},
     err::*,
@@ -30,6 +31,30 @@ use crate::meta::{
 // TODO: create a new type for maintain the persistent logic.
 
 impl MetaEngine {
+    pub(crate) async fn update_parent_stats(
+        &self,
+        inode: Ino,
+        parent: Ino,
+        length: i64,
+        space: i64,
+    ) -> Result<()> {
+        if length == 0 && space == 0 {
+            return Ok(());
+        }
+
+        self.update_mem_fs_stats(space, 0);
+        let fmt = self.format.read().await;
+        if !fmt.dir_stats {
+            return Ok(());
+        }
+        if parent.0 > 0 {
+            self.update_mem_dir_stat(parent, length, space, 0).await?;
+        }
+
+        // WTF
+
+        Ok(())
+    }
     pub(crate) fn update_mem_fs_stats(&self, space: i64, inodes: i64) {
         self.fs_states.new_space.fetch_add(space, Ordering::AcqRel);
         self.fs_states
@@ -43,7 +68,7 @@ impl MetaEngine {
         space: i64,
         inodes: i64,
     ) -> Result<()> {
-        let guard = self.format.read().unwrap();
+        let guard = self.format.read().await;
         if !guard.dir_stats {
             return Ok(());
         }
@@ -178,7 +203,7 @@ impl MetaEngine {
     }
 
     pub(crate) async fn sto_set_sym(&self, inode: Ino, path: String) -> Result<()> {
-        let sym_key = generate_sto_sym_key_str(inode);
+        let sym_key = generate_sto_sym_key(inode);
         let sym_buf = path.into_bytes();
         self.operator
             .write(&sym_key, sym_buf)
@@ -188,7 +213,7 @@ impl MetaEngine {
     }
 
     pub(crate) async fn sto_set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()> {
-        let dir_stat_key = generate_sto_dir_stat_key_str(inode);
+        let dir_stat_key = generate_sto_dir_stat_key(inode);
         let dir_stat_buf = dir_stat.encode();
         self.operator
             .write(&dir_stat_key, dir_stat_buf)
@@ -209,7 +234,7 @@ impl MetaEngine {
         } else {
             return Err(MetaError::ErrMetaHasNotBeenInitializedYet {});
         };
-        let mut guard = self.format.write().unwrap();
+        let mut guard = self.format.write().await;
         *guard = format.clone();
         Ok(format)
     }
@@ -250,35 +275,57 @@ impl MetaEngine {
             .context(ErrFailedToDoCounterSnafu)?;
         Ok(v)
     }
+
+    pub(crate) async fn sto_get_chunk_info(
+        &self,
+        inode: Ino,
+        chunk_idx: u32,
+    ) -> Result<Option<Vec<u8>>> {
+        let chunk_key = generate_chunk_key_str(inode, chunk_idx);
+        match self.operator.read(&chunk_key).await {
+            Ok(buf) => Ok(Some(buf)),
+            Err(e) => {
+                if e.kind() == NotFound {
+                    Ok(None)
+                } else {
+                    Err(e).context(ErrFailedToReadFromStoSnafu {
+                        key: chunk_key.to_string(),
+                    })
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn sto_set_chunk_info(
+        &self,
+        inode: Ino,
+        chunk_idx: u32,
+        val: Vec<u8>,
+    ) -> Result<()> {
+        let chunk_key = generate_chunk_key_str(inode, chunk_idx as u32);
+        self.operator
+            .write(&chunk_key, val)
+            .await
+            .context(ErrFailedToWriteToStoSnafu {
+                key: chunk_key.to_string(),
+            })?;
+        Ok(())
+    }
 }
 
-pub(crate) fn generate_sto_sym_key_str(inode: Ino) -> String {
-    let mut buf = vec![0u8; 10];
-    buf.write_u8('A' as u8).unwrap();
-    buf.write_u64::<LittleEndian>(inode.0).unwrap();
-    buf.write_u8('S' as u8).unwrap();
-    String::from_utf8(buf).unwrap()
+pub(crate) fn generate_sto_sym_key(inode: Ino) -> String {
+    format!("A{:0>8}S", inode.0)
 }
-pub(crate) fn generate_sto_dir_stat_key_str(inode: Ino) -> String {
-    let mut buf = vec![0u8; 10];
-    buf.write_u8('U' as u8).unwrap();
-    buf.write_u64::<LittleEndian>(inode.0).unwrap();
-    buf.write_u8('I' as u8).unwrap();
-    String::from_utf8(buf).unwrap()
+pub(crate) fn generate_sto_dir_stat_key(inode: Ino) -> String {
+    format!("U{:0>8}I", inode.0)
 }
 // key: AiiiiiiiiD/{name}
 // key-len: 11 + name.len()
-pub(crate) fn generate_entry_key(parent: Ino, name: &str) -> Vec<u8> {
-    let mut buf = vec![0u8; 11 + name.len()];
-    buf.write_u8('A' as u8).unwrap();
-    buf.write_u64::<LittleEndian>(parent.0).unwrap();
-    buf.write_u8('D' as u8).unwrap();
-    buf.write_u8('/' as u8).unwrap();
-    buf.extend_from_slice(name.as_bytes());
-    buf
-}
 pub(crate) fn generate_sto_entry_key_str(parent: Ino, name: &str) -> String {
     let str = format!("A{:0>8}D/{}", parent.0, name);
     debug!("generate entry key str: {str}");
     str
+}
+pub(crate) fn generate_chunk_key_str(ino: Ino, chunk_idx: u32) -> String {
+    format!("A{:0>8}C/{}", ino, chunk_idx)
 }
