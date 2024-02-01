@@ -1,11 +1,10 @@
-use std::pin::Pin;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
     default::Default,
     fmt::{Debug, Formatter},
     future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Weak,
@@ -28,15 +27,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use unique_id::Generator;
 
-use crate::meta::engine::SliceInfo;
 use crate::{
     common, meta,
     meta::{engine::MetaEngine, types::Ino},
     vfs::{
-        err::Result,
+        err::{InvalidInoSnafu, Result},
         storage::{
             cal_chunk_idx, cal_chunk_offset,
-            err::InvalidInoSnafu,
             worker::{FlushAndReleaseSliceReason, WorkerRequest},
             Engine, EngineConfig, WriteBuffer,
         },
@@ -95,7 +92,7 @@ impl Engine {
     }
 
     /// Use the [FileWriter] to flush data to the backend object storage.
-    pub(crate) async fn flush(&self, fh: FH) -> crate::vfs::storage::err::Result<usize> {
+    pub(crate) async fn flush(&self, fh: FH) -> Result<usize> {
         todo!()
     }
 }
@@ -773,9 +770,9 @@ impl SliceWriter {
         Ok(())
     }
 
-    async fn to_meta_slice(self: &Arc<Self>) -> meta::SliceInfo {
+    async fn to_meta_slice(self: &Arc<Self>) -> meta::SliceView {
         let guard = self.write_buffer.read().await;
-        meta::SliceInfo {
+        meta::SliceView {
             id: guard.get_slice_id().unwrap() as u64,
             size: guard.length() as u32, // WHAT FUCK IS IT
             off: 0,

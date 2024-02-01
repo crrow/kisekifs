@@ -1,15 +1,17 @@
-use scopeguard::defer;
 use std::{
     cmp::{max, min},
     io::{Cursor, Write},
     sync::Arc,
 };
 
-use snafu::ResultExt;
+use scopeguard::defer;
+use snafu::{ensure, ResultExt};
 use tracing::debug;
 
-use super::err::*;
-use crate::vfs::storage::{sto::StoEngine, EngineConfig};
+use crate::vfs::{
+    err::{EOFSnafu, Result, StorageError},
+    storage::{sto::StoEngine, EngineConfig},
+};
 
 pub(crate) struct ReadBuffer {
     config: Arc<EngineConfig>,
@@ -233,9 +235,8 @@ impl WriteBuffer {
         if expected_read_len <= 0 {
             return Ok(0);
         }
-        if offset >= self.length {
-            return Err(StorageError::EOF);
-        }
+
+        ensure!(offset >= self.length, EOFSnafu);
 
         debug!(
             "reading buffer, at offset: {}, expect read len: {}",
@@ -267,7 +268,7 @@ impl WriteBuffer {
 
             match block {
                 Block::Empty => {
-                    return Err(StorageError::EOF);
+                    return Err(StorageError::EOF)?;
                 }
                 Block::Occupy(buf) => {
                     dst[total_read_len..(total_read_len + read_len)]

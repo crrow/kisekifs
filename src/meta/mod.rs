@@ -20,7 +20,7 @@ use fuser::Request;
 mod config;
 pub use config::{Compression, Format, MetaConfig};
 pub mod engine;
-pub use engine::SliceInfo;
+pub use engine::SliceView;
 mod err;
 pub use err::MetaError;
 mod engine_quota;
@@ -171,6 +171,16 @@ impl<'a> From<&'a fuser::Request<'a>> for MetaContext {
 }
 
 impl MetaContext {
+    pub(crate) fn background() -> Self {
+        Self {
+            gid: 1,
+            gid_list: vec![],
+            uid: 1,
+            pid: 1,
+            check_permission: false,
+            start_at: Instant::now(),
+        }
+    }
     pub fn contains_gid(&self, gid: u32) -> bool {
         self.gid_list.contains(&gid)
     }

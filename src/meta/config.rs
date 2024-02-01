@@ -146,6 +146,27 @@ impl MetaConfig {
         info!("open {} successfully.", &m.info());
         Ok(m)
     }
+    pub(crate) fn test_config() -> Self {
+        Self {
+            scheme: Scheme::Memory,
+            scheme_config: HashMap::new(),
+            strict: true,
+            retries: 10,
+            max_deletes: 2,
+            skip_dir_nlink: 0,
+            case_insensitive: false,
+            read_only: false,
+            no_bg_job: false,
+            open_cache: Duration::default(),
+            open_cache_limit: 0,
+            heartbeat: Duration::from_secs(12),
+            mount_point: PathBuf::new(),
+            sub_dir: None,
+            atime_mode: Default::default(),
+            dir_stat_flush_period: Duration::from_secs(1),
+            skip_dir_mtime: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
