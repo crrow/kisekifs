@@ -3,7 +3,7 @@ use std::{fmt::Debug, sync::Arc};
 use opendal::Operator;
 use snafu::ResultExt;
 
-use super::err::*;
+use crate::vfs::err::{ObjectStorageSnafu, Result};
 
 /// StoEngine is a trait for backend storage engines.
 pub(crate) trait StoEngine: 'static + Debug + Send + Sync {
@@ -38,20 +38,24 @@ impl StoEngine for ObjectSto {
         self.operator
             .blocking()
             .write(key, data)
-            .context(ObjectStorageSnafu)
+            .context(ObjectStorageSnafu)?;
+        Ok(())
     }
 
     fn get(&self, key: &str) -> Result<Vec<u8>> {
-        self.operator
+        let v = self
+            .operator
             .blocking()
             .read(key)
-            .context(ObjectStorageSnafu)
+            .context(ObjectStorageSnafu)?;
+        Ok(v)
     }
 
     fn remove(&self, key: &str) -> Result<()> {
         self.operator
             .blocking()
             .delete(key)
-            .context(ObjectStorageSnafu)
+            .context(ObjectStorageSnafu)?;
+        Ok(())
     }
 }

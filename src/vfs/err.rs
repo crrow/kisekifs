@@ -1,11 +1,70 @@
 use std::time::Duration;
 
 use libc::c_int;
-use snafu::Snafu;
+use snafu::{Location, Snafu};
 
-use crate::{common, common::err::ToErrno, meta::MetaError};
+use crate::{
+    common,
+    common::err::ToErrno,
+    meta::{types::Ino, MetaError},
+    vfs::FH,
+};
 
 // FIXME: its ugly
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub(crate) enum StorageError {
+    #[snafu(display("unexpected end of file"))]
+    EOF,
+    #[snafu(display("out of memory: {source}"))]
+    OOM {
+        source: datafusion_common::DataFusionError,
+    },
+    #[snafu(display("object storage error: {source}"))]
+    ObjectStorageError { source: opendal::Error },
+
+    // ====workers====
+    #[snafu(display("Failed to join handle"))]
+    Join {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Worker {} is stopped", id))]
+    WorkerStopped {
+        id: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    // ====VFS====
+    #[snafu(display("invalid file handle {}", ino))]
+    InvalidIno {
+        ino: Ino,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("failed to acquire next slice id"))]
+    FailedToGetNextSliceID {
+        #[snafu(implicit)]
+        location: Location,
+        source: opendal::Error,
+    },
+    #[snafu(display("this file reader is invalid {ino}, {fh}"))]
+    ThisFileReaderIsClosing {
+        ino: Ino,
+        fh: FH,
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+impl From<StorageError> for VFSError {
+    fn from(value: StorageError) -> Self {
+        VFSError::ErrLIBC { kind: libc::EINTR }
+    }
+}
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]

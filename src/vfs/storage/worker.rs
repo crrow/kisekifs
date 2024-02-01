@@ -43,9 +43,9 @@ use crate::{
     common,
     meta::types::Ino,
     vfs::{
+        err::{JoinSnafu, Result, WorkerStoppedSnafu},
         storage::{
             engine::Config as EngineConfig,
-            err::{JoinSnafu, Result, WorkerStoppedSnafu},
             scheduler::BackgroundTaskPoolRef,
             worker::request::{CommitChunkRequest, FlushAndReleaseSliceRequest, FlushBlockRequest},
             writer::{FileWriter, FileWritersRef},
@@ -127,7 +127,7 @@ impl Worker {
             );
             // Manually set the running flag to false to avoid printing more warning logs.
             self.set_running(false);
-            return WorkerStoppedSnafu { id: self.id }.fail();
+            return WorkerStoppedSnafu { id: self.id }.fail()?;
         }
 
         Ok(())
