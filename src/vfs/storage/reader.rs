@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, Subscriber};
 use vfs::err::{Result, ThisFileReaderIsClosingSnafu};
 
+use crate::common::err::ToErrno;
 use crate::{
     meta::types::Ino,
     vfs,
@@ -192,7 +193,7 @@ impl FileReader {
             internal_seq_id: self.seq_generator.next_id().unwrap(),
             chunk_idx: r.start / self.config.chunk_size,
             range: block,
-            state: AtomicU8::new(SliceReaderState::NEW as u8),
+            state: Arc::new(AtomicU8::new(SliceReaderState::IDLE as u8)),
             last_access: AtomicUsize::new(std::time::Instant::now().elapsed().as_secs() as usize),
             read_buf: RwLock::new(vec![0u8; block_len]), // FIXME: we allocate memory here.
             closing: self.closing.clone(),
@@ -200,9 +201,14 @@ impl FileReader {
         self.read_buffer_usage
             .fetch_add(block_len, Ordering::AcqRel);
 
-        let srbk = SliceReaderBackgroundTask {
-            parent: self.clone(),
+        let mut srbk = SliceReaderBackgroundTask {
+            file_reader: self.clone(),
             slice_reader: sr.clone(),
+            state: sr.state.clone(),
+            try_cnt: 0,
+            max_retry: 60, // FIXME: configuration it
+            do_retry: false,
+            ready_notify: Arc::new(Default::default()),
         };
         let handle = runtime::spawn(async move {
             srbk.run().await;
@@ -260,11 +266,22 @@ type SliceReadersMutMap<'a> = &'a mut BTreeMap<u64, Arc<SliceReader>>;
 //        BREAK ---> INVALID
 #[repr(C)]
 enum SliceReaderState {
-    NEW,
+    /// The basic state of a slice reader, means the FSM does nothing.
+    /// It can transferred to [SliceReaderState::BUSY], or [SliceReaderState::REFRESH].
+    IDLE,
+    /// [SliceReaderState::BUSY] represents we are in reading data process.
     BUSY,
+    /// [SliceReaderState::REFRESH] only works when we need to interrupt the read operation,
+    /// to avoid old data to be read.
     REFRESH,
+    /// [SliceReaderState::BREAK] used for drop the process of FSM.
+    /// Each state should check if someone changed it, when we in the break, we should go to the invalid state.
     BREAK,
+    /// [SliceReaderState::READY] means we actually have the data to read, and we need to notify the waiters.
+    /// When no waiters, we will mark this state to [SliceReaderState::INVALID] to clean up memory.
+    /// When we have waiters, we will mark this state to [SliceReaderState::IDLE] to wait for the next retry.
     READY,
+    /// We need to clean up the associated resources when there is no waiters.
     INVALID,
 }
 impl SliceReaderState {
@@ -276,7 +293,7 @@ impl SliceReaderState {
 impl From<u8> for SliceReaderState {
     fn from(v: u8) -> Self {
         match v {
-            0 => SliceReaderState::NEW,
+            0 => SliceReaderState::IDLE,
             1 => SliceReaderState::BUSY,
             2 => SliceReaderState::REFRESH,
             3 => SliceReaderState::BREAK,
@@ -291,7 +308,7 @@ struct SliceReader {
     internal_seq_id: u64,
     chunk_idx: usize,
     range: Range<usize>,
-    state: AtomicU8,
+    state: Arc<AtomicU8>,
     last_access: AtomicUsize,
     read_buf: RwLock<Vec<u8>>,
     closing: Arc<AtomicBool>,
@@ -309,62 +326,109 @@ impl SliceReader {
 
 /// Each SliceReader will have a background task to refresh the read buffer.
 struct SliceReaderBackgroundTask {
-    parent: Arc<FileReader>,
+    file_reader: Arc<FileReader>,
     slice_reader: Arc<SliceReader>,
+    state: Arc<AtomicU8>,
+    try_cnt: u64,
+    max_retry: u64,
+    do_retry: bool, // runtime status, check if we need to do retry.
+    // notify the read operation that the data is ready to read.
+    ready_notify: Arc<Notify>,
 }
 
 impl SliceReaderBackgroundTask {
-    async fn run(self) {
-        let state = SliceReaderState::from(self.slice_reader.state.load(Ordering::Acquire));
-        if !matches!(state, SliceReaderState::NEW) || self.parent.closing.load(Ordering::Acquire) {
-            debug!(
-                "slice {} reader is not in NEW state, or the file reader {}:{} is closing, skip",
-                self.slice_reader.internal_seq_id, self.parent.inode, self.parent.fh,
-            );
-            self.cleanup_slice_reader();
-            return;
-        }
+    async fn run(&mut self) {
+        while self.do_retry {
+            if self.file_reader.closing.load(Ordering::Acquire) {
+                self.exit_task().await;
+                return;
+            }
 
-        self.slice_reader
-            .state
+            let state = SliceReaderState::from(self.state.load(Ordering::Acquire));
+            match state {
+                SliceReaderState::IDLE => {
+                    self.do_new().await;
+                }
+                SliceReaderState::BUSY => {
+                    // only do_new will transfer to [SliceReaderState::BUSY].
+                }
+                SliceReaderState::REFRESH => {
+                    // REFRESH represents a
+                }
+                SliceReaderState::BREAK => {}
+                SliceReaderState::READY => {
+                    // notify all the waiters.
+                    self.ready_notify.notify_waiters();
+                }
+                SliceReaderState::INVALID => {}
+            }
+        }
+    }
+
+    async fn exit_task(&mut self) {}
+
+    async fn do_new(&mut self) {
+        self.state
             .store(SliceReaderState::BUSY as u8, Ordering::Release);
-        let fl = self.parent.length.load(Ordering::Acquire);
 
         let engine = self
-            .parent
+            .file_reader
             .engine
             .upgrade()
             .expect("engine should not be dropped");
         let meta_engine = engine.meta_engine.clone();
-    }
+        let slice_view = meta_engine
+            .read_slice(self.file_reader.inode, self.slice_reader.chunk_idx)
+            .await;
 
-    // call me before exit the background job.
-    fn cleanup_slice_reader(self) {
-        let sr = self.slice_reader.clone();
-        let mut state = SliceReaderState::from(sr.state.load(Ordering::Acquire));
-        if matches!(state, SliceReaderState::BUSY | SliceReaderState::REFRESH) {
-            state = SliceReaderState::NEW
-        } else if matches!(state, SliceReaderState::BREAK)
-            || self.parent.closing.load(Ordering::Acquire)
-        {
-            state = SliceReaderState::INVALID
+        // check if someone change the state.
+        if !matches!(
+            SliceReaderState::from(self.state.load(Ordering::Acquire)),
+            SliceReaderState::BUSY
+        ) {
+            // someone change the state, go back to the main FSM
+            return;
         }
 
-        match state {
-            SliceReaderState::NEW => self.delay(),
-            SliceReaderState::READY => {
-                // TODO: we need to notify someone
+        let slice_view = match slice_view {
+            Ok(slice_view) => slice_view,
+            Err(e) => {
+                debug!(
+                    "read slice {}:{}:{} failed: {}",
+                    self.file_reader.inode,
+                    self.slice_reader.chunk_idx,
+                    self.slice_reader.internal_seq_id,
+                    e
+                );
+
+                // not found, should not retry.
+                if e.to_errno() == libc::ENOENT {
+                    self.state
+                        .store(SliceReaderState::INVALID as u8, Ordering::Release);
+                    return;
+                }
+
+                // some other error, we need to retry.
+                self.try_cnt += 1;
+                if self.try_cnt >= self.max_retry {
+                    self.do_retry = false;
+                }
+                // wait some time before retry.
+                Self::cal_retry_delay_interval(self.try_cnt).tick().await;
+                return;
             }
-            SliceReaderState::INVALID => {
-                self.parent.delete_slice_reader(sr);
-                // we may need to notify the file reader to close.
-            }
-            _ => return,
-        }
+        };
+
+        return;
     }
 
-    fn delay(&self) {
-        todo!()
+    fn cal_retry_delay_interval(cnt: u64) -> tokio::time::Interval {
+        let duration = if cnt < 30 {
+            std::time::Duration::from_millis(cnt * 300)
+        } else {
+            std::time::Duration::from_secs(10)
+        };
+        tokio::time::interval(duration)
     }
 }
 
