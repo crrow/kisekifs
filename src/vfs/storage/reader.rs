@@ -19,7 +19,7 @@ use vfs::err::{Result, ThisFileReaderIsClosingSnafu};
 
 use crate::common::err::ToErrno;
 use crate::meta::engine::MetaEngine;
-use crate::meta::SliceView;
+use crate::meta::types::Slice;
 use crate::vfs::storage::buffer;
 use crate::vfs::storage::buffer::ReadBuffer;
 use crate::{
@@ -123,11 +123,11 @@ impl FileReader {
             return Ok(0);
         }
 
-        let expected_range = cal_real_read_range(offset, expected_read_len, flen);
+        let expected_range_by_filesize = cal_real_read_range(offset, expected_read_len, flen);
         // maximum read ahead size.
         let max_read_ahead_size = (32 << 10) as usize;
         // check if we need to read head ?
-        if expected_range.start + max_read_ahead_size > flen {
+        if expected_range_by_filesize.start + max_read_ahead_size > flen {
             // currently read range exceeds the range of current file reader.
             let read_ahead_range = if flen < max_read_ahead_size {
                 // just read the whole file.
@@ -139,20 +139,34 @@ impl FileReader {
             // we have some read ahead to do.
             self.read_ahead(read_ahead_range);
         }
+        let real_read_size = expected_range_by_filesize.end - expected_range_by_filesize.start;
+        let mut dst = &mut dst[..real_read_size];
 
-        let real_read_size = expected_range.end - expected_range.start;
-
+        let expected_range_by_chunksize = (expected_range_by_filesize.start % self.config.chunk_size
+            ..expected_range_by_filesize.end % self.config.chunk_size);
         let engine = self.engine.upgrade().expect("engine should not be dropped");
         let meta_engine = engine.meta_engine.clone();
-        let slice_view = meta_engine.read_slice(self.inode, offset).await?;
-        let mut slice_map = HashMap::new();
-        for sv in slice_view.iter() {
-            let rb = slice_map
-                .entry(sv.id)
-                .or_insert_with(|| engine.new_read_buffer(sv.id as usize, sv.size as usize));
 
-            // rb.read_at(offset + sv.off, &mut dst[0..sv.size as usize])?;
-        }
+        // get all slices in the chunk.
+        let slices_in_chunk = meta_engine
+            .read_slice(self.inode, offset / engine.config.chunk_size)
+            .await?;
+
+        // let mut rmap = rangemap::RangeMap::new();
+        // for sr in slices_in_chunk.iter() {
+        //     rmap.insert(sr.off..sr.off + sr.len, sr.clone());
+        // }
+
+        // let mut slice_map = HashMap::new();
+        // for sv in slices_in_chunk.iter() {
+        //     let rb = slice_map
+        //         .entry(sv.id)
+        //         .or_insert_with(|| engine.new_read_buffer(sv.id as usize, sv.size as usize));
+        //
+        //     rb.read_at(offset + sv.off, &mut dst[0..sv.size as usize])?;
+        //
+        //     // rb.read_at(offset + sv.off, &mut dst[0..sv.size as usize])?;
+        // }
 
         Ok(0)
     }
@@ -253,7 +267,7 @@ impl FileReader {
 
 fn read_slice(
     engine: &Arc<Engine>,
-    slice_view: &SliceView,
+    slice_view: &Slice,
     dst: &mut [u8],
     offset: usize,
 ) -> Result<usize> {

@@ -455,7 +455,7 @@ impl ChunkWriterBackgroundTask {
                     .write_slice(
                         self.parent.ino,
                         self.chunk_idx as u32,
-                        sw.chunk_start_offset as u32,
+                        sw.chunk_start_offset,
                         meta_slice,
                         mtime,
                     )
@@ -774,14 +774,13 @@ impl SliceWriter {
         Ok(())
     }
 
-    async fn to_meta_slice(self: &Arc<Self>) -> meta::SliceView {
+    async fn to_meta_slice(self: &Arc<Self>) -> meta::types::Slice {
         let guard = self.write_buffer.read().await;
-        meta::SliceView {
-            id: guard.get_slice_id().unwrap() as u64,
-            size: guard.length() as u32, // WHAT FUCK IS IT
-            off: 0,
-            len: guard.length() as u32,
-        }
+        meta::types::Slice::new_owned(
+            self.chunk_start_offset,
+            guard.get_slice_id().unwrap() as u64,
+            guard.length(),
+        )
     }
 }
 

@@ -1,214 +1,161 @@
-use std::io::Cursor;
+use bincode::serialize;
+use std::sync::Arc;
 
-use crate::meta::SliceView;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use crate::meta::err::{ErrInvalidSliceBufSnafu, Result};
+use crate::meta::MetaError::ErrInvalidSliceBuf;
+use byteorder::{ReadBytesExt, WriteBytesExt};
+use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
-#[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Clone)]
-pub(crate) struct Slice {
-    pub(crate) pos: u32,
-    pub(crate) id: u64,
-    pub(crate) size: u32,
-    pub(crate) off: u32,
-    pub(crate) len: u32,
-}
+pub type OverlookedSlices = RangeMap<usize, Slice>;
+pub type OverlookedSlicesRef = Arc<OverlookedSlices>;
 
-pub(crate) const SLICE_BYTES: usize = 24;
+#[derive(Debug, Eq, PartialEq)]
+pub struct Slices(pub Vec<Slice>);
 
-pub(crate) fn make_slice_buf(pos: u32, id: u64, size: u32, off: u32, len: u32) -> Vec<u8> {
-    let mut buffer = Vec::with_capacity(SLICE_BYTES); // Pre-allocate for efficiency
-    let mut writer = Cursor::new(&mut buffer);
-    writer.write_u32::<LittleEndian>(pos).unwrap(); // Handle potential errors explicitly
-    writer.write_u64::<LittleEndian>(id).unwrap();
-    writer.write_u32::<LittleEndian>(size).unwrap();
-    writer.write_u32::<LittleEndian>(off).unwrap();
-    writer.write_u32::<LittleEndian>(len).unwrap();
-
-    buffer
-}
-
-pub(crate) fn read_slice_buf(buf: &[u8]) -> Vec<Slice> {
-    let mut slices = Vec::new();
-    let mut reader = Cursor::new(buf);
-    while reader.position() < buf.len() as u64 {
-        let pos = reader.read_u32::<LittleEndian>().unwrap();
-        let id = reader.read_u64::<LittleEndian>().unwrap();
-        let size = reader.read_u32::<LittleEndian>().unwrap();
-        let off = reader.read_u32::<LittleEndian>().unwrap();
-        let len = reader.read_u32::<LittleEndian>().unwrap();
-        slices.push(Slice {
-            pos,
-            id,
-            size,
-            off,
-            len,
-        });
+impl Slices {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.0.len() * SLICE_BYTES);
+        for slice in &self.0 {
+            buf.extend_from_slice(&slice.encode());
+        }
+        buf
     }
-    slices
+
+    pub(crate) fn decode(buf: &[u8]) -> Result<Slices> {
+        if buf.len() % SLICE_BYTES != 0 {
+            return ErrInvalidSliceBufSnafu.fail();
+        }
+        let mut slices = Vec::new();
+        let mut i = 0;
+        while i < buf.len() {
+            let slice = Slice::decode(&buf[i..i + SLICE_BYTES])?;
+            slices.push(slice);
+            i += SLICE_BYTES;
+        }
+        Ok(Slices(slices))
+    }
+
+    /// Look over all slices and build a RangeMap for them.
+    pub(crate) fn overlook(&self) -> RangeMap<usize, Slice> {
+        let mut rm = rangemap::RangeMap::new();
+        self.0.iter().for_each(|s| {
+            rm.insert(
+                s.get_chunk_pos()..s.get_chunk_pos() + s.get_size(),
+                s.clone(),
+            )
+        });
+        rm
+    }
 }
 
-/// project_slices will project all history slices into the latest view.
-///
-/// Example: if we have 3 slices write to the same chunk
-///     write_slice1 ( chunk_pos: 0, slice_size: 1024)
-///     write_slice2 ( chunk_pos: 128, slice_size: 8)
-///     write_slice3 ( chunk_pos: 512, slice_size: 8)
-/// Then the projected slices will be:
-///     slice1 (chunk_pos: 0, slice_size: 128)
-///     slice2 (chunk_pos: 128, slice_size: 8)
-///     slice1 (chunk_pos: 128 + 8 = 136, slice_size: 512 - 136 = 376)
-///     slice3 (chunk_pos: 512, slice_size: 8)
-///     slice1 (chunk_pos: 520, slice_size: 1024 - 520 = 504)
-pub(crate) fn project_slices(slices: &Vec<Slice>) -> Vec<SliceView> {
-    let mut rm = rangemap::RangeMap::new();
-
-    slices
-        .iter()
-        .for_each(|s| rm.insert(s.pos..s.pos + s.size, s.clone()));
-
-    rm.iter()
-        .map(|(r, s)| SliceView {
-            id: s.id,
-            size: s.size,
-            off: r.start - s.pos,
-            len: r.end - r.start,
-        })
-        .collect::<Vec<_>>()
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub enum Slice {
+    /// Owned means this slice is built by write operation.
+    Owned {
+        /// The chunk position of the slice.
+        chunk_pos: u32,
+        /// The unique id of the slice.
+        slice_id: u64,
+        /// the underlying data size
+        size: u32,
+        _padding: u64,
+    },
+    /// The slice is borrowed from other slice, built by File RangeCopy.
+    Borrowed {
+        /// The chunk position of the slice.
+        chunk_pos: u32,
+        /// The unique id of the slice.
+        slice_id: u64,
+        /// the underlying data size
+        size: u32,
+        /// The offset of the borrowed slice in the owned slice.
+        off: u32,
+        /// The length of the borrowed slice.
+        len: u32,
+    },
 }
+
+impl Slice {
+    pub fn new_owned(chunk_pos: usize, slice_id: u64, size: usize) -> Self {
+        Slice::Owned {
+            chunk_pos: chunk_pos as u32,
+            slice_id,
+            size: size as u32,
+            _padding: 0,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        serialize(self).unwrap()
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self> {
+        if buf.len() < SLICE_BYTES {
+            return ErrInvalidSliceBufSnafu.fail();
+        }
+        let x: Slice = bincode::deserialize(buf).map_err(|e| ErrInvalidSliceBuf)?;
+        Ok(x)
+    }
+
+    pub fn get_chunk_pos(&self) -> usize {
+        (match self {
+            Slice::Owned { chunk_pos, .. } => *chunk_pos,
+            Slice::Borrowed { chunk_pos, off, .. } => *chunk_pos + off,
+        }) as usize
+    }
+    pub fn get_slice_id(&self) -> u64 {
+        match self {
+            Slice::Owned { slice_id, .. } => *slice_id,
+            Slice::Borrowed { slice_id, .. } => *slice_id,
+        }
+    }
+    pub fn get_size(&self) -> usize {
+        (match self {
+            Slice::Owned { size, .. } => *size,
+            // for borrowed slice, the size is the length of the borrowed part.
+            Slice::Borrowed { len, .. } => *len,
+        }) as usize
+    }
+}
+
+pub(crate) const SLICE_BYTES: usize = 28;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn codec() {
-        let mut buf = vec![];
-        buf.extend_from_slice(&make_slice_buf(1, 2, 3, 4, 5));
-        buf.extend_from_slice(&make_slice_buf(1 + 1, 2 + 1, 3 + 1, 4 + 1, 5 + 1));
-        buf.extend_from_slice(&make_slice_buf(1 + 2, 2 + 2, 3 + 2, 4 + 2, 5 + 2));
+    fn slice_v2() {
+        let slice = Slice::Owned {
+            chunk_pos: 0,
+            slice_id: 1,
+            size: 1024,
+            _padding: 0,
+        };
+        let buf = slice.encode();
+        let slice2 = Slice::decode(&buf).unwrap();
+        assert_eq!(slice, slice2);
+        println!("{}", buf.len());
+        matches!(slice2, Slice::Owned { .. });
 
-        let slices = read_slice_buf(&buf);
-        assert_eq!(slices.len(), 3);
+        let slice = Slice::Borrowed {
+            chunk_pos: 0,
+            slice_id: 1,
+            size: 1024,
+            off: 0,
+            len: 1024,
+        };
+        let buf = slice.encode();
+        let slice2 = Slice::decode(&buf).unwrap();
+        assert_eq!(slice, slice2);
+        println!("{}", buf.len());
+        matches!(slice2, Slice::Borrowed { .. });
 
-        assert_eq!(
-            slices,
-            vec![
-                Slice {
-                    pos: 1,
-                    id: 2,
-                    size: 3,
-                    off: 4,
-                    len: 5
-                },
-                Slice {
-                    pos: 2,
-                    id: 3,
-                    size: 4,
-                    off: 5,
-                    len: 6
-                },
-                Slice {
-                    pos: 3,
-                    id: 4,
-                    size: 5,
-                    off: 6,
-                    len: 7
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn handle_internal_slice() {
-        let slices = vec![
-            Slice {
-                pos: 0,
-                id: 1,
-                size: 64 << 20,
-                off: 0,
-                len: 64 << 20,
-            },
-            Slice {
-                pos: 30 << 20,
-                id: 2,
-                size: 8,
-                off: 0,
-                len: 8,
-            },
-            Slice {
-                pos: 40 << 20,
-                id: 3,
-                size: 8,
-                off: 0,
-                len: 8,
-            },
-        ];
-
-        let slice_infos = vec![
-            SliceView {
-                id: 1,
-                size: 67108864,
-                off: 0,
-                len: 31457280,
-            },
-            SliceView {
-                id: 2,
-                size: 8,
-                off: 0,
-                len: 8,
-            },
-            SliceView {
-                id: 1,
-                size: 67108864,
-                off: 31457288,
-                len: 10485752,
-            },
-            SliceView {
-                id: 3,
-                size: 8,
-                off: 0,
-                len: 8,
-            },
-            SliceView {
-                id: 1,
-                size: 67108864,
-                off: 41943048,
-                len: 25165816,
-            },
-        ];
-
-        let svs = project_slices(&slices);
-        assert_eq!(svs, slice_infos)
-    }
-
-    #[test]
-    fn build_project() {
-        let slices = vec![
-            Slice {
-                pos: 0,
-                id: 1,
-                size: 1024,
-                off: 0,
-                len: 1024,
-            },
-            Slice {
-                pos: 128,
-                id: 2,
-                size: 8,
-                off: 0,
-                len: 8,
-            },
-            Slice {
-                pos: 512,
-                id: 3,
-                size: 8,
-                off: 0,
-                len: 8,
-            },
-        ];
-
-        project_slices(&slices)
-            .iter()
-            .for_each(|sv| println!("{:?}", sv))
+        let slices = Slices(vec![slice, slice2]);
+        let buf = slices.encode();
+        let slices2 = Slices::decode(&buf).unwrap();
+        assert_eq!(slices, slices2);
     }
 }

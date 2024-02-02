@@ -21,59 +21,41 @@ use std::{
     os::unix::ffi::OsStrExt,
     path::{Component, Path},
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering, Ordering::Acquire},
-        Arc, Mutex, RwLock,
+        atomic::{AtomicI64, Ordering::Acquire},
+        Arc,
     },
     time::SystemTime,
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use dashmap::mapref::one::RefMut;
 use dashmap::DashMap;
 use fuser::FileType;
-use futures::{future::ok, TryStream};
+use futures::TryStream;
 use lazy_static::lazy_static;
-use libc::{c_int, EACCES};
+use libc::EACCES;
 use opendal::{raw::oio::WriteExt, ErrorKind, Operator};
+use rangemap::RangeMap;
 use scopeguard::defer;
-use snafu::{ResultExt, Snafu};
-use tokio::{
-    sync::Notify,
-    time::{timeout, Duration, Instant},
-};
+use snafu::ResultExt;
+use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::meta::types::read_slice_buf;
+use crate::meta::types::{OverlookedSlicesRef, Slice, Slices};
 use crate::{
     common::err::ToErrno,
-    meta,
     meta::{
         config::{Format, MetaConfig},
         engine_sto::generate_sto_entry_key_str,
         err::*,
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
         types::{
-            make_slice_buf, project_slices, DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr,
-            ROOT_INO, SLICE_BYTES, TRASH_INODE,
+            DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, ROOT_INO, SLICE_BYTES, TRASH_INODE,
         },
         util::*,
         MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },
     vfs::storage::DEFAULT_CHUNK_SIZE,
 };
-
-// Slice is a slice of a chunk.
-// Multiple slices could be combined together as a chunk.
-//
-// SliceView represent a sub slice in a slice,
-// the len represents the length of the sub slice.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct SliceView {
-    pub(crate) id: u64,   // the unique slice id
-    pub(crate) size: u32, // the size of the slice
-    pub(crate) off: u32,  // the offset to the real slice.
-    pub(crate) len: u32,  // the len of this sub slice.
-}
 
 pub(crate) const INODE_BATCH: u64 = 1 << 10;
 pub(crate) const SLICE_ID_BATCH: u64 = 4 << 10;
@@ -263,7 +245,7 @@ pub struct OpenFile {
     pub attr: InodeAttr,
     pub reference_count: usize,
     pub last_check: std::time::Instant,
-    pub chunks: HashMap<usize, Arc<Vec<SliceView>>>, // should we add lock on it ?
+    pub chunks: HashMap<usize, OverlookedSlicesRef>, // should we add lock on it ?
 }
 
 pub struct OpenFiles {
@@ -344,11 +326,11 @@ impl OpenFiles {
         return None;
     }
 
-    pub(crate) fn update_chunk_slice_view(
+    pub(crate) fn update_chunk_slices_info(
         &self,
         ino: Ino,
         chunk_idx: usize,
-        views: Arc<Vec<SliceView>>,
+        views: Arc<RangeMap<usize, Slice>>,
     ) {
         if let Some(mut of) = self.files.get_mut(&ino) {
             let mut of = of.value_mut();
@@ -1233,10 +1215,14 @@ impl MetaEngine {
         &self,
         inode: Ino,
         chunk_idx: u32,
-        chunk_pos: u32,
-        slice: SliceView, // FIXME: introduce another slice type.
+        chunk_pos: usize,
+        slice: Slice, // FIXME: introduce another slice type.
         mtime: Instant,
     ) -> Result<()> {
+        assert!(
+            matches!(slice, Slice::Owned { .. }),
+            "slice should be owned for writing slice"
+        );
         trace!(
             "write with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
             inode,
@@ -1258,24 +1244,25 @@ impl MetaEngine {
             return Err(MetaError::ErrLibc { kind: libc::EPERM })?;
         }
 
-        let mut chunk_info = self
+        let mut slices_buf = self
             .sto_get_chunk_info(inode, chunk_idx)
             .await?
             .unwrap_or(vec![]);
-        if chunk_info.len() % SLICE_BYTES != 0 {
+        if slices_buf.len() % SLICE_BYTES != 0 {
             error!(
                 "Invalid chunk value for inode {} chunk_idx {}: {}",
                 inode,
                 chunk_idx,
-                chunk_info.len()
+                slices_buf.len()
             );
             return Err(MetaError::ErrLibc { kind: libc::EIO });
         }
 
         let mut dir_stat_length: i64 = 0;
         let mut dir_stat_space: i64 = 0;
-        let new_len =
-            chunk_idx as u64 * DEFAULT_CHUNK_SIZE as u64 + chunk_pos as u64 + slice.len as u64;
+        let new_len = chunk_idx as u64 * DEFAULT_CHUNK_SIZE as u64
+            + chunk_pos as u64
+            + slice.get_size() as u64;
         if new_len > attr.length {
             dir_stat_length = new_len as i64 - attr.length as i64;
             dir_stat_space = align4k(new_len - attr.length);
@@ -1284,18 +1271,18 @@ impl MetaEngine {
         let now = SystemTime::now();
         attr.mtime = now;
         attr.ctime = now;
-        let val = make_slice_buf(chunk_pos, slice.id, slice.size, slice.off, slice.len);
-        if chunk_info.eq(&val) {
+        let val = slice.encode();
+        if slices_buf.eq(&val) {
             warn!(
                 "{inode} try to write the same slice {:?} at {chunk_idx}",
                 slice
             );
             return Ok(());
         }
-        chunk_info.extend_from_slice(&val);
+        slices_buf.extend_from_slice(&val);
         self.sto_set_attr(inode, &attr).await?;
-        let slice_cnt = chunk_info.len() / SLICE_BYTES; // number of slices
-        self.sto_set_chunk_info(inode, chunk_idx, chunk_info)
+        let slice_cnt = slices_buf.len() / SLICE_BYTES; // number of slices
+        self.sto_set_chunk_info(inode, chunk_idx, slices_buf)
             .await?;
 
         if slice_cnt > 350 || slice_cnt % 100 == 99 {
@@ -1326,8 +1313,12 @@ impl MetaEngine {
         Ok(())
     }
 
-    /// [MetaEngine::read_slice] returns the list of slices on the given chunk.
-    pub async fn read_slice(&self, inode: Ino, chunk_index: usize) -> Result<Arc<Vec<SliceView>>> {
+    /// [MetaEngine::read_slice] returns the rangemap of slices on the given chunk.
+    pub async fn read_slice(
+        &self,
+        inode: Ino,
+        chunk_index: usize,
+    ) -> Result<Option<OverlookedSlicesRef>> {
         debug!(
             "read_slice with inode {:?}, chunk_index {:?}",
             inode, chunk_index
@@ -1337,33 +1328,28 @@ impl MetaEngine {
         let of = self.open_files.files.get_mut(&inode);
         if let Some(of) = of {
             if let Some(svs) = of.chunks.get(&chunk_index) {
-                return Ok(svs.clone());
+                return Ok(Some(svs.clone()));
             }
         };
 
         let slice_info_buf = self.sto_get_chunk_info(inode, chunk_index as u32).await?;
         let slice_info_buf = match slice_info_buf {
-            Some(buf) => {
-                if buf.len() % SLICE_BYTES != 0 {
-                    return Err(MetaError::ErrLibc { kind: libc::EINTR });
-                }
-                buf
-            }
+            Some(buf) => buf,
             None => {
                 let attr = self.sto_must_get_attr(inode).await?;
                 if !attr.is_file() {
                     return Err(MetaError::ErrLibc { kind: libc::EPERM })?;
                 }
-                return Ok(Arc::new(vec![]));
+                return Ok(None);
             }
         };
 
-        let slices = read_slice_buf(&slice_info_buf);
+        let slices = Slices::decode(&slice_info_buf)?;
         // TODO: build cache.
-        let svs = Arc::new(project_slices(&slices));
+        let rms = Arc::new(slices.overlook());
         self.open_files
-            .update_chunk_slice_view(inode, chunk_index, svs.clone());
-        Ok(svs.clone())
+            .update_chunk_slices_info(inode, chunk_index, rms.clone());
+        Ok(Some(rms))
     }
 }
 
@@ -1482,105 +1468,5 @@ mod tests {
 
         let entry_infos = meta_engine.sto_list_entry_info(Ino(1)).await.unwrap();
         assert_eq!(entry_infos.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn basic() {
-        let meta_engine = MetaConfig::test_config().open().unwrap();
-        let meta_ctx = MetaContext::background();
-        let format = Format::default();
-        meta_engine.init(format, false).await.unwrap();
-
-        let (inode, attr) = meta_engine
-            .create(&meta_ctx, ROOT_INO, "a", 0o650, 0, 0)
-            .await
-            .unwrap();
-
-        let sid1 = meta_engine.next_slice_id().await.unwrap() as u64;
-        meta_engine
-            .write_slice(
-                inode,
-                1,
-                0,
-                SliceView {
-                    id: sid1,
-                    size: 64 << 20,
-                    off: 0,
-                    len: 64 << 20,
-                },
-                Instant::now(),
-            )
-            .await
-            .unwrap();
-        let sid2 = meta_engine.next_slice_id().await.unwrap() as u64;
-        meta_engine
-            .write_slice(
-                inode,
-                1,
-                30 << 20,
-                SliceView {
-                    id: sid2,
-                    size: 8,
-                    off: 0,
-                    len: 8,
-                },
-                Instant::now(),
-            )
-            .await
-            .unwrap();
-        let sid3 = meta_engine.next_slice_id().await.unwrap() as u64;
-        meta_engine
-            .write_slice(
-                inode,
-                1,
-                40 << 20,
-                SliceView {
-                    id: sid3,
-                    size: 8,
-                    off: 0,
-                    len: 8,
-                },
-                Instant::now(),
-            )
-            .await
-            .unwrap();
-
-        let slice_views = meta_engine.read_slice(inode, 1).await.unwrap();
-        assert_eq!(slice_views.len(), 5);
-        assert_eq!(
-            vec![
-                SliceView {
-                    id: sid1,
-                    size: 67108864,
-                    off: 0,
-                    len: 31457280,
-                },
-                SliceView {
-                    id: sid2,
-                    size: 8,
-                    off: 0,
-                    len: 8,
-                },
-                SliceView {
-                    id: sid1,
-                    size: 67108864,
-                    off: 31457288,
-                    len: 10485752,
-                },
-                SliceView {
-                    id: sid3,
-                    size: 8,
-                    off: 0,
-                    len: 8,
-                },
-                SliceView {
-                    id: sid1,
-                    size: 67108864,
-                    off: 41943048,
-                    len: 25165816,
-                },
-            ],
-            slice_views.to_vec()
-        );
     }
 }
