@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::{
     cmp::min,
     ops::Range,
@@ -10,7 +10,7 @@ use std::{
 
 use crate::common::runtime;
 use dashmap::DashMap;
-use rangemap::RangeSet;
+use rangemap::{RangeMap, RangeSet};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
@@ -18,6 +18,10 @@ use tracing::{debug, Subscriber};
 use vfs::err::{Result, ThisFileReaderIsClosingSnafu};
 
 use crate::common::err::ToErrno;
+use crate::meta::engine::MetaEngine;
+use crate::meta::SliceView;
+use crate::vfs::storage::buffer;
+use crate::vfs::storage::buffer::ReadBuffer;
 use crate::{
     meta::types::Ino,
     vfs,
@@ -78,7 +82,7 @@ pub(crate) struct FileReader {
     slice_readers_background_tasks: SliceReaderBackgroundTasksRef,
     // when we clean this file reader, we will set this flag to true.
     closing: Arc<AtomicBool>,
-    // tracking the how many concurrent read requests are there.
+    // tracking how many concurrent read requests are there.
     read_count: Arc<AtomicUsize>,
     // when we clean this file reader, we should wait for the read_count to be zero.
     read_count_notify: Arc<Notify>,
@@ -94,7 +98,7 @@ impl FileReader {
             engine: Arc::downgrade(&engine),
             config: engine.config.clone(),
             length: AtomicUsize::new(length),
-            slice_readers: Arc::new(RwLock::new(BTreeMap::new())),
+            slice_readers: Arc::new(RwLock::new(RangeMap::new())),
             slice_readers_background_tasks: Arc::new(Default::default()),
             closing: Arc::new(AtomicBool::new(false)),
             read_count: Arc::new(AtomicUsize::new(0)),
@@ -119,59 +123,79 @@ impl FileReader {
             return Ok(0);
         }
 
-        let block = make_range(offset, expected_read_len, flen);
-        let last_block_size = (32 << 10) as usize; // TODO: why 32K?
-        if block.start + last_block_size > flen {
-            // current read range exceeds the range of current file reader.
-            let read_ahead_range = if flen < last_block_size {
-                // read from the beginning
+        let expected_range = cal_real_read_range(offset, expected_read_len, flen);
+        // maximum read ahead size.
+        let max_read_ahead_size = (32 << 10) as usize;
+        // check if we need to read head ?
+        if expected_range.start + max_read_ahead_size > flen {
+            // currently read range exceeds the range of current file reader.
+            let read_ahead_range = if flen < max_read_ahead_size {
+                // just read the whole file.
                 0..flen
             } else {
-                flen - last_block_size..flen
+                // read the last block in the file.
+                flen - max_read_ahead_size..flen
             };
             // we have some read ahead to do.
             self.read_ahead(read_ahead_range);
         }
-        let reqs = self.make_requests(flen, block).await;
-        self.do_read(reqs, dst).await
+
+        let real_read_size = expected_range.end - expected_range.start;
+
+        let engine = self.engine.upgrade().expect("engine should not be dropped");
+        let meta_engine = engine.meta_engine.clone();
+        let slice_view = meta_engine.read_slice(self.inode, offset).await?;
+        let mut slice_map = HashMap::new();
+        for sv in slice_view.iter() {
+            let rb = slice_map
+                .entry(sv.id)
+                .or_insert_with(|| engine.new_read_buffer(sv.id as usize, sv.size as usize));
+
+            // rb.read_at(offset + sv.off, &mut dst[0..sv.size as usize])?;
+        }
+
+        Ok(0)
     }
 
-    pub(crate) fn read_ahead(self: &Arc<Self>, read_range: Range<usize>) {}
+    pub(crate) fn read_ahead(self: &Arc<Self>, read_range: Range<usize>) {
+        debug!("implement the read ahead");
+    }
 
     async fn make_requests(self: &Arc<Self>, flen: usize, read_range: Range<usize>) -> Vec<Req> {
         let mut reqs = vec![];
         let mut srs = self.slice_readers.write().await;
-        let divided_ranges = split_ranges(&mut srs, read_range.clone());
-        divided_ranges.iter().for_each(|block| {
-            let mut added = false;
-            for (_, sr) in srs.iter() {
-                if !sr.valid() {
-                    continue;
-                }
-                if sr.include(block) {
-                    let now = std::time::Instant::now().elapsed().as_secs() as usize;
-                    sr.last_access.store(now, Ordering::Release);
-                    reqs.push(Req {
-                        read_range: block.start - sr.range.start..block.end,
-                        slice_reader: sr.clone(),
-                    });
-                    added = true;
-                    break;
-                }
-            }
-            if !added {
-                // TODO: new slice reader
-                let mut block = block.clone();
-                while block.end - block.start > 0 {
-                    let sr = self.new_slice_reader(flen, &mut block);
-                    srs.insert(sr.internal_seq_id, sr.clone());
-                    reqs.push(Req {
-                        read_range: 0..sr.range.end - sr.range.start,
-                        slice_reader: sr,
-                    })
-                }
-            }
+        let mut rs = rangemap::RangeSet::new();
+        srs.gaps(&read_range).for_each(|r| {
+            // current read buffer doesn't have the data we expected, build request.
+            rs.insert(r);
         });
+        srs.overlapping(&read_range).for_each(|(valid_range, sr)| {
+            // cut the unnecessary part
+            let real = if read_range.start < valid_range.start {
+                // current:     [----]
+                // slice-reader:  [----]
+                valid_range.start..min(read_range.end, valid_range.end) // only get the overlapping part.
+            } else {
+                // current:         [----]
+                // slice-reader:  [----]
+                read_range.start..min(read_range.end, valid_range.end)
+            };
+            rs.insert(real.clone());
+            println!(
+                "want: {:?}, overlapping but invalid range {:?}, cut result: {:?}",
+                read_range.clone(),
+                valid_range,
+                real.clone(),
+            );
+        });
+        // rs.into_iter().for_each(|r| {
+        //     let sr = self.new_slice_reader(flen, &mut );
+        //     (&mut srs).insert(sr.range.clone(), sr.clone());
+        //     reqs.push(Req {
+        //         read_range: r,
+        //         slice_reader: self.new_slice_reader(),
+        //     });
+        // });
 
         reqs
     }
@@ -190,7 +214,7 @@ impl FileReader {
         r.start = block.end;
         r.end = r.end - block_len;
         let sr = Arc::new(SliceReader {
-            internal_seq_id: self.seq_generator.next_id().unwrap(),
+            internal_seq: self.seq_generator.next_id().unwrap(),
             chunk_idx: r.start / self.config.chunk_size,
             range: block,
             state: Arc::new(AtomicU8::new(SliceReaderState::IDLE as u8)),
@@ -214,11 +238,11 @@ impl FileReader {
             srbk.run().await;
         });
         self.slice_readers_background_tasks
-            .insert(sr.internal_seq_id, handle);
+            .insert(sr.internal_seq, handle);
         sr
     }
 
-    async fn do_read(self: &Arc<Self>, reqs: Vec<Req>, dst: &mut [u8]) -> Result<usize> {
+    async fn wait_io(self: &Arc<Self>, reqs: Vec<Req>, dst: &mut [u8]) -> Result<usize> {
         todo!()
     }
 
@@ -227,7 +251,27 @@ impl FileReader {
     }
 }
 
-fn make_range(offset: usize, expected_read_len: usize, len: usize) -> Range<usize> {
+fn read_slice(
+    engine: &Arc<Engine>,
+    slice_view: &SliceView,
+    dst: &mut [u8],
+    offset: usize,
+) -> Result<usize> {
+    // let expected_read_len = 0;
+    // let mut read = 0;
+    //
+    // let read_buffer = engine.new_read_buffer(slice_view.id as usize, slice_view.size as usize);
+    // while read < expected_read_len {
+    //     let mut p = &mut dst[read..expected_read_len - read];
+    //     let n = read_buffer.read_at(read + offset + slice_view.off, &mut p)?;
+    //     read += n;
+    // }
+
+    // Ok(read)
+    todo!()
+}
+
+fn cal_real_read_range(offset: usize, expected_read_len: usize, len: usize) -> Range<usize> {
     let right = offset + expected_read_len;
     if right > len {
         (offset..len)
@@ -236,26 +280,21 @@ fn make_range(offset: usize, expected_read_len: usize, len: usize) -> Range<usiz
     }
 }
 
-fn split_ranges(slice_readers: SliceReadersMutMap, read_range: Range<usize>) -> RangeSet<usize> {
-    let mut rs = rangemap::RangeSet::new();
-    rs.insert(read_range);
-    slice_readers
-        .iter()
-        .filter(|(seq, sr)| sr.valid())
-        .for_each(|(seq, sr)| {
-            rs.insert(sr.range.clone().into());
-        });
-    rs
-}
-
 struct Req {
+    // real read range
     read_range: Range<usize>,
     slice_reader: Arc<SliceReader>,
 }
 
-type SliceReadersRef = Arc<RwLock<BTreeMap<u64, Arc<SliceReader>>>>;
+/// SliceReadersRef maintains the mapping between the read range to the slice reader.
+///
+/// Example:
+/// 1. we read (0, 1024) in the file, and now we cache the SliceReader for this range.
+/// 2. next read (512, 1024), we can know that
+///
+type SliceReadersRef = Arc<RwLock<RangeMap<usize, Arc<SliceReader>>>>;
 type SliceReaderBackgroundTasksRef = Arc<DashMap<u64, JoinHandle<()>>>;
-type SliceReadersMutMap<'a> = &'a mut BTreeMap<u64, Arc<SliceReader>>;
+type SliceReadersMutMap<'a> = &'a mut RangeMap<usize, Arc<SliceReader>>;
 
 // state of sliceReader
 //
@@ -304,8 +343,10 @@ impl From<u8> for SliceReaderState {
     }
 }
 
+/// SliceReader is used for managing the reading status,
+/// each SliceReader is bind to a real Slice.
 struct SliceReader {
-    internal_seq_id: u64,
+    internal_seq: u64,
     chunk_idx: usize,
     range: Range<usize>,
     state: Arc<AtomicU8>,
@@ -313,6 +354,14 @@ struct SliceReader {
     read_buf: RwLock<Vec<u8>>,
     closing: Arc<AtomicBool>,
 }
+
+impl PartialEq<Self> for SliceReader {
+    fn eq(&self, other: &Self) -> bool {
+        self.internal_seq == other.internal_seq && self.range == other.range
+    }
+}
+
+impl Eq for SliceReader {}
 
 impl SliceReader {
     fn valid(&self) -> bool {
@@ -347,13 +396,12 @@ impl SliceReaderBackgroundTask {
             let state = SliceReaderState::from(self.state.load(Ordering::Acquire));
             match state {
                 SliceReaderState::IDLE => {
-                    self.do_new().await;
+                    self.handle_read().await;
                 }
-                SliceReaderState::BUSY => {
-                    // only do_new will transfer to [SliceReaderState::BUSY].
-                }
+                /// only [SliceReaderState::handle_read] will transfer to [SliceReaderState::BUSY].
+                SliceReaderState::BUSY => {}
                 SliceReaderState::REFRESH => {
-                    // REFRESH represents a
+                    // REFRESH represents the interrupt of the read operation.
                 }
                 SliceReaderState::BREAK => {}
                 SliceReaderState::READY => {
@@ -367,7 +415,7 @@ impl SliceReaderBackgroundTask {
 
     async fn exit_task(&mut self) {}
 
-    async fn do_new(&mut self) {
+    async fn handle_read(&mut self) {
         self.state
             .store(SliceReaderState::BUSY as u8, Ordering::Release);
 
@@ -385,7 +433,8 @@ impl SliceReaderBackgroundTask {
         if !matches!(
             SliceReaderState::from(self.state.load(Ordering::Acquire)),
             SliceReaderState::BUSY
-        ) {
+        ) || self.file_reader.closing.load(Ordering::Acquire)
+        {
             // someone change the state, go back to the main FSM
             return;
         }
@@ -397,12 +446,13 @@ impl SliceReaderBackgroundTask {
                     "read slice {}:{}:{} failed: {}",
                     self.file_reader.inode,
                     self.slice_reader.chunk_idx,
-                    self.slice_reader.internal_seq_id,
+                    self.slice_reader.internal_seq,
                     e
                 );
 
                 // not found, should not retry.
                 if e.to_errno() == libc::ENOENT {
+                    // go the invalid state to clean up resources.
                     self.state
                         .store(SliceReaderState::INVALID as u8, Ordering::Release);
                     return;
@@ -418,6 +468,25 @@ impl SliceReaderBackgroundTask {
                 return;
             }
         };
+        let flen = self.file_reader.length.load(Ordering::Acquire);
+        if self.slice_reader.range.start > flen {
+            // the read range exceeds the file length,
+            // we have nothing to read.
+            // update state to ready
+            self.state
+                .store(SliceReaderState::READY as u8, Ordering::Release);
+            return;
+        }
+
+        // calculate the real necessary size.
+        let real_read_len = if self.slice_reader.range.end > flen {
+            flen - self.slice_reader.range.start
+        } else {
+            self.slice_reader.range.end - self.slice_reader.range.start
+        };
+
+        let mut buf_guard = self.slice_reader.read_buf.write().await;
+        // TODO: read data from background storage.
 
         return;
     }
@@ -439,14 +508,41 @@ mod tests {
     use super::*;
     use crate::{common::install_fmt_log, meta::MetaConfig, vfs::storage::new_debug_sto};
 
-    #[test]
-    fn range_set() {
-        let mut rs = rangemap::RangeSet::new();
-        rs.insert(0..2);
-        rs.insert(1..2);
+    #[derive(Debug, PartialEq, Eq, Hash, Clone)]
+    struct S {
+        original: Range<usize>,
+    }
 
-        let ranges = rs.into_iter().collect_vec();
-        assert_eq!(ranges, vec![0..2]);
+    impl Drop for S {
+        fn drop(&mut self) {
+            println!("drop {:?}", self.original);
+        }
+    }
+    #[test]
+    fn range_map() {
+        fn new_s(r: Range<usize>) -> Arc<S> {
+            Arc::new(S { original: r })
+        }
+        let mut rs = rangemap::RangeMap::new();
+        rs.insert(0..512, new_s(0..512));
+        rs.insert(512..1024, new_s(512..1024)); // cut the first one.
+        rs.insert(512..520, new_s(512..520)); // cut self
+        rs.insert(512..520, new_s(512..520)); // cur self
+
+        // the rs map should cover 0..1024
+
+        let ranges = rs.iter().collect_vec();
+        for r in ranges.iter() {
+            println!("{:?}", r);
+        }
+        // rs.gaps(&(512..2048)).for_each(|r| {
+        //     println!("gaps: {:?}", r);
+        // });
+        //
+        // // what if I want to read from 512 to 1024 ?
+        // rs.overlapping(&(512..1024)).for_each(|r| {
+        //     println!("overlapping: {:?}", r);
+        // });
     }
 
     #[tokio::test]
@@ -479,11 +575,14 @@ mod tests {
                 want: vec![2048..4096],
             },
         ] {
-            let fr = Arc::new(FileReader::new(engine.clone(), Ino(1), 1, c.fr_len));
-            let slice_readers = fr.slice_readers.clone();
-            let mut srs = slice_readers.write().await;
-            let rs = split_ranges(&mut srs, make_range(c.read_req.0, c.read_req.1, c.fr_len));
-            assert_eq!(rs.into_iter().collect_vec(), c.want);
+            // let fr = Arc::new(FileReader::new(engine.clone(), Ino(1), 1, c.fr_len));
+            // let slice_readers = fr.slice_readers.clone();
+            // let mut srs = slice_readers.write().await;
+            // let rs = split_ranges(
+            //     &mut srs,
+            //     cal_real_read_range(c.read_req.0, c.read_req.1, c.fr_len),
+            // );
+            // assert_eq!(rs.into_iter().collect_vec(), c.want);
         }
     }
 }

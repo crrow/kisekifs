@@ -172,7 +172,7 @@ impl FileWriter {
             match r {
                 Ok(r) => match r {
                     Ok(wl) => {
-                        debug!("write {} bytes", wl);
+                        debug!("write {} KiB", wl / 1024);
                         write_len += wl
                     }
                     Err(e) => {
@@ -541,7 +541,11 @@ impl ChunkWriter {
         self.write_cnt.fetch_add(1, Ordering::AcqRel);
         defer!(self.write_cnt.fetch_sub(1, Ordering::AcqRel););
 
-        debug!("write {} bytes to chunk {}", data.len(), self.chunk_idx);
+        debug!(
+            "write {} KiB to chunk {}",
+            data.len() / 1024,
+            self.chunk_idx
+        );
         let slice = self.find_writable_slice(chunk_pos).await;
         debug!("write to slice {}", slice.internal_seq);
         let (write_len, total_write_len, flushed_len) = slice
@@ -897,5 +901,23 @@ mod tests {
         ] {
             i.run(Ino(1), engine.clone()).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_write() {
+        install_fmt_log();
+
+        let meta_engine = MetaConfig::default().open().unwrap();
+        let sto_engine = new_debug_sto();
+        let engine = Arc::new(Engine::new(
+            Arc::new(EngineConfig::default()),
+            sto_engine,
+            Arc::new(meta_engine),
+        ));
+
+        engine.new_file_writer(Ino(1), 0);
+        let data = vec![0u8; 65 << 20];
+        let write_len = engine.write(Ino(1), 0, &data).await;
+        assert!(write_len.is_ok());
     }
 }
