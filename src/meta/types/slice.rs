@@ -1,4 +1,5 @@
 use bincode::serialize;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::meta::err::{ErrInvalidSliceBufSnafu, Result};
@@ -105,17 +106,24 @@ impl Slice {
             Slice::Borrowed { chunk_pos, off, .. } => *chunk_pos + off,
         }) as usize
     }
-    pub fn get_slice_id(&self) -> u64 {
-        match self {
+    pub fn get_id(&self) -> usize {
+        (match self {
             Slice::Owned { slice_id, .. } => *slice_id,
             Slice::Borrowed { slice_id, .. } => *slice_id,
-        }
+        }) as usize
     }
     pub fn get_size(&self) -> usize {
         (match self {
             Slice::Owned { size, .. } => *size,
             // for borrowed slice, the size is the length of the borrowed part.
             Slice::Borrowed { len, .. } => *len,
+        }) as usize
+    }
+
+    pub fn get_underlying_size(&self) -> usize {
+        (match self {
+            Slice::Owned { size, .. } => *size,
+            Slice::Borrowed { size, .. } => *size,
         }) as usize
     }
 }

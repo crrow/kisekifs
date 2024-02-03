@@ -245,7 +245,7 @@ pub struct OpenFile {
     pub attr: InodeAttr,
     pub reference_count: usize,
     pub last_check: std::time::Instant,
-    pub chunks: HashMap<usize, OverlookedSlicesRef>, // should we add lock on it ?
+    pub chunks: HashMap<usize, Arc<Slices>>, // should we add lock on it ?
 }
 
 pub struct OpenFiles {
@@ -326,12 +326,7 @@ impl OpenFiles {
         return None;
     }
 
-    pub(crate) fn update_chunk_slices_info(
-        &self,
-        ino: Ino,
-        chunk_idx: usize,
-        views: Arc<RangeMap<usize, Slice>>,
-    ) {
+    pub(crate) fn update_chunk_slices_info(&self, ino: Ino, chunk_idx: usize, views: Arc<Slices>) {
         if let Some(mut of) = self.files.get_mut(&ino) {
             let mut of = of.value_mut();
             of.chunks.insert(chunk_idx, views);
@@ -969,7 +964,7 @@ impl MetaEngine {
         name: &str,
         mode: u16,
         cumask: u16,
-        flags: u32,
+        flags: i32,
     ) -> Result<(Ino, InodeAttr)> {
         debug!(
             "create with parent {:?}, name {:?}, mode {:?}, cumask {:?}, flags {:?}",
@@ -1224,7 +1219,7 @@ impl MetaEngine {
             "slice should be owned for writing slice"
         );
         trace!(
-            "write with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
+            "write-slice: with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
             inode,
             chunk_idx,
             chunk_pos,
@@ -1314,11 +1309,7 @@ impl MetaEngine {
     }
 
     /// [MetaEngine::read_slice] returns the rangemap of slices on the given chunk.
-    pub async fn read_slice(
-        &self,
-        inode: Ino,
-        chunk_index: usize,
-    ) -> Result<Option<OverlookedSlicesRef>> {
+    pub async fn read_slice(&self, inode: Ino, chunk_index: usize) -> Result<Option<Arc<Slices>>> {
         debug!(
             "read_slice with inode {:?}, chunk_index {:?}",
             inode, chunk_index
@@ -1344,12 +1335,11 @@ impl MetaEngine {
             }
         };
 
-        let slices = Slices::decode(&slice_info_buf)?;
+        let slices = Arc::new(Slices::decode(&slice_info_buf)?);
         // TODO: build cache.
-        let rms = Arc::new(slices.overlook());
         self.open_files
-            .update_chunk_slices_info(inode, chunk_index, rms.clone());
-        Ok(Some(rms))
+            .update_chunk_slices_info(inode, chunk_index, slices.clone());
+        Ok(Some(slices))
     }
 }
 

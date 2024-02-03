@@ -335,14 +335,7 @@ impl Filesystem for KisekiFuse {
         let name = name.to_string_lossy().to_string();
         match self.runtime.block_on(
             self.vfs
-                .create(
-                    &ctx,
-                    Ino(parent),
-                    &name,
-                    mode as u16,
-                    umask as u16,
-                    flags as u32,
-                )
+                .create(&ctx, Ino(parent), &name, mode as u16, umask as u16, flags)
                 .in_current_span(),
         ) {
             Ok((entry, fh)) => reply.created(
@@ -504,5 +497,10 @@ impl Filesystem for KisekiFuse {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         }
+    }
+
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync, name=field::Empty))]
+    fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
+        todo!()
     }
 }
