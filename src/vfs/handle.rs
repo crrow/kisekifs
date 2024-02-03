@@ -29,7 +29,7 @@ use tracing::{debug, instrument};
 use crate::vfs::FH;
 use crate::{
     meta::types::{Entry, Ino},
-    vfs::{err::Result, reader::FileReader, KisekiVFS, VFSError},
+    vfs::{err::Result, KisekiVFS, VFSError},
 };
 
 impl KisekiVFS {
@@ -60,10 +60,10 @@ impl KisekiVFS {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
             libc::O_RDONLY => Handle::new_with(fh, inode, |h| {
-                h.reader = Some(self.reader.open(inode, length));
+                self.data_engine.new_file_reader(inode, fh, length as usize);
             }),
             libc::O_WRONLY | libc::O_RDWR => Handle::new_with(fh, inode, |h| {
-                h.reader = Some(self.reader.open(inode, length));
+                self.data_engine.new_file_reader(inode, fh, length as usize);
                 self.data_engine.new_file_writer(inode, length);
             }),
             _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
@@ -99,8 +99,6 @@ pub(crate) struct Handle {
 
     pub(crate) locks: u8,
     flock_owner: u64, // kernel 3.1- does not pass lock_owner in release()
-
-    reader: Option<Weak<FileReader>>, // TODO: how to make it concurrent safe ?
 }
 
 impl Handle {
@@ -117,7 +115,6 @@ impl Handle {
             timeout: Duration::from_secs(1),
             locks: 0,
             flock_owner: 0,
-            reader: None,
         }
     }
     pub(crate) fn new_with<F: FnMut(&mut Handle)>(fh: u64, inode: Ino, mut f: F) -> Self {
@@ -130,7 +127,6 @@ impl Handle {
             timeout: Duration::from_secs(1),
             locks: 0,
             flock_owner: 0,
-            reader: None,
         };
         f(&mut h);
         h
@@ -141,10 +137,6 @@ impl Handle {
 
     pub(crate) fn inode(&self) -> Ino {
         self.inode
-    }
-
-    pub(crate) fn can_read(&self) -> bool {
-        return self.reader.is_some();
     }
 
     pub(crate) fn get_ofd_owner(&self) -> u64 {

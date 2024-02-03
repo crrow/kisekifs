@@ -1,7 +1,6 @@
-use crate::meta::engine::MetaEngine;
 use crate::meta::types::{Ino, OverlookedSlicesRef, Slice};
 use crate::vfs::storage::Engine;
-use crate::vfs::{err::Result, VFSError, FH};
+use crate::vfs::{err::Result, FH};
 use dashmap::DashMap;
 use itertools::Itertools;
 use rangemap::RangeMap;
@@ -9,6 +8,39 @@ use std::cmp::min;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 use tracing::{debug, warn};
+
+impl Engine {
+    /// Get the file reader for the given inode and file handle.
+    pub(crate) fn new_file_reader(
+        self: &Arc<Self>,
+        inode: Ino,
+        fh: FH,
+        length: usize,
+    ) -> Arc<FileReaderV2> {
+        self.file_readers_v2
+            .entry((inode, fh))
+            .or_insert_with(|| {
+                let fr = FileReaderV2::new(self.clone(), inode, fh, length);
+                Arc::new(fr)
+            })
+            .value()
+            .clone()
+    }
+
+    pub(crate) fn find_file_reader(
+        self: &Arc<Self>,
+        inode: Ino,
+        fh: FH,
+    ) -> Option<Arc<FileReaderV2>> {
+        self.file_readers_v2
+            .get(&(inode, fh))
+            .and_then(|m| Some(m.value().clone()))
+    }
+
+    pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
+        debug!("DO NOTHING: truncate inode {} to {}", inode, length);
+    }
+}
 
 type ChunkIdx = usize;
 
@@ -34,6 +66,16 @@ pub(crate) struct FileReaderV2 {
 }
 
 impl FileReaderV2 {
+    pub(crate) fn new(engine: Arc<Engine>, ino: Ino, fh: FH, length: usize) -> Self {
+        Self {
+            engine: Arc::downgrade(&engine),
+            fh,
+            ino,
+            length,
+            chunks: Default::default(),
+            closing: Default::default(),
+        }
+    }
     pub(crate) async fn read(self: &Arc<Self>, offset: usize, dst: &mut [u8]) -> Result<usize> {
         let expected_read_len = dst.len();
         // read offset should not exceed the file length.
@@ -219,7 +261,7 @@ mod tests {
             .map_err(|e| println!("{}", e))
             .unwrap();
 
-        let fw = engine.get_file_writer(inode).unwrap();
+        let fw = engine.find_file_writer(inode).unwrap();
         fw.do_flush().await.unwrap();
 
         let file_reader = Arc::new(FileReaderV2 {

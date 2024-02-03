@@ -68,7 +68,7 @@ impl Engine {
         self.file_writers.contains_key(&ino)
     }
 
-    pub(crate) fn get_file_writer(&self, ino: Ino) -> Option<Arc<FileWriter>> {
+    pub(crate) fn find_file_writer(&self, ino: Ino) -> Option<Arc<FileWriter>> {
         self.file_writers.get(&ino).map(|r| r.value().clone())
     }
 
@@ -86,14 +86,16 @@ impl Engine {
             .context(InvalidInoSnafu { ino })?;
         debug!("get file write success");
         let write_len = fw.write(offset, data).await?;
-        self.truncate_reader(ino, fw.get_length());
+        self.truncate_reader(ino, fw.get_length() as u64);
 
         Ok(write_len)
     }
 
-    /// Use the [FileWriter] to flush data to the backend object storage.
-    pub(crate) async fn flush(&self, fh: FH) -> Result<usize> {
-        todo!()
+    pub(crate) async fn flush_if_exists(&self, ino: Ino) -> Result<()> {
+        if let Some(fw) = self.file_writers.get(&ino) {
+            fw.do_flush().await?;
+        }
+        Ok(())
     }
 }
 

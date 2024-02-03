@@ -40,7 +40,6 @@ use crate::{
         config::VFSConfig,
         err::{Result, VFSError},
         handle::Handle,
-        reader::DataReader,
         storage::{Engine, MAX_FILE_SIZE},
         VFSError::ErrLIBC,
         FH,
@@ -52,7 +51,6 @@ pub struct KisekiVFS {
     meta: Arc<MetaEngine>,
     internal_nodes: PreInternalNodes,
     pub(crate) data_engine: Arc<Engine>,
-    pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
     pub(crate) handles: DashMap<Ino, DashMap<FH, Arc<Handle>>>,
@@ -100,7 +98,6 @@ impl KisekiVFS {
             internal_nodes,
             data_engine: storage_engine,
             meta: meta.clone(),
-            reader: DataReader::default(),
             modified_at: DashMap::new(),
             _next_fh: AtomicU64::new(1),
             handles: DashMap::new(),
@@ -164,7 +161,8 @@ impl KisekiVFS {
             if len > entry.attr.length {
                 entry.attr.length = len;
             }
-            self.reader.truncate(entry.inode, entry.attr.length);
+            self.data_engine
+                .truncate_reader(entry.inode, entry.attr.length);
         }
     }
 
@@ -174,7 +172,7 @@ impl KisekiVFS {
             if len > attr.length {
                 attr.length = len;
             }
-            self.reader.truncate(inode, attr.length);
+            self.data_engine.truncate_reader(inode, attr.length);
         }
     }
 
@@ -560,11 +558,14 @@ impl KisekiVFS {
         if offset >= MAX_FILE_SIZE as u64 || offset + size >= MAX_FILE_SIZE as u64 {
             return Err(ErrLIBC { kind: EFBIG });
         }
-        if !handle.can_read() {
-            return Err(ErrLIBC { kind: EBADF });
-        }
-
-        todo!()
+        let fr = self
+            .data_engine
+            .find_file_reader(ino, fh)
+            .ok_or(ErrLIBC { kind: EBADF })?;
+        self.data_engine.flush_if_exists(ino).await?;
+        let mut buf = vec![0u8; size as usize];
+        let read_len = fr.read(offset as usize, buf.as_mut_slice()).await?;
+        Ok(Bytes::from(buf))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -602,7 +603,8 @@ impl KisekiVFS {
         }
 
         let len = self.data_engine.write(ino, offset, data).await?;
-        self.reader.truncate(ino, self.data_engine.get_length(ino));
+        self.data_engine
+            .truncate_reader(ino, self.data_engine.get_length(ino));
         Ok(len as u32)
     }
 
@@ -613,7 +615,7 @@ impl KisekiVFS {
             return Ok(());
         };
 
-        if let Some(fw) = self.data_engine.get_file_writer(ino) {
+        if let Some(fw) = self.data_engine.find_file_writer(ino) {
             fw.do_flush().await?;
         }
 
@@ -643,7 +645,7 @@ impl KisekiVFS {
         }
 
         self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
-        if let Some(fw) = self.data_engine.get_file_writer(ino) {
+        if let Some(fw) = self.data_engine.find_file_writer(ino) {
             fw.do_flush().await?;
         }
 

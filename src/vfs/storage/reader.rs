@@ -18,10 +18,7 @@ use tracing::{debug, Subscriber};
 use vfs::err::{Result, ThisFileReaderIsClosingSnafu};
 
 use crate::common::err::ToErrno;
-use crate::meta::engine::MetaEngine;
 use crate::meta::types::Slice;
-use crate::vfs::storage::buffer;
-use crate::vfs::storage::buffer::ReadBuffer;
 use crate::{
     meta::types::Ino,
     vfs,
@@ -30,39 +27,6 @@ use crate::{
         FH,
     },
 };
-
-impl Engine {
-    /// Get the file reader for the given inode and file handle.
-    pub(crate) fn open_file_reader(
-        self: &Arc<Self>,
-        inode: Ino,
-        fh: FH,
-        length: usize,
-    ) -> Arc<FileReader> {
-        self.file_readers
-            .entry((inode, fh))
-            .or_insert_with(|| {
-                let fr = FileReader::new(self.clone(), inode, fh, length);
-                Arc::new(fr)
-            })
-            .value()
-            .clone()
-    }
-
-    pub(crate) fn find_file_reader(
-        self: &Arc<Self>,
-        inode: Ino,
-        fh: FH,
-    ) -> Option<Arc<FileReader>> {
-        self.file_readers
-            .get(&(inode, fh))
-            .and_then(|m| Some(m.value().clone()))
-    }
-
-    pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: usize) {
-        debug!("DO NOTHING: truncate inode {} to {}", inode, length);
-    }
-}
 
 /// Each handle to the file reader.
 pub(crate) type FileReadersRef = Arc<DashMap<(Ino, FH), Arc<FileReader>>>;
