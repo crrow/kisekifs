@@ -14,8 +14,6 @@
 
 use std::sync::atomic::Ordering;
 
-
-
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};

@@ -27,16 +27,13 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
-
 use lazy_static::lazy_static;
 use opendal::{ErrorKind, Operator};
-
 use scopeguard::defer;
 use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::meta::types::{Slice, Slices};
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -45,7 +42,8 @@ use crate::{
         err::*,
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
         types::{
-            DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, ROOT_INO, SLICE_BYTES, TRASH_INODE,
+            DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, Slice, Slices, ROOT_INO,
+            SLICE_BYTES, TRASH_INODE,
         },
         util::*,
         MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
@@ -1309,7 +1307,8 @@ impl MetaEngine {
         Ok(())
     }
 
-    /// [MetaEngine::read_slice] returns the rangemap of slices on the given chunk.
+    /// [MetaEngine::read_slice] returns the rangemap of slices on the given
+    /// chunk.
     pub async fn read_slice(&self, inode: Ino, chunk_index: usize) -> Result<Option<Arc<Slices>>> {
         debug!(
             "read_slice with inode {:?}, chunk_index {:?}",

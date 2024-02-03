@@ -1,17 +1,17 @@
-use bytesize::ByteSize;
 use std::{
     cmp::{max, min},
     io::{Cursor, Write},
     sync::Arc,
 };
 
+use bytesize::ByteSize;
 use snafu::ensure;
 use tracing::debug;
 
-use crate::vfs::err::ErrLIBCSnafu;
 use crate::vfs::{
-    err::{Result, StorageError},
+    err::{ErrLIBCSnafu, Result},
     storage::{sto::StoEngine, EngineConfig},
+    VFSError,
 };
 
 pub(crate) struct ReadBuffer {
@@ -106,7 +106,7 @@ impl ReadBuffer {
 }
 
 #[derive(Debug)]
-enum Block {
+pub(crate) enum Block {
     // The block is empty, means we have not write
     // it yet.
     Empty,
@@ -273,7 +273,7 @@ impl WriteBuffer {
 
             match block {
                 Block::Empty => {
-                    return Err(StorageError::ReadEmptyBlock)?;
+                    return Err(VFSError::ReadEmptyBlock)?;
                 }
                 Block::Occupy(buf) => {
                     dst[total_read_len..(total_read_len + read_len)]

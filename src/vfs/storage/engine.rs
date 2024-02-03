@@ -1,35 +1,37 @@
-use std::{
-    fmt::{Debug},
-    sync::Arc,
-    time::SystemTime,
-};
+use std::{fmt::Debug, sync::Arc, time::SystemTime};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::vfs::storage::reader::FileReadersRef;
 use crate::{
     meta::{engine::MetaEngine, types::Ino},
     vfs::{
         err::Result,
         storage::{
-            buffer::ReadBuffer,
-            scheduler::BackgroundTaskPool,
-            sto::StoEngine,
-            worker,
-            worker::Worker,
-            writer::{FileWritersRef}, WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
+            buffer::ReadBuffer, reader::FileReadersRef, scheduler::BackgroundTaskPool,
+            sto::StoEngine, worker, worker::Worker, writer::FileWritersRef, WriteBuffer,
+            DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
         },
     },
 };
 
 const DEFAULT_BUFFER_CAPACITY: usize = 300 << 20; // 300 MiB
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CacheEviction {
+    Disable,
+    Random,
+}
+
 /// The configuration of the storage [Engine].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    // Worker configs ===>
+    // ========Cache Configs ===>
+    pub capacity: usize,
+    pub eviction: CacheEviction,
+
+    // ========Worker configs ===>
     /// Number of region workers (default: 1/2 of cpu cores).
     /// Sets to 0 to use the default value.
     pub number_of_workers: usize,
@@ -38,7 +40,7 @@ pub struct Config {
     /// Max batch size for a worker to handle requests (default 64).
     pub worker_request_batch_size: usize,
 
-    // Buffer configs ===>
+    // ========Buffer configs ===>
     /// The total memory size for the write/read buffer.
     pub total_buffer_capacity: usize,
     /// chunk_size is the max size can one buffer
@@ -61,6 +63,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            capacity: 100 << 10,
+            eviction: CacheEviction::Random,
             number_of_workers: divide_num_cpus(2),
             worker_channel_size: 128,
             worker_request_batch_size: 64,

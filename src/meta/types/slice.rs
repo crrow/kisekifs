@@ -1,13 +1,13 @@
-use bincode::serialize;
-
 use std::sync::Arc;
 
-use crate::meta::err::{ErrBincodeDeserializeFailedSnafu, ErrInvalidSliceBufSnafu, Result};
-
+use bincode::serialize;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::meta::err::{ErrBincodeDeserializeFailedSnafu, ErrInvalidSliceBufSnafu, Result};
+
+pub type SliceID = u64;
 pub type OverlookedSlices = RangeMap<usize, Slice>;
 pub type OverlookedSlicesRef = Arc<OverlookedSlices>;
 
@@ -61,7 +61,7 @@ pub enum Slice {
         /// The chunk position of the slice.
         chunk_pos: u32,
         /// The unique id of the slice.
-        slice_id: u64,
+        id: SliceID,
         /// the underlying data size
         size: u32,
         _padding: u64,
@@ -71,7 +71,7 @@ pub enum Slice {
         /// The chunk position of the slice.
         chunk_pos: u32,
         /// The unique id of the slice.
-        slice_id: u64,
+        id: SliceID,
         /// the underlying data size
         size: u32,
         /// The offset of the borrowed slice in the owned slice.
@@ -85,7 +85,7 @@ impl Slice {
     pub fn new_owned(chunk_pos: usize, slice_id: u64, size: usize) -> Self {
         Slice::Owned {
             chunk_pos: chunk_pos as u32,
-            slice_id,
+            id: slice_id,
             size: size as u32,
             _padding: 0,
         }
@@ -111,8 +111,8 @@ impl Slice {
     }
     pub fn get_id(&self) -> usize {
         (match self {
-            Slice::Owned { slice_id, .. } => *slice_id,
-            Slice::Borrowed { slice_id, .. } => *slice_id,
+            Slice::Owned { id: slice_id, .. } => *slice_id,
+            Slice::Borrowed { id: slice_id, .. } => *slice_id,
         }) as usize
     }
     pub fn get_size(&self) -> usize {
@@ -141,7 +141,7 @@ mod tests {
     fn slice_v2() {
         let slice = Slice::Owned {
             chunk_pos: 0,
-            slice_id: 1,
+            id: 1,
             size: 1024,
             _padding: 0,
         };
@@ -153,7 +153,7 @@ mod tests {
 
         let slice = Slice::Borrowed {
             chunk_pos: 0,
-            slice_id: 1,
+            id: 1,
             size: 1024,
             off: 0,
             len: 1024,

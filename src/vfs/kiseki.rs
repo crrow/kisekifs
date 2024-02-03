@@ -21,15 +21,12 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
-
 use fuser::{FileType, TimeOrNow};
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{location, Location};
 use tokio::time::Instant;
-
 use tracing::{debug, info, trace};
 
-use crate::vfs::err::ErrLIBCSnafu;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -40,7 +37,7 @@ use crate::{
     },
     vfs::{
         config::VFSConfig,
-        err::Result,
+        err::{ErrLIBCSnafu, Result},
         handle::Handle,
         storage::{Engine, MAX_FILE_SIZE},
         VFSError::ErrLIBC,
@@ -700,8 +697,10 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::install_fmt_log;
-    use crate::meta::{Format, MetaConfig};
+    use crate::{
+        common::install_fmt_log,
+        meta::{Format, MetaConfig},
+    };
 
     async fn make_vfs() -> KisekiVFS {
         let meta_engine = MetaConfig::test_config().open().unwrap();

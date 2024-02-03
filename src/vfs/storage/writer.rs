@@ -23,12 +23,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::vfs::err::ErrLIBCSnafu;
 use crate::{
     common, meta,
     meta::{engine::MetaEngine, types::Ino},
     vfs::{
-        err::{InvalidInoSnafu, Result},
+        err::{ErrLIBCSnafu, InvalidInoSnafu, Result},
         storage::{
             cal_chunk_idx, cal_chunk_offset,
             worker::{FlushAndReleaseSliceReason, WorkerRequest},

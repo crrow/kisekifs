@@ -70,6 +70,9 @@ sonyflake = "0.2.0"
 itertools = "0.12.1"
 once_cell = "1.19.0"
 bytesize = "1.3.0"
+moka = { version = "0.12.5", features = ["future"] }
+toml = "0.8.9"
+crc32fast = "1.3.2"
 
 [build-dependencies]
 built = {version = "0.7.1", features= ["git2"]}

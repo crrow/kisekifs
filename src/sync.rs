@@ -22,10 +22,7 @@
 
 #[cfg(not(all(feature = "shuttle", test)))]
 mod std {
-    pub use std::{sync::*};
-
-    
-    
+    pub use std::sync::*;
 }
 
 #[cfg(not(all(feature = "shuttle", test)))]
