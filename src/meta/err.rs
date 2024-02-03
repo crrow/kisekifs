@@ -60,6 +60,8 @@ pub enum MetaError {
     ErrLibc {
         kind: libc::c_int,
     },
+    #[snafu(display("invalid slices buf, db may be corrupted"))]
+    ErrInvalidSliceBuf,
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -94,6 +96,7 @@ impl ToErrno for MetaError {
                 libc::EIO
             }
             MetaError::ErrLibc { kind } => *kind,
+            MetaError::ErrInvalidSliceBuf => libc::EINTR,
         }
     }
 }

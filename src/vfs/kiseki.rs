@@ -40,7 +40,6 @@ use crate::{
         config::VFSConfig,
         err::{Result, VFSError},
         handle::Handle,
-        reader::DataReader,
         storage::{Engine, MAX_FILE_SIZE},
         VFSError::ErrLIBC,
         FH,
@@ -52,10 +51,9 @@ pub struct KisekiVFS {
     meta: Arc<MetaEngine>,
     internal_nodes: PreInternalNodes,
     pub(crate) data_engine: Arc<Engine>,
-    pub(crate) reader: DataReader,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
-    pub(crate) handles: DashMap<Ino, DashMap<FH, Handle>>,
+    pub(crate) handles: DashMap<Ino, DashMap<FH, Arc<Handle>>>,
 }
 
 impl Debug for KisekiVFS {
@@ -100,7 +98,6 @@ impl KisekiVFS {
             internal_nodes,
             data_engine: storage_engine,
             meta: meta.clone(),
-            reader: DataReader::default(),
             modified_at: DashMap::new(),
             _next_fh: AtomicU64::new(1),
             handles: DashMap::new(),
@@ -164,7 +161,8 @@ impl KisekiVFS {
             if len > entry.attr.length {
                 entry.attr.length = len;
             }
-            self.reader.truncate(entry.inode, entry.attr.length);
+            self.data_engine
+                .truncate_reader(entry.inode, entry.attr.length);
         }
     }
 
@@ -174,7 +172,7 @@ impl KisekiVFS {
             if len > attr.length {
                 attr.length = len;
             }
-            self.reader.truncate(inode, attr.length);
+            self.data_engine.truncate_reader(inode, attr.length);
         }
     }
 
@@ -314,7 +312,7 @@ impl KisekiVFS {
         name: &str,
         mode: u16,
         cumask: u16,
-        flags: u32,
+        flags: libc::c_int,
     ) -> Result<(Entry, u64)> {
         debug!("fs:create with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
@@ -337,7 +335,7 @@ impl KisekiVFS {
             .with_ttl(ttl)
             .to_owned();
         self.update_length(&mut e);
-        let fh = self.new_handle(inode);
+        let fh = self.new_file_handle(inode, e.attr.length, flags)?;
         Ok((e, fh))
     }
 
@@ -560,12 +558,14 @@ impl KisekiVFS {
         if offset >= MAX_FILE_SIZE as u64 || offset + size >= MAX_FILE_SIZE as u64 {
             return Err(ErrLIBC { kind: EFBIG });
         }
-        if !handle.can_read() {
-            return Err(ErrLIBC { kind: EBADF });
-        }
-        let read_guard = handle.acquire_read_lock().await?;
-
-        todo!()
+        let fr = self
+            .data_engine
+            .find_file_reader(ino, fh)
+            .ok_or(ErrLIBC { kind: EBADF })?;
+        self.data_engine.flush_if_exists(ino).await?;
+        let mut buf = vec![0u8; size as usize];
+        let read_len = fr.read(offset as usize, buf.as_mut_slice()).await?;
+        Ok(Bytes::from(buf))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -603,7 +603,8 @@ impl KisekiVFS {
         }
 
         let len = self.data_engine.write(ino, offset, data).await?;
-        self.reader.truncate(ino, self.data_engine.get_length(ino));
+        self.data_engine
+            .truncate_reader(ino, self.data_engine.get_length(ino));
         Ok(len as u32)
     }
 
@@ -614,13 +615,14 @@ impl KisekiVFS {
             return Ok(());
         };
 
-        if let Some(fw) = self.data_engine.get_file_writer(ino) {
+        if let Some(fw) = self.data_engine.find_file_writer(ino) {
             fw.do_flush().await?;
         }
 
-        if lock_owner != h.ofd_owner {
-            h.ofd_owner = 0;
+        if lock_owner != h.get_ofd_owner() {
+            h.set_ofd_owner(0);
         }
+
         if h.locks & 2 != 0 {
             self.meta
                 .set_lk(
@@ -635,6 +637,19 @@ impl KisekiVFS {
                 .await?;
         }
         Ok(())
+    }
+
+    pub async fn fsync(&self, ctx: &MetaContext, ino: Ino, fh: u64, data_sync: bool) -> Result<()> {
+        if ino.is_special() {
+            return Ok(());
+        }
+
+        self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        if let Some(fw) = self.data_engine.find_file_writer(ino) {
+            fw.do_flush().await?;
+        }
+
+        return Ok(());
     }
 }
 
@@ -657,5 +672,64 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
         libc::S_IFDIR => Ok(FileType::Directory),
         libc::S_IFCHR => Ok(FileType::CharDevice),
         _ => Err(ErrLIBC { kind: libc::EPERM }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::install_fmt_log;
+    use crate::meta::{Format, MetaConfig};
+
+    async fn make_vfs() -> KisekiVFS {
+        let meta_engine = MetaConfig::test_config().open().unwrap();
+        let format = Format::default();
+        meta_engine.init(format, false).await.unwrap();
+        KisekiVFS::new(VFSConfig::default(), meta_engine).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_tests() {
+        install_fmt_log();
+
+        let vfs = make_vfs().await;
+        basic_write(&vfs).await;
+    }
+
+    async fn basic_write(vfs: &KisekiVFS) {
+        let meta_ctx = MetaContext::background();
+        let (entry, fh) = vfs
+            .create(&meta_ctx, ROOT_INO, "f", 0o755, 0, libc::O_RDWR)
+            .await
+            .unwrap();
+
+        let write_len = vfs
+            .write(&meta_ctx, entry.inode, fh, 0, b"hello", 0, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(write_len, 5);
+
+        vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
+
+        let write_len = vfs
+            .write(&meta_ctx, entry.inode, fh, 100 << 20, b"world", 0, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(write_len, 5);
+
+        vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
+
+        sequential_write(&vfs, entry.inode, fh).await;
+    }
+    async fn sequential_write(vfs: &KisekiVFS, inode: Ino, fh: FH) {
+        let meta_ctx = MetaContext::background();
+        let data = vec![0u8; 128 << 10];
+        for i in 0..=1000 {
+            let write_len = vfs
+                .write(&meta_ctx, inode, fh, 128 << 10, &data, 0, 0, None)
+                .await
+                .unwrap();
+            assert_eq!(write_len, 128 << 10);
+        }
     }
 }

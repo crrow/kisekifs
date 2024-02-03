@@ -24,43 +24,42 @@ and is not endorsed by or affiliated with the Juice company.
 
 # Implementation
 ## Write
-First we will receive an open request with write flag set to true.
-Then we should create a file handle, which can hold some memory 
-for the writing. 
+Each write is a slice, the slice size range from [64KiB - 4MiB].
 
-When we receive a write request, we should write the data to the
-file handle. Each write will make a slice, which cannot exceed the 
-chunk size, and slice cannot cross the chunk boundary. Which means 
-one chunk is made by one or more slices.
-
-Under the hood, each slice will be divided into blocks, which is the 
-actual data structure that will be written to the cache storage.
-
-And if enable the cache, we should try to write the blocks into the
-cache before the data has been uploaded, while when we upload the block
-to object storage, we should take the ownership of the data. According 
-to this, we make can sure the cache is always consistent with the backend
-storage, since it is read only.
-
-Write: 
-    1. Find the file handle
-    2. Find the file-local temporary write-only memory for the writing
-        2.1 find the chunk by offset
-        2.2 find the slice by offset and size
-        2.3 slice is consist of blocks. (slice size: MIN_BLOCK_SIZE ~ MAX_CHUNK_SIZE)
-        2.4 blocks is consist of pages. (block size: PAGE_SIZE ~ BLOCK_SIZE)
-        2.5 MIN_BLOCK_SIZE = PAGE_SIZE = 64KiB = 1 << 16 bits
-        2.6 BLOCK_SIZE = 4MiB = 1 << 22 bits
-        2.7 MAX_CHUNK_SIZE = 64MiB = 1 << 26 bits
-    3. Write the data to the memory
-    4. Write data to the cache if necessary
-    5. Write data to the backend storage if necessary
+Cache the slice into the cache, and write the slice into the object store.
 
 ## Read
-Read:
-    1. Find the file handle
-    2. Try to read data from cache
-    3. If not found, read data from backend storage
+According to the read range, get the slices.
+
+If the file size less than the min slice size, do fast-path: just read the whole file, 
+and cache it.
+
+Slow path: check the current reading process, each if others is reading the range we wanted also,
+read their data and build req for our self.
+
+So will the following case happen ?
+
+```
+Question, do the following case exists? we need to make a SliceReader for just one bit.
+
+insert slice-reader: 0..512
+insert slice-reader: 520..720
+insert slice-reader: 720..1021
+insert slice-reader: 1021..1022
+insert slice-reader: 1022..1023
+invalidate 720 ~ 1021.
+invalidate 1021 ~ 1022.
+
+expect read: 1020..1024
+
+find gap 1023..1024, need to make req
+want: 1020..1024, overlapping but invalid range 720..1021, cut result: 1020..1021
+want: 1020..1024, overlapping but invalid range 1021..1022, cut result: 1021..1022
+after merge: want: 1020..1024, result: 1020..1022
+after merge: want: 1020..1024, result: 1023..1024
+
+```
+
 
 ## Concurrent Behavior
 1. For reading, we don't use lock at all, even if there are someone is writing it.

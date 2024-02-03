@@ -1,3 +1,4 @@
+use bytesize::ByteSize;
 use std::{
     cmp::{max, min},
     io::{Cursor, Write},
@@ -89,8 +90,12 @@ impl ReadBuffer {
         }
 
         let key = generate_slice_key(self.slice_id, block_idx, read_block_size);
-        debug!("block_idx: {block_idx}, try to read [{key}] from object storage");
+        debug!("block_idx: {block_idx}, try to read [{key}]");
         let mut buf = self.sto.get(&key)?;
+        debug!(
+            "read block: {block_idx} from object storage succeed, read len: {} kib",
+            buf.len() / 1024,
+        );
         let mut cursor = Cursor::new(dst);
         // TODO: try to use copy.
         let n = cursor
@@ -240,13 +245,14 @@ impl WriteBuffer {
 
         debug!(
             "reading buffer, at offset: {}, expect read len: {}",
-            offset, expected_read_len
+            offset,
+            ByteSize::kib(expected_read_len as u64),
         );
         debug_assert!(
             offset + expected_read_len <= self.config.chunk_size,
             "offset {} + expect read len {} will exceed the chunk size",
             offset,
-            expected_read_len
+            ByteSize::kib(expected_read_len as u64)
         );
         debug_assert!(
             offset >= self.flushed_length,
@@ -285,7 +291,6 @@ impl WriteBuffer {
     /// Try to flush the buffer to the given offset.
     pub(crate) fn flush_to(&mut self, offset: usize) -> Result<()> {
         debug_assert!(self.flushed_length <= offset);
-        defer!(debug!("flushing buffer succeed {offset}"););
 
         self.block_slots
             .iter_mut()
@@ -314,7 +319,11 @@ impl WriteBuffer {
                 _ => unreachable!("we have filtered out the empty and released block"),
             })
             .try_for_each(|(key, block_data)| -> Result<()> {
-                debug!("flushing block: {}", key);
+                debug!(
+                    "flushing block: [{}], block_len: {} KiB",
+                    key,
+                    block_data.len() / 1024,
+                );
                 self.sto.put(&key, block_data)
             })?;
 
@@ -445,5 +454,32 @@ mod tests {
         let n = rb.read_at(offset, page).unwrap();
         assert_eq!(n, data.len());
         assert_eq!(&page[..n], data);
+    }
+
+    #[test]
+    fn write_smallest() {
+        use crate::common::install_fmt_log;
+        install_fmt_log();
+
+        let config = Arc::new(EngineConfig::default());
+        let sto = new_debug_sto();
+        let mut wb = WriteBuffer::new(config.clone(), sto.clone());
+        wb.set_slice_id(1);
+
+        let data = vec![0u8; 65 << 10];
+        let mut offset = 0;
+        let n = wb.write_at(offset, &data).unwrap();
+        assert_eq!(n, data.len());
+        offset += n;
+        let n = wb.write_at(offset, &data).unwrap();
+        assert_eq!(n, data.len());
+
+        let size = wb.length;
+        wb.finish().unwrap();
+
+        let mut rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
+        let dst = &mut [0; 1];
+        let n = rb.read_at(0, dst).unwrap();
+        assert_eq!(n, 1);
     }
 }

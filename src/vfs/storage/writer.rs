@@ -68,7 +68,7 @@ impl Engine {
         self.file_writers.contains_key(&ino)
     }
 
-    pub(crate) fn get_file_writer(&self, ino: Ino) -> Option<Arc<FileWriter>> {
+    pub(crate) fn find_file_writer(&self, ino: Ino) -> Option<Arc<FileWriter>> {
         self.file_writers.get(&ino).map(|r| r.value().clone())
     }
 
@@ -86,14 +86,16 @@ impl Engine {
             .context(InvalidInoSnafu { ino })?;
         debug!("get file write success");
         let write_len = fw.write(offset, data).await?;
-        self.truncate_reader(ino, fw.get_length());
+        self.truncate_reader(ino, fw.get_length() as u64);
 
         Ok(write_len)
     }
 
-    /// Use the [FileWriter] to flush data to the backend object storage.
-    pub(crate) async fn flush(&self, fh: FH) -> Result<usize> {
-        todo!()
+    pub(crate) async fn flush_if_exists(&self, ino: Ino) -> Result<()> {
+        if let Some(fw) = self.file_writers.get(&ino) {
+            fw.do_flush().await?;
+        }
+        Ok(())
     }
 }
 
@@ -172,7 +174,7 @@ impl FileWriter {
             match r {
                 Ok(r) => match r {
                     Ok(wl) => {
-                        debug!("write {} bytes", wl);
+                        debug!("write {} KiB", wl / 1024);
                         write_len += wl
                     }
                     Err(e) => {
@@ -232,12 +234,12 @@ impl FileWriter {
                             debug!("flush chunk {} failed: {}", idx, e);
                             return;
                         }
-                        let guard = cw.slices.write().await;
-                        if guard.is_empty() {
-                            // all slices have been flushed.
-                            // we can release this chunk writer.
-                            chunk_writers_ref.remove(&idx);
-                        };
+                        // let guard = cw.slices.write().await;
+                        // if guard.is_empty() {
+                        //     // all slices have been flushed.
+                        //     // we can release this chunk writer.
+                        //     chunk_writers_ref.remove(&idx);
+                        // };
                     })
                 })
                 .collect::<Vec<_>>();
@@ -409,10 +411,10 @@ impl ChunkWriterBackgroundTask {
                     // free this chunk writer.
                     if self.cw.write_cnt.load(Ordering::Acquire) == 0 {
                         // no one is writing, we can free this chunk writer.
-                        self.parent
-                            .chunk_writers
-                            .remove(&self.chunk_idx)
-                            .expect("chunk writer should exist");
+                        debug!(
+                            "exit the ChunkWriterBackgroundTask on ino {} chunk {}",
+                            self.ino, self.chunk_idx
+                        );
                         return;
                     }
                 }
@@ -454,8 +456,8 @@ impl ChunkWriterBackgroundTask {
                     .meta_engine
                     .write_slice(
                         self.parent.ino,
-                        self.chunk_idx as u32,
-                        sw.chunk_start_offset as u32,
+                        self.chunk_idx,
+                        sw.chunk_start_offset,
                         meta_slice,
                         mtime,
                     )
@@ -541,7 +543,11 @@ impl ChunkWriter {
         self.write_cnt.fetch_add(1, Ordering::AcqRel);
         defer!(self.write_cnt.fetch_sub(1, Ordering::AcqRel););
 
-        debug!("write {} bytes to chunk {}", data.len(), self.chunk_idx);
+        debug!(
+            "write {} KiB to chunk {}",
+            data.len() / 1024,
+            self.chunk_idx
+        );
         let slice = self.find_writable_slice(chunk_pos).await;
         debug!("write to slice {}", slice.internal_seq);
         let (write_len, total_write_len, flushed_len) = slice
@@ -770,14 +776,13 @@ impl SliceWriter {
         Ok(())
     }
 
-    async fn to_meta_slice(self: &Arc<Self>) -> meta::SliceView {
+    async fn to_meta_slice(self: &Arc<Self>) -> meta::types::Slice {
         let guard = self.write_buffer.read().await;
-        meta::SliceView {
-            id: guard.get_slice_id().unwrap() as u64,
-            size: guard.length() as u32, // WHAT FUCK IS IT
-            off: 0,
-            len: guard.length() as u32,
-        }
+        meta::types::Slice::new_owned(
+            self.chunk_start_offset,
+            guard.get_slice_id().unwrap() as u64,
+            guard.length(),
+        )
     }
 }
 
@@ -897,5 +902,23 @@ mod tests {
         ] {
             i.run(Ino(1), engine.clone()).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_write() {
+        install_fmt_log();
+
+        let meta_engine = MetaConfig::default().open().unwrap();
+        let sto_engine = new_debug_sto();
+        let engine = Arc::new(Engine::new(
+            Arc::new(EngineConfig::default()),
+            sto_engine,
+            Arc::new(meta_engine),
+        ));
+
+        engine.new_file_writer(Ino(1), 0);
+        let data = vec![0u8; 65 << 20];
+        let write_len = engine.write(Ino(1), 0, &data).await;
+        assert!(write_len.is_ok());
     }
 }

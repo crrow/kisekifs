@@ -8,13 +8,13 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use crate::vfs::storage::reader::FileReadersRef;
 use crate::{
     meta::{engine::MetaEngine, types::Ino},
     vfs::{
         err::Result,
         storage::{
             buffer::ReadBuffer,
-            reader::FileReadersRef,
             scheduler::BackgroundTaskPool,
             sto::StoEngine,
             worker,
@@ -116,7 +116,7 @@ impl Engine {
             meta_engine,
             workers: worker,
             file_writers,
-            file_readers: Arc::new(DashMap::new()),
+            file_readers: Arc::new(Default::default()),
             id_generator,
         }
     }
