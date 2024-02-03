@@ -22,10 +22,10 @@
 
 #[cfg(not(all(feature = "shuttle", test)))]
 mod std {
-    pub use std::{sync::*, thread};
+    pub use std::{sync::*};
 
-    pub use async_channel;
-    pub use async_lock::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
+    
+    
 }
 
 #[cfg(not(all(feature = "shuttle", test)))]

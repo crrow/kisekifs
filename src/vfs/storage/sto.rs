@@ -3,7 +3,7 @@ use std::{fmt::Debug, sync::Arc};
 use opendal::Operator;
 use snafu::ResultExt;
 
-use crate::vfs::err::{ObjectStorageSnafu, Result};
+use crate::vfs::err::{ErrObjectStorageSnafu, Result};
 
 /// StoEngine is a trait for backend storage engines.
 pub(crate) trait StoEngine: 'static + Debug + Send + Sync {
@@ -27,7 +27,7 @@ pub(crate) fn new_debug_sto() -> Arc<dyn StoEngine> {
 
 impl ObjectSto {
     pub(crate) fn new_memory() -> Self {
-        let mut builder = opendal::services::Memory::default();
+        let builder = opendal::services::Memory::default();
         let op = Operator::new(builder).unwrap().finish();
         Self { operator: op }
     }
@@ -38,7 +38,7 @@ impl StoEngine for ObjectSto {
         self.operator
             .blocking()
             .write(key, data)
-            .context(ObjectStorageSnafu)?;
+            .context(ErrObjectStorageSnafu)?;
         Ok(())
     }
 
@@ -47,7 +47,7 @@ impl StoEngine for ObjectSto {
             .operator
             .blocking()
             .read(key)
-            .context(ObjectStorageSnafu)?;
+            .context(ErrObjectStorageSnafu)?;
         Ok(v)
     }
 
@@ -55,7 +55,7 @@ impl StoEngine for ObjectSto {
         self.operator
             .blocking()
             .delete(key)
-            .context(ObjectStorageSnafu)?;
+            .context(ErrObjectStorageSnafu)?;
         Ok(())
     }
 }

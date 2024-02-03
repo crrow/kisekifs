@@ -14,7 +14,7 @@
 
 use std::{io::Write, time::Duration};
 
-use byteorder::{LittleEndian, WriteBytesExt};
+
 use fuser::FileType;
 use serde::{Deserialize, Serialize};
 

@@ -1,32 +1,29 @@
 use std::{
     cmp::min,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     default::Default,
-    fmt::{Debug, Formatter},
-    future::Future,
-    pin::Pin,
+    fmt::Debug,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Weak,
     },
     time::Duration,
 };
 
 use dashmap::DashMap;
-use datafusion_common::arrow::array::Array;
 use libc::EIO;
 use scopeguard::defer;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use tokio::{
     select,
-    sync::{Mutex, Notify, RwLock},
+    sync::{Notify, RwLock},
     task::JoinHandle,
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
-use unique_id::Generator;
 
+use crate::vfs::err::ErrLIBCSnafu;
 use crate::{
     common, meta,
     meta::{engine::MetaEngine, types::Ino},
@@ -37,7 +34,6 @@ use crate::{
             worker::{FlushAndReleaseSliceReason, WorkerRequest},
             Engine, EngineConfig, WriteBuffer,
         },
-        VFSError, FH,
     },
 };
 
@@ -163,8 +159,7 @@ impl FileWriter {
                     &data[location.buf_start_at..location.buf_start_at + location.need_write_len];
                 let chunk_writer = self.get_chunk_writer(location.chunk_idx);
                 common::runtime::spawn(async move {
-                    let write_len = chunk_writer.write(location.chunk_offset, data).await;
-                    write_len
+                    chunk_writer.write(location.chunk_offset, data).await
                 })
             })
             .collect::<Vec<_>>();
@@ -177,14 +172,14 @@ impl FileWriter {
                         debug!("write {} KiB", wl / 1024);
                         write_len += wl
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         // TODO: use better error
-                        return Err(VFSError::ErrLIBC { kind: EIO });
+                        return ErrLIBCSnafu { kind: EIO }.fail()?;
                     }
                 },
-                Err(e) => {
+                Err(_e) => {
                     // TODO: use better error
-                    return Err(VFSError::ErrLIBC { kind: EIO });
+                    return ErrLIBCSnafu { kind: EIO }.fail()?;
                 }
             }
         }
@@ -228,11 +223,10 @@ impl FileWriter {
                 .map(|r| {
                     let idx = r.chunk_idx;
                     let cw = r.value().clone();
-                    let chunk_writers_ref = self.chunk_writers.clone();
+                    let _chunk_writers_ref = self.chunk_writers.clone();
                     common::runtime::spawn(async move {
                         if let Err(e) = cw.do_finish().await {
                             debug!("flush chunk {} failed: {}", idx, e);
-                            return;
                         }
                         // let guard = cw.slices.write().await;
                         // if guard.is_empty() {
@@ -306,12 +300,6 @@ struct FileWriterTask {
     cancel_token: CancellationToken,
 }
 
-impl FileWriterTask {
-    async fn start(&mut self) {
-        loop {}
-    }
-}
-
 #[derive(Debug, Eq, PartialEq, Clone)]
 struct ChunkWriteCtx {
     // write to which chunk
@@ -329,7 +317,6 @@ fn find_write_location(
     offset: usize,
     expect_write_len: usize,
 ) -> Vec<ChunkWriteCtx> {
-    let offset = offset;
     let expected_write_len = expect_write_len;
 
     let start_chunk_idx = cal_chunk_idx(offset, chunk_size);
@@ -340,7 +327,6 @@ fn find_write_location(
     let mut left = expected_write_len;
 
     (start_chunk_idx..=end_chunk_idx)
-        .into_iter()
         .map(move |idx| {
             let max_can_write = min(chunk_size - chunk_pos, left);
             // debug!(
@@ -355,8 +341,8 @@ fn find_write_location(
                 buf_start_at,
             };
             chunk_pos = cal_chunk_offset(chunk_pos + max_can_write, chunk_size);
-            buf_start_at = buf_start_at + max_can_write;
-            left = left - max_can_write;
+            buf_start_at += max_can_write;
+            left -= max_can_write;
             ctx
         })
         .collect::<Vec<_>>()
@@ -405,7 +391,7 @@ impl ChunkWriterBackgroundTask {
                 drop(read_guard);
 
                 // wait for all writers to finish.
-                let mut write_guard = self.cw.slices.write().await;
+                let write_guard = self.cw.slices.write().await;
                 // double check
                 if write_guard.is_empty() {
                     // free this chunk writer.
@@ -513,7 +499,7 @@ pub(crate) struct ChunkWriter {
 
 impl ChunkWriter {
     fn new(
-        parent: Arc<FileWriter>,
+        _parent: Arc<FileWriter>,
         ino: Ino,
         engine: Weak<Engine>,
         engine_config: Arc<EngineConfig>,
@@ -523,7 +509,8 @@ impl ChunkWriter {
     ) -> Arc<ChunkWriter> {
         let has_written = Arc::new(AtomicBool::new(false));
         let has_written_notify = Arc::new(Notify::new());
-        let cw = Arc::new(ChunkWriter {
+
+        Arc::new(ChunkWriter {
             ino,
             engine,
             engine_config,
@@ -535,8 +522,7 @@ impl ChunkWriter {
             has_written_notify: has_written_notify.clone(),
             write_cnt: Arc::new(AtomicUsize::new(0)),
             seq_generator,
-        });
-        cw
+        })
     }
 
     async fn write(self: &Arc<Self>, chunk_pos: usize, data: &[u8]) -> Result<usize> {
@@ -550,7 +536,7 @@ impl ChunkWriter {
         );
         let slice = self.find_writable_slice(chunk_pos).await;
         debug!("write to slice {}", slice.internal_seq);
-        let (write_len, total_write_len, flushed_len) = slice
+        let (write_len, total_write_len, _flushed_len) = slice
             .write(chunk_pos - slice.chunk_start_offset, data)
             .await?;
 
@@ -578,8 +564,7 @@ impl ChunkWriter {
         debug!("try to find writable slice for chunk {}", self.chunk_idx);
         let read_guard = self.slices.read().await;
         debug!("get slices lock succeed");
-        let mut iter_cnt = 0;
-        for (seq, sw) in read_guard.iter().rev() {
+        for (iter_cnt, (_seq, sw)) in read_guard.iter().rev().enumerate() {
             let sw = sw.clone();
             if !sw.frozen() {
                 let (flushed, length) = sw.get_flushed_length_and_total_write_length().await;
@@ -597,7 +582,6 @@ impl ChunkWriter {
                     .await;
                 }
             }
-            iter_cnt += 1;
         }
         drop(read_guard);
 
@@ -668,7 +652,7 @@ impl ChunkWriter {
         slice_seq: u64,
     ) -> Option<Arc<SliceWriter>> {
         let guard = self.slices.read().await;
-        guard.get(&slice_seq).map(|r| r.clone())
+        guard.get(&slice_seq).cloned()
     }
 }
 
@@ -758,7 +742,7 @@ impl SliceWriter {
     async fn prepare_slice_id(self: &Arc<Self>, meta_engine: Arc<MetaEngine>) -> Result<()> {
         if !self.slice_id_prepared.load(Ordering::Acquire) {
             let guard = self.write_buffer.read().await;
-            if let None = guard.get_slice_id() {
+            if guard.get_slice_id().is_none() {
                 drop(guard);
                 if self.slice_id_prepared.load(Ordering::Acquire) {
                     // load again

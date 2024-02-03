@@ -1,6 +1,6 @@
 use libc::c_int;
 use opendal::ErrorKind;
-use snafu::Snafu;
+use snafu::{Location, Snafu};
 use tracing::error;
 
 use crate::{common::err::ToErrno, meta::types::Ino};
@@ -20,6 +20,8 @@ pub enum MetaError {
     #[snafu(display("failed to open operator: {}", source))]
     FailedToOpenOperator {
         source: opendal::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
     #[snafu(display("bad access permission for inode:{inode}, want:{want}, grant:{grant}"))]
     ErrBadAccessPerm {
@@ -60,8 +62,15 @@ pub enum MetaError {
     ErrLibc {
         kind: libc::c_int,
     },
-    #[snafu(display("invalid slices buf, db may be corrupted"))]
-    ErrInvalidSliceBuf,
+    ErrInvalidSliceBuf {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    ErrAsyncTimeout {
+        source: tokio::time::error::Elapsed,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -96,7 +105,8 @@ impl ToErrno for MetaError {
                 libc::EIO
             }
             MetaError::ErrLibc { kind } => *kind,
-            MetaError::ErrInvalidSliceBuf => libc::EINTR,
+            MetaError::ErrInvalidSliceBuf { .. } => libc::EINTR,
+            MetaError::ErrAsyncTimeout { .. } => libc::EINTR,
         }
     }
 }

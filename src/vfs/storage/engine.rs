@@ -1,5 +1,5 @@
 use std::{
-    fmt::{Debug, Formatter},
+    fmt::{Debug},
     sync::Arc,
     time::SystemTime,
 };
@@ -19,10 +19,8 @@ use crate::{
             sto::StoEngine,
             worker,
             worker::Worker,
-            writer::{FileWriter, FileWritersRef},
-            ObjectSto, WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
+            writer::{FileWritersRef}, WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
         },
-        FH,
     },
 };
 

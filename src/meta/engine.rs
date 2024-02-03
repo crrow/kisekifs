@@ -16,9 +16,6 @@ use std::{
     cmp::{max, min},
     collections::HashMap,
     fmt::{Debug, Formatter},
-    future::Future,
-    ops::BitOr,
-    os::unix::ffi::OsStrExt,
     path::{Component, Path},
     sync::{
         atomic::{AtomicI64, Ordering::Acquire},
@@ -30,17 +27,16 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
-use futures::TryStream;
+
 use lazy_static::lazy_static;
-use libc::EACCES;
-use opendal::{raw::oio::WriteExt, ErrorKind, Operator};
-use rangemap::RangeMap;
+use opendal::{ErrorKind, Operator};
+
 use scopeguard::defer;
 use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::meta::types::{OverlookedSlicesRef, Slice, Slices};
+use crate::meta::types::{Slice, Slices};
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -62,9 +58,9 @@ pub(crate) const SLICE_ID_BATCH: u64 = 4 << 10;
 
 lazy_static! {
     static ref COUNTER_LOCKERS: DashMap<Counter, tokio::sync::RwLock<()>> = {
-        let mut map = DashMap::new();
+        let map = DashMap::new();
         for counter in COUNTER_ENUMS.iter() {
-            map.insert(counter.clone(), tokio::sync::RwLock::new(()));
+            map.insert(*counter, tokio::sync::RwLock::new(()));
         }
         map
     };
@@ -98,6 +94,7 @@ pub(crate) enum Counter {
 }
 
 impl Counter {
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_str(&self) -> &'static str {
         match self {
             Counter::UsedSpace => COUNTER_STRINGS[0],
@@ -133,7 +130,7 @@ impl Counter {
         drop(guard);
         Ok(counter)
     }
-    pub async fn load(&self, operator: Arc<Operator>) -> std::result::Result<u64, opendal::Error> {
+    pub async fn load(&self, operator: Arc<Operator>) -> Result<u64> {
         let counter_key = self.generate_sto_key();
         let counter = match operator.read(&counter_key).await {
             Ok(ref buf) => {
@@ -147,7 +144,7 @@ impl Counter {
                 if e.kind() == ErrorKind::NotFound {
                     0
                 } else {
-                    return Err(e);
+                    return Err(e).context(ErrFailedToReadFromStoSnafu { key: counter_key })?;
                 }
             }
         };
@@ -211,7 +208,7 @@ pub struct IdTable {
 
 impl IdTable {
     /// Return a new empty `IdTable`.
-    pub fn new(operator: Arc<Operator>, counter: Counter, step: u64) -> Self {
+    pub(crate) fn new(operator: Arc<Operator>, counter: Counter, step: u64) -> Self {
         Self {
             next_max_pair: tokio::sync::RwLock::new((0, 0)),
             operator,
@@ -277,7 +274,7 @@ impl OpenFiles {
     pub(crate) fn update(&self, ino: Ino, attr: &mut InodeAttr) -> bool {
         self.files
             .get_mut(&ino)
-            .and_then(|mut open_file| {
+            .map(|mut open_file| {
                 if attr.mtime != open_file.attr.mtime {
                     open_file.chunks = HashMap::new();
                 } else {
@@ -285,7 +282,7 @@ impl OpenFiles {
                 }
                 open_file.attr = attr.clone();
                 open_file.last_check = std::time::Instant::now();
-                return Some(());
+                Some(())
             })
             .is_some()
     }
@@ -303,7 +300,7 @@ impl OpenFiles {
                 );
             }
             Some(mut op) => {
-                let mut op = op.value_mut();
+                let op = op.value_mut();
                 if op.attr.mtime == attr.mtime {
                     attr.keep_cache = op.attr.keep_cache;
                 }
@@ -316,28 +313,20 @@ impl OpenFiles {
 
     pub(crate) fn open_check(&self, ino: Ino) -> Option<InodeAttr> {
         if let Some(mut of) = self.files.get_mut(&ino) {
-            let mut of = of.value_mut();
+            let of = of.value_mut();
             if of.last_check.elapsed() < self.ttl {
                 of.reference_count += 1;
                 return Some(of.attr.clone());
             }
         }
 
-        return None;
+        None
     }
 
     pub(crate) fn update_chunk_slices_info(&self, ino: Ino, chunk_idx: usize, views: Arc<Slices>) {
         if let Some(mut of) = self.files.get_mut(&ino) {
-            let mut of = of.value_mut();
+            let of = of.value_mut();
             of.chunks.insert(chunk_idx, views);
-        }
-    }
-
-    pub(crate) fn invalidate_chunk_slice_info(&self, inode: Ino, chunk_idx: usize) {
-        defer!(debug!("invalidate ino: {}, chunk: {},  slice info succeed", inode, chunk_idx););
-        if let Some(mut of) = self.files.get_mut(&inode) {
-            let mut of = of.value_mut();
-            of.chunks.remove(&chunk_idx);
         }
     }
 }
@@ -387,7 +376,7 @@ impl MetaEngine {
         Ok(m)
     }
     // Init is used to initialize a meta service.
-    pub async fn init(&self, format: Format, force: bool) -> Result<()> {
+    pub async fn init(&self, format: Format, _force: bool) -> Result<()> {
         info!("do init ...");
         let mut need_init_root = false;
         if let Some(old_format) = self.sto_get_format().await? {
@@ -411,7 +400,7 @@ impl MetaEngine {
             .to_owned();
 
         if format.trash_days > 0 {
-            if let None = self.sto_get_attr(TRASH_INODE).await? {
+            if self.sto_get_attr(TRASH_INODE).await?.is_none() {
                 basic_attr.set_perm(0o555);
                 self.sto_set_attr(TRASH_INODE, &basic_attr).await?;
             }
@@ -444,7 +433,7 @@ impl MetaEngine {
     }
 
     /// StatFS returns summary statistics of a volume.
-    pub async fn stat_fs(&self, ctx: &MetaContext, inode: Ino) -> Result<FSStates> {
+    pub(crate) async fn stat_fs(&self, ctx: &MetaContext, inode: Ino) -> Result<FSStates> {
         let (state, no_error) = self.stat_root_fs().await;
         if !no_error {
             return Ok(state);
@@ -456,7 +445,7 @@ impl MetaEngine {
         }
 
         let attr = self.get_attr(inode).await?;
-        if let Err(_) = access(ctx, inode, &attr, MODE_MASK_R & MODE_MASK_X) {
+        if access(ctx, inode, &attr, MODE_MASK_R & MODE_MASK_X).is_err() {
             return Ok(state);
         }
 
@@ -465,9 +454,10 @@ impl MetaEngine {
     }
 
     async fn stat_root_fs(&self) -> (FSStates, bool) {
-        let mut no_error = true;
+        // we don't use result here to make sure we always return a FSStates.
+        #[warn(unused_assignments)]
         // Parallelize calls to get_counter()
-        let (mut used_space, mut inodes) = match tokio::try_join!(
+        let (mut used_space, mut inodes, no_error) = match tokio::try_join!(
             timeout(
                 Duration::from_millis(150),
                 Counter::UsedSpace.load(self.operator.clone()),
@@ -478,19 +468,20 @@ impl MetaEngine {
             )
         ) {
             Ok((used_space, total_inodes)) => {
-                // the inner sto may return error
-                no_error = used_space.is_ok() && total_inodes.is_ok();
+                let no_error = used_space.is_ok() && total_inodes.is_ok();
                 (
                     used_space.map_or(self.fs_states.used_space.load(Acquire), |x| x as i64),
                     total_inodes.map_or(self.fs_states.used_inodes.load(Acquire), |x| x as i64),
+                    // the inner sto may return error
+                    no_error,
                 )
             }
             Err(_) => {
                 // timeout case
-                no_error = false;
                 (
                     self.fs_states.used_space.load(Acquire),
                     self.fs_states.used_inodes.load(Acquire),
+                    false,
                 )
             }
         };
@@ -585,7 +576,7 @@ impl MetaEngine {
             Err(e) => match e {
                 MetaError::ErrFailedToReadFromSto { .. } if self.config.case_insensitive => {
                     // TODO: this is an optimization point
-                    self.resolve_case(&ctx, parent, name);
+                    self.resolve_case(ctx, parent, name);
                     return Err(e);
                 }
                 _ => return Err(e),
@@ -596,7 +587,7 @@ impl MetaEngine {
             self.dir_parents.insert(inode, parent);
         }
 
-        return Ok((inode, attr));
+        Ok((inode, attr))
     }
 
     // Verifies if the requested access mode (mmask) is permitted for the given user
@@ -661,7 +652,7 @@ impl MetaEngine {
         Ok((inode, attr))
     }
 
-    fn resolve_case(&self, ctx: &MetaContext, parent: Ino, name: &str) {
+    fn resolve_case(&self, _ctx: &MetaContext, _parent: Ino, _name: &str) {
         todo!()
     }
 
@@ -689,7 +680,7 @@ impl MetaEngine {
         ];
 
         if let Err(e) = self.do_read_dir(inode, plus, &mut basic_entries, -1).await {
-            if let MetaError::ErrFailedToReadFromSto { source, key } = e {
+            if let MetaError::ErrFailedToReadFromSto { source, key: _ } = e {
                 if source.kind() == opendal::ErrorKind::NotFound && inode.is_trash() {
                     return Ok(basic_entries);
                 }
@@ -705,7 +696,7 @@ impl MetaEngine {
         inode: Ino,
         plus: bool,
         basic_entries: &mut Vec<Entry>,
-        limit: i64,
+        _limit: i64,
     ) -> Result<()> {
         let entry_prefix = generate_sto_entry_key_str(inode, "");
         let sto_entries = self
@@ -717,7 +708,7 @@ impl MetaEngine {
         for sto_entry in &sto_entries {
             let name = sto_entry.name();
             info!("read entry in sto: {name}");
-            if name.len() == 0 {
+            if name.is_empty() {
                 warn!("empty entry name under {:?}", inode);
                 continue;
             }
@@ -736,7 +727,7 @@ impl MetaEngine {
         }
 
         // TODO: optimize me
-        if plus && basic_entries.len() != 0 {
+        if plus && !basic_entries.is_empty() {
             info!("in plus mode, get dir entries' attr");
             for e in basic_entries {
                 let attr = self.get_attr(e.inode).await?;
@@ -794,14 +785,15 @@ impl MetaEngine {
             String::new(),
         )
         .await
-        .and_then(|r| {
+        .map(|r| {
             self.dir_parents.insert(r.0, parent);
-            Ok(r)
+            r
         })
     }
 
     // Mknod creates a node in a directory with given name, type and permissions.
     #[instrument(skip(self, ctx), fields(parent=?parent, name=?name, typ=?typ, mode=?mode, cumask=?cumask, rdev=?rdev, path=?path))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn mknod(
         &self,
         ctx: &MetaContext,
@@ -819,7 +811,7 @@ impl MetaEngine {
         if self.config.read_only {
             return Err(MetaError::ErrMknod { kind: libc::EROFS });
         }
-        if name.len() == 0 {
+        if name.is_empty() {
             return Err(MetaError::ErrMknod { kind: libc::ENOENT });
         }
 
@@ -838,6 +830,7 @@ impl MetaEngine {
         Ok(r)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn do_mknod(
         &self,
         ctx: &MetaContext,
@@ -917,15 +910,15 @@ impl MetaEngine {
         let mut update_parent_attr = false;
         if !parent.is_trash() && typ == FileType::Directory {
             parent_attr.set_nlink(parent_attr.nlink + 1);
-            if self.config.skip_dir_nlink <= 0 {
-                let now = std::time::SystemTime::now();
+            if self.config.skip_dir_nlink == 0 {
+                let now = SystemTime::now();
                 parent_attr.mtime = now;
                 parent_attr.ctime = now;
                 update_parent_attr = true;
             }
         };
 
-        let now = std::time::SystemTime::now();
+        let now = SystemTime::now();
         attr.set_atime(now);
         attr.set_mtime(now);
         attr.set_ctime(now);
@@ -942,11 +935,12 @@ impl MetaEngine {
                 attr.set_gid(parent_attr.gid);
             }
             if typ == FileType::Directory {
-                attr.perm |= 02000;
-            } else if attr.perm & 02010 == 02010 && ctx.uid != 0 {
-                if !ctx.gid_list.contains(&parent_attr.gid) {
-                    attr.perm &= !02010;
-                }
+                attr.perm |= 0o2000;
+            } else if attr.perm & 0o2010 == 0o2010
+                && ctx.uid != 0
+                && !ctx.gid_list.contains(&parent_attr.gid)
+            {
+                attr.perm &= !0o2010;
             }
         }
 
@@ -995,8 +989,7 @@ impl MetaEngine {
             Err(e) => {
                 warn!("create failed: {:?}", e);
                 if e.to_errno() == libc::EEXIST {
-                    let rt = self.do_lookup(parent, name).await?;
-                    rt
+                    self.do_lookup(parent, name).await?
                 } else {
                     return Err(e);
                 }
@@ -1004,7 +997,7 @@ impl MetaEngine {
         };
 
         self.open_files.open(x.0, &mut x.1);
-        return Ok(x);
+        Ok(x)
     }
     pub async fn check_set_attr(
         &self,
@@ -1018,7 +1011,7 @@ impl MetaEngine {
         self.merge_attr(ctx, flags, inode, &cur_attr, new_attr, SystemTime::now())?;
 
         // TODO: implement me
-        return Ok(());
+        Ok(())
     }
     // SetAttr updates the attributes for given node.
     pub async fn set_attr(
@@ -1033,7 +1026,7 @@ impl MetaEngine {
         let cur_attr = self
             .sto_get_attr(inode)
             .await?
-            .ok_or_else(|| MetaError::ErrLibc { kind: libc::ENOENT })?;
+            .ok_or(MetaError::ErrLibc { kind: libc::ENOENT })?;
         if cur_attr.parent.is_trash() {
             return Err(MetaError::ErrLibc { kind: libc::EPERM });
         }
@@ -1067,12 +1060,12 @@ impl MetaEngine {
                 if !dirty_attr.is_dir() {
                     if ctx.uid != 0 || (dirty_attr.perm >> 3) & 1 != 0 {
                         // clear SUID and SGID
-                        dirty_attr.perm &= 01777; // WHY ?
-                        new_attr.perm &= 01777;
+                        dirty_attr.perm &= 0o1777; // WHY ?
+                        new_attr.perm &= 0o1777;
                     } else {
                         // keep SGID if the file is non-group-executable
-                        dirty_attr.perm &= 03777;
-                        new_attr.perm &= 03777;
+                        dirty_attr.perm &= 0o3777;
+                        new_attr.perm &= 0o3777;
                     }
                 }
             }
@@ -1098,19 +1091,17 @@ impl MetaEngine {
             changed = true;
         }
         if flags.contains(SetAttrFlags::MODE) {
-            if ctx.uid != 0 && new_attr.perm & 0o2000 != 0 {
-                if ctx.uid != cur.gid {
-                    new_attr.perm &= 0o5777;
-                }
+            if ctx.uid != 0 && new_attr.perm & 0o2000 != 0 && ctx.uid != cur.gid {
+                new_attr.perm &= 0o5777;
             }
             if cur.perm != new_attr.perm {
-                if ctx.uid != 0 && ctx.uid != cur.uid {
-                    if (cur.perm & 01777 != new_attr.perm & 01777
-                        || new_attr.perm & 02000 > cur.perm & 02000
-                        || new_attr.perm & 04000 > cur.perm & 04000)
-                    {
-                        return Err(MetaError::ErrLibc { kind: libc::EPERM });
-                    }
+                if ctx.uid != 0
+                    && ctx.uid != cur.uid
+                    && (cur.perm & 0o1777 != new_attr.perm & 0o1777
+                        || new_attr.perm & 0o2000 > cur.perm & 0o2000
+                        || new_attr.perm & 0o4000 > cur.perm & 0o4000)
+                {
+                    return Err(MetaError::ErrLibc { kind: libc::EPERM });
                 }
 
                 dirty_attr.perm = new_attr.perm;
@@ -1118,7 +1109,7 @@ impl MetaEngine {
             }
         }
         if flags.contains(SetAttrFlags::ATIME_NOW) {
-            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
+            if access(ctx, inode, cur, MODE_MASK_W).is_err() {
                 if ctx.uid != cur.uid {
                     return Err(MetaError::ErrLibc { kind: libc::EACCES });
                 }
@@ -1129,7 +1120,7 @@ impl MetaEngine {
             if ctx.uid != cur.uid {
                 return Err(MetaError::ErrLibc { kind: libc::EACCES });
             }
-            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
+            if access(ctx, inode, cur, MODE_MASK_W).is_err() {
                 if ctx.uid != cur.uid {
                     return Err(MetaError::ErrLibc { kind: libc::EACCES });
                 }
@@ -1138,7 +1129,7 @@ impl MetaEngine {
             changed = true;
         }
         if flags.contains(SetAttrFlags::MTIME_NOW) {
-            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
+            if access(ctx, inode, cur, MODE_MASK_W).is_err() {
                 if ctx.uid != cur.uid {
                     return Err(MetaError::ErrLibc { kind: libc::EACCES });
                 }
@@ -1149,10 +1140,8 @@ impl MetaEngine {
             if ctx.uid != cur.uid {
                 return Err(MetaError::ErrLibc { kind: libc::EACCES });
             }
-            if let Err(_) = access(ctx, inode, cur, MODE_MASK_W) {
-                if ctx.uid != cur.uid {
-                    return Err(MetaError::ErrLibc { kind: libc::EACCES });
-                }
+            if access(ctx, inode, cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
+                return Err(MetaError::ErrLibc { kind: libc::EACCES });
             }
             dirty_attr.mtime = new_attr.mtime;
             changed = true;
@@ -1194,10 +1183,10 @@ impl MetaEngine {
         access(ctx, inode, &attr, mask)?;
 
         let attr_flags = Flags::from_bits(attr.flags as u8).unwrap();
-        if attr_flags.contains(Flags::IMMUTABLE) || attr.parent.is_trash() {
-            if flags & (libc::O_WRONLY | libc::O_RDWR) != 0 {
-                return Err(MetaError::ErrLibc { kind: libc::EPERM });
-            }
+        if (attr_flags.contains(Flags::IMMUTABLE) || attr.parent.is_trash())
+            && flags & (libc::O_WRONLY | libc::O_RDWR) != 0
+        {
+            return Err(MetaError::ErrLibc { kind: libc::EPERM });
         }
         if attr_flags.contains(Flags::APPEND) {
             if flags & (libc::O_WRONLY | libc::O_RDWR) != 0 && flags & libc::O_APPEND == 0 {
@@ -1211,7 +1200,7 @@ impl MetaEngine {
         Ok(attr)
     }
 
-    fn touch_atime(&self, ctx: &MetaContext, inode: Ino) {}
+    fn touch_atime(&self, _ctx: &MetaContext, _inode: Ino) {}
 
     // Write put a slice of data on top of the given chunk.
     pub async fn write_slice(
@@ -1302,9 +1291,10 @@ impl MetaEngine {
     }
 
     /// [MetaEngine::set_lk] sets a file range lock on given file.
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_lk(
         &self,
-        ctx: &MetaContext,
+        _ctx: &MetaContext,
         inode: Ino,
         owner: u64,
         block: bool,
@@ -1360,7 +1350,7 @@ impl MetaEngine {
     }
 }
 
-pub fn access(ctx: &MetaContext, inode: Ino, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
+pub fn access(ctx: &MetaContext, _inode: Ino, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
     if ctx.uid == 0 {
         return Ok(());
     }
@@ -1376,7 +1366,7 @@ pub fn access(ctx: &MetaContext, inode: Ino, attr: &InodeAttr, perm_mask: u8) ->
         // perm = 0o644 (rw-r--r--)
         // perm_mask = 0o4 (read permission)
         // perm & perm_mask = 0o4 (read permission is granted)
-        return Err(MetaError::ErrLibc { kind: EACCES })?;
+        Err(MetaError::ErrLibc { kind: libc::EACCES })?;
     }
 
     Ok(())
@@ -1392,7 +1382,7 @@ impl Debug for MetaEngine {
 
 #[cfg(test)]
 mod tests {
-    use crate::meta::types::Slice;
+
     use std::path::PathBuf;
 
     use super::*;

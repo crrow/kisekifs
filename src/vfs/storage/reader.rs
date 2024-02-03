@@ -7,7 +7,7 @@ use rangemap::RangeMap;
 use std::cmp::min;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
-use tracing::{debug, warn};
+use tracing::{debug};
 
 impl Engine {
     /// Get the file reader for the given inode and file handle.
@@ -33,8 +33,7 @@ impl Engine {
         fh: FH,
     ) -> Option<Arc<FileReader>> {
         self.file_readers
-            .get(&(inode, fh))
-            .and_then(|m| Some(m.value().clone()))
+            .get(&(inode, fh)).map(|m| m.value().clone())
     }
 
     pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
@@ -240,7 +239,7 @@ mod tests {
         let format = Format::default();
         meta_engine.init(format, false).await.unwrap();
 
-        let (inode, attr) = meta_engine
+        let (inode, _attr) = meta_engine
             .create(&meta_ctx, ROOT_INO, "a", 0o650, 0, 0)
             .await
             .unwrap();

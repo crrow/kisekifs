@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr};
+use std::{str::FromStr};
 
 use clap::Args;
 use regex::Regex;
@@ -110,9 +110,9 @@ impl FormatArgs {
         if let Some(inodes) = self.inodes {
             format.inodes = inodes as u64;
         }
-        format.trash_days = self.trash_days as u64;
+        format.trash_days = self.trash_days;
         format.block_size = fix_block_size(self.block_size);
-        format.compression = self.compression.clone();
+        format.compression = self.compression;
         format.name = self.name.clone();
         format
     }

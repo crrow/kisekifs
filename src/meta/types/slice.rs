@@ -1,10 +1,9 @@
 use bincode::serialize;
-use std::ops::Range;
+
 use std::sync::Arc;
 
-use crate::meta::err::{ErrInvalidSliceBufSnafu, Result};
-use crate::meta::MetaError::ErrInvalidSliceBuf;
-use byteorder::{ReadBytesExt, WriteBytesExt};
+use crate::meta::err::{ErrBincodeDeserializeFailedSnafu, ErrInvalidSliceBufSnafu, Result};
+
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -100,7 +99,7 @@ impl Slice {
         if buf.len() < SLICE_BYTES {
             return ErrInvalidSliceBufSnafu.fail();
         }
-        let x: Slice = bincode::deserialize(buf).map_err(|e| ErrInvalidSliceBuf)?;
+        let x: Slice = bincode::deserialize(buf).context(ErrBincodeDeserializeFailedSnafu)?;
         Ok(x)
     }
 

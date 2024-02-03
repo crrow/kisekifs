@@ -131,7 +131,7 @@ pub struct MountArgs {
 }
 
 #[derive(Debug, Clone, Parser)]
-struct MetaArgs {
+pub struct MetaArgs {
     #[arg(
     long,
     help = "Specify the scheme of the meta store",
@@ -211,14 +211,14 @@ impl MountArgs {
 
     pub fn run(self) -> Result<(), Whatever> {
         let logging_config = self.logging_config();
-        let successful_mount_msg =
+        let _successful_mount_msg =
             format!("{} is mounted at {}", KISEKI, self.mount_point.display());
         if self.foreground {
             logging_config.init_tracing_subscriber()?;
             let _metrics = crate::metrics::install();
             mount(self)?;
         }
-        return Ok(());
+        Ok(())
     }
 }
 

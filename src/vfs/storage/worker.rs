@@ -18,7 +18,7 @@ pub(crate) use listener::WorkerListener;
 mod request;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -26,7 +26,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use itertools::Itertools;
+
 pub(crate) use request::{FlushAndReleaseSliceReason, WorkerRequest};
 use snafu::{ensure, ResultExt};
 use tokio::{
@@ -47,7 +47,7 @@ use crate::{
         storage::{
             engine::Config as EngineConfig,
             scheduler::BackgroundTaskPoolRef,
-            worker::request::{CommitChunkRequest, FlushAndReleaseSliceRequest, FlushBlockRequest},
+            worker::request::{CommitChunkRequest, FlushAndReleaseSliceRequest},
             writer::{FileWriter, FileWritersRef},
         },
         FH,
@@ -221,7 +221,7 @@ impl WorkerLoop {
     /// We should drain the buffer.
     async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) {
         let mut fb_map: HashMap<(Ino, usize, u64), usize> = HashMap::new();
-        let mut fr_vec = Vec::with_capacity(buffer.capacity());
+        let fr_vec = Vec::with_capacity(buffer.capacity());
         for wr in buffer.drain(..) {
             match wr {
                 WorkerRequest::Stop => {
