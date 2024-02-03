@@ -255,6 +255,6 @@ mod tests {
         assert_eq!(attr.gid, 11);
         assert_eq!(attr.uid, 22);
         assert_eq!(attr.parent, Ino::from(1));
-        assert_eq!(attr.full, true);
+        assert!(attr.full);
     }
 }

@@ -14,8 +14,8 @@
 
 use std::sync::atomic::Ordering;
 
-use byteorder::{LittleEndian, WriteBytesExt};
-use futures::StreamExt;
+
+
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};
@@ -23,7 +23,7 @@ use tracing::{debug, instrument};
 use crate::meta::{
     engine::{Counter, MetaEngine},
     err::*,
-    types::{DirStat, EntryInfo, Ino, InodeAttr, Slice},
+    types::{DirStat, EntryInfo, Ino, InodeAttr},
     Format,
 };
 
@@ -32,7 +32,7 @@ use crate::meta::{
 impl MetaEngine {
     pub(crate) async fn update_parent_stats(
         &self,
-        inode: Ino,
+        _inode: Ino,
         parent: Ino,
         length: i64,
         space: i64,
@@ -158,12 +158,12 @@ impl MetaEngine {
             .await
             .context(ErrFailedToReadFromStoSnafu { key: entry_key })?;
 
-        EntryInfo::parse_from(&entry_buf).context(ErrBincodeDeserializeFailedSnafu)
+        EntryInfo::parse_from(entry_buf).context(ErrBincodeDeserializeFailedSnafu)
     }
 
     pub(crate) async fn sto_list_entry_info(&self, parent: Ino) -> Result<Vec<EntryInfo>> {
         let entry_key = generate_sto_entry_key_str(parent, "");
-        let mut stream = self
+        let stream = self
             .operator
             .list(&entry_key)
             .await
@@ -241,7 +241,7 @@ impl MetaEngine {
         let format_key_str = Format::format_key_str();
         match self.operator.blocking().read(&format_key_str) {
             Ok(buf) => {
-                let format = Format::parse_from(&buf).context(ErrBincodeDeserializeFailedSnafu)?;
+                let format = Format::parse_from(buf).context(ErrBincodeDeserializeFailedSnafu)?;
                 Ok(Some(format))
             }
             Err(e) => {

@@ -23,7 +23,7 @@ use std::{
 use clap::ValueEnum;
 use opendal::Scheme;
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
-use snafu::ResultExt;
+
 use tracing::info;
 
 use crate::meta::{
@@ -102,7 +102,7 @@ where
 {
     let s = String::deserialize(deserializer)?;
     Scheme::from_str(&s)
-        .map_err(|e| D::Error::custom(format!("failed to parse scheme: {}: {}", s, e.to_string())))
+        .map_err(|e| D::Error::custom(format!("failed to parse scheme: {}: {}", s, e)))
 }
 
 impl Default for MetaConfig {
@@ -245,7 +245,7 @@ impl Format {
     }
 
     pub fn check_version(&self) -> std::result::Result<(), MetaError> {
-        return Ok(());
+        Ok(())
     }
 
     pub fn encode(&self) -> Vec<u8> {

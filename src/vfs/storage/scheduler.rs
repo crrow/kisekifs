@@ -21,7 +21,7 @@ use std::{
     },
 };
 
-use once_cell::sync::Lazy;
+
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -95,6 +95,6 @@ impl BackgroundTaskPool {
     #[inline]
     pub(crate) fn is_running(&self) -> bool {
         let v = self.state.load(Ordering::Relaxed);
-        return v == State::Running as u8;
+        v == State::Running as u8
     }
 }

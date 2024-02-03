@@ -21,6 +21,7 @@ where
     GLOBAL_RUNTIME.spawn(future)
 }
 
+#[allow(dead_code)]
 pub(crate) fn spawn_blocking<F, R>(func: F) -> JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
@@ -29,6 +30,7 @@ where
     GLOBAL_RUNTIME.spawn_blocking(func)
 }
 
+#[allow(dead_code)]
 pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     GLOBAL_RUNTIME.block_on(future)
 }

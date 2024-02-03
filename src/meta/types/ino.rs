@@ -63,9 +63,9 @@ impl From<u64> for Ino {
         Self(value)
     }
 }
-impl Into<u64> for Ino {
-    fn into(self) -> u64 {
-        self.0
+impl From<Ino> for u64 {
+    fn from(val: Ino) -> Self {
+        val.0
     }
 }
 
@@ -85,17 +85,14 @@ impl Ino {
     pub fn is_root(&self) -> bool {
         self.0 == ROOT_INO.0
     }
-    pub fn eq(&self, other: u64) -> bool {
-        self.0 == other
-    }
     // FIXME: use a better way
     // key: AiiiiiiiiI
     // key-len: 10
     pub fn generate_key(&self) -> Vec<u8> {
         let mut buf = vec![0u8; 10];
-        buf.write_u8('A' as u8).unwrap();
+        buf.write_u8(b'A').unwrap();
         buf.write_u64::<LittleEndian>(self.0).unwrap();
-        buf.write_u8('I' as u8).unwrap();
+        buf.write_u8(b'I').unwrap();
         buf
     }
     pub fn generate_key_str(&self) -> String {

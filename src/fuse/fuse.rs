@@ -15,7 +15,6 @@
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
-    fmt::Display,
     time::SystemTime,
 };
 
@@ -23,10 +22,10 @@ use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{c_int, open};
+use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
-use tracing::{debug, error, field, info, instrument, instrument::Instrumented, trace, Instrument};
+use tracing::{debug, error, field, info, instrument, Instrument};
 
 use crate::{
     common::err::ToErrno,
@@ -144,8 +143,12 @@ impl Filesystem for KisekiFuse {
         debug!("init kiseki...");
         let ctx = MetaContext::from(_req);
         match self.runtime.block_on(self.vfs.init(&ctx).in_current_span()) {
-            Ok(_) => {}
-            Err(_) => {}
+            Ok(_) => {
+                // TODO
+            }
+            Err(_) => {
+                // TODO
+            }
         }
         Ok(())
     }
@@ -265,7 +268,7 @@ impl Filesystem for KisekiFuse {
         mut reply: ReplyDirectory,
     ) {
         let ctx = MetaContext::from(_req);
-        let mut entries = match self
+        let entries = match self
             .runtime
             .block_on(self.vfs.read_dir(&ctx, ino, fh, offset).in_current_span())
         {
@@ -437,18 +440,20 @@ impl Filesystem for KisekiFuse {
         reply: ReplyData,
     ) {
         let ctx = MetaContext::from(_req);
-        let mut bytes_sent = 0;
+        let mut bytes_read = 0;
         match self.runtime.block_on(
             self.vfs
                 .read(&ctx, Ino(ino), fh, offset, size, flags, lock_owner)
                 .in_current_span(),
         ) {
             Ok(data) => {
-                bytes_sent = data.len();
+                bytes_read = data.len();
                 reply.data(&data);
             }
             Err(e) => reply.error(e.to_errno()),
         }
+
+        debug!("read {:?} {:?} {:?} {:?}", ino, fh, offset, bytes_read);
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
@@ -500,7 +505,7 @@ impl Filesystem for KisekiFuse {
     }
 
     #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync, name=field::Empty))]
-    fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
+    fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, _reply: ReplyEmpty) {
         todo!()
     }
 }

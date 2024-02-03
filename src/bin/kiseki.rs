@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
 
-use clap::{Args, Parser, Subcommand};
+
+use clap::{Parser, Subcommand};
 use kisekifs::{
     build_info,
-    cmd::{format::FormatArgs, mount::MountArgs, unmount::UmountArgs, *},
+    cmd::{format::FormatArgs, mount::MountArgs, unmount::UmountArgs},
 };
 use snafu::Whatever;
 
@@ -42,9 +42,9 @@ enum Commands {
 // TODO: handle logging
 fn main() -> Result<(), Whatever> {
     let cli = Cli::parse();
-    return match cli.commands {
+    match cli.commands {
         Commands::Mount(mount_args) => mount_args.run(),
         Commands::Umount(umount_args) => umount_args.run(),
         Commands::Format(format_args) => format_args.run(),
-    };
+    }
 }

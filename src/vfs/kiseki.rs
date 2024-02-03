@@ -21,13 +21,15 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+
 use fuser::{FileType, TimeOrNow};
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
+use snafu::{location, Location};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
+
 use tracing::{debug, info, trace};
 
+use crate::vfs::err::ErrLIBCSnafu;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -38,7 +40,7 @@ use crate::{
     },
     vfs::{
         config::VFSConfig,
-        err::{Result, VFSError},
+        err::Result,
         handle::Handle,
         storage::{Engine, MAX_FILE_SIZE},
         VFSError::ErrLIBC,
@@ -77,7 +79,7 @@ impl KisekiVFS {
             .unwrap();
         let config_buf = bincode::serialize(&vfs_config).expect("unable to serialize vfs config");
         config_inode.0.attr.set_length(config_buf.len() as u64);
-        if let Some(_) = &meta.config.sub_dir {
+        if meta.config.sub_dir.is_some() {
             // don't show trash directory
             internal_nodes.remove_trash_node();
         }
@@ -110,7 +112,7 @@ impl KisekiVFS {
 
     pub async fn init(&self, ctx: &MetaContext) -> Result<()> {
         debug!("vfs:init");
-        let format = self.meta.load_format(false).await?;
+        let _format = self.meta.load_format(false).await?;
         if let Some(sub_dir) = &self.meta.config.sub_dir {
             self.meta.chroot(ctx, sub_dir).await?;
         }
@@ -119,7 +121,11 @@ impl KisekiVFS {
         Ok(())
     }
 
-    pub async fn stat_fs<I: Into<Ino>>(&self, ctx: &MetaContext, ino: I) -> Result<FSStates> {
+    pub(crate) async fn stat_fs<I: Into<Ino>>(
+        &self,
+        ctx: &MetaContext,
+        ino: I,
+    ) -> Result<FSStates> {
         let ino = ino.into();
         trace!("fs:stat_fs with ino {:?}", ino);
         let r = self.meta.stat_fs(ctx, ino).await?;
@@ -238,19 +244,19 @@ impl KisekiVFS {
             inode, fh, offset
         );
 
-        let h = self
-            .find_handle(inode, fh)
-            .ok_or_else(|| ErrLIBC { kind: EBADF })?;
+        let h = match self.find_handle(inode, fh) {
+            None => return ErrLIBCSnafu { kind: EBADF }.fail()?,
+            Some(h) => h,
+        };
 
-        let mut h = h.inner.write().unwrap();
+        let mut h = h.inner.write().await;
         if h.children.is_empty() || offset == 0 {
             h.read_at = Some(Instant::now());
             let children = match self.meta.read_dir(ctx, inode, true).await {
                 Ok(children) => children,
                 Err(e) => {
                     if e.to_errno() == libc::EACCES {
-                        let children = self.meta.read_dir(ctx, inode, false).await?;
-                        children
+                        self.meta.read_dir(ctx, inode, false).await?
                     } else {
                         return Err(e)?;
                     }
@@ -262,7 +268,7 @@ impl KisekiVFS {
         if (offset as usize) < h.children.len() {
             return Ok(h.children.drain(offset as usize..).collect::<Vec<_>>());
         }
-        return Ok(Vec::new());
+        Ok(Vec::new())
     }
 
     pub async fn mknod(
@@ -275,12 +281,13 @@ impl KisekiVFS {
         rdev: u32,
     ) -> Result<Entry> {
         if parent.is_root() && self.internal_nodes.contains_name(&name) {
-            return Err(VFSError::ErrLIBC { kind: libc::EEXIST });
+            return ErrLIBCSnafu { kind: libc::EEXIST }.fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
-            return Err(VFSError::ErrLIBC {
+            return ErrLIBCSnafu {
                 kind: libc::ENAMETOOLONG,
-            });
+            }
+            .fail()?;
         }
         let file_type = get_file_type(mode)?;
         let mode = mode as u16 & 0o777;
@@ -316,12 +323,13 @@ impl KisekiVFS {
     ) -> Result<(Entry, u64)> {
         debug!("fs:create with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
-            return Err(VFSError::ErrLIBC { kind: libc::EEXIST });
+            return ErrLIBCSnafu { kind: libc::EEXIST }.fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
-            return Err(VFSError::ErrLIBC {
+            return ErrLIBCSnafu {
                 kind: libc::ENAMETOOLONG,
-            });
+            }
+            .fail()?;
         };
 
         let (inode, attr) = self
@@ -339,6 +347,7 @@ impl KisekiVFS {
         Ok((e, fh))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_attr(
         &self,
         ctx: &MetaContext,
@@ -361,7 +370,7 @@ impl KisekiVFS {
             return if let Some(n) = self.internal_nodes.get_internal_node(ino) {
                 Ok(n.into())
             } else {
-                Err(ErrLIBC { kind: EPERM })
+                return ErrLIBCSnafu { kind: EPERM }.fail()?;
             };
         }
 
@@ -371,53 +380,53 @@ impl KisekiVFS {
             if let Some(size) = size {
                 new_attr = self.truncate(ino, size, fh).await?;
             } else {
-                return Err(ErrLIBC { kind: EINVAL });
+                return ErrLIBCSnafu { kind: EINVAL }.fail()?;
             }
         }
         if flags.contains(SetAttrFlags::MODE) {
             if let Some(mode) = mode {
                 new_attr.perm = mode as u16 & 0o777;
             } else {
-                return Err(ErrLIBC { kind: EINVAL });
+                return ErrLIBCSnafu { kind: EINVAL }.fail()?;
             }
         }
         if flags.contains(SetAttrFlags::UID) {
             if let Some(uid) = uid {
                 new_attr.uid = uid;
             } else {
-                return Err(ErrLIBC { kind: EINVAL });
+                return ErrLIBCSnafu { kind: EINVAL }.fail()?;
             }
         }
         if flags.contains(SetAttrFlags::GID) {
             if let Some(gid) = gid {
                 new_attr.gid = gid;
             } else {
-                return Err(ErrLIBC { kind: EINVAL });
+                return ErrLIBCSnafu { kind: EINVAL }.fail()?;
             }
         }
         let mut need_update = false;
         if flags.contains(SetAttrFlags::ATIME) {
             if let Some(atime) = atime {
                 new_attr.atime = match atime {
-                    TimeOrNow::SpecificTime(st) => SystemTime::from(st),
+                    TimeOrNow::SpecificTime(st) => st,
                     TimeOrNow::Now => SystemTime::now(),
                 };
                 need_update = true;
             } else {
-                return Err(ErrLIBC { kind: EINVAL });
+                return ErrLIBCSnafu { kind: EINVAL }.fail()?;
             }
         }
         if flags.contains(SetAttrFlags::MTIME) {
             if let Some(mtime) = mtime {
                 new_attr.mtime = match mtime {
-                    TimeOrNow::SpecificTime(st) => SystemTime::from(st),
+                    TimeOrNow::SpecificTime(st) => st,
                     TimeOrNow::Now => {
                         need_update = true;
                         SystemTime::now()
                     }
                 };
             } else {
-                return Err(ErrLIBC { kind: EINVAL });
+                return ErrLIBCSnafu { kind: EINVAL }.fail()?;
             }
         }
         if need_update {
@@ -427,7 +436,7 @@ impl KisekiVFS {
                     .await?;
             }
             let mtime = match mtime.unwrap() {
-                TimeOrNow::SpecificTime(st) => SystemTime::from(st),
+                TimeOrNow::SpecificTime(st) => st,
                 TimeOrNow::Now => SystemTime::now(),
             };
             if flags.contains(SetAttrFlags::MTIME) || flags.contains(SetAttrFlags::MTIME_NOW) {
@@ -440,11 +449,11 @@ impl KisekiVFS {
             .meta
             .set_attr(ctx, flags, ino, &mut new_attr)
             .await
-            .and_then(|mut entry| {
+            .map(|mut entry| {
                 self.update_length(&mut entry);
                 let ttl = self.get_entry_ttl(&new_attr);
                 entry.with_ttl(ttl);
-                Ok(entry)
+                entry
             })?;
 
         // TODO: invalid open_file cache
@@ -452,7 +461,7 @@ impl KisekiVFS {
         Ok(entry)
     }
 
-    async fn truncate(&self, ino: Ino, size: u64, fh: Option<u64>) -> Result<InodeAttr> {
+    async fn truncate(&self, _ino: Ino, _size: u64, _fh: Option<u64>) -> Result<InodeAttr> {
         // let attr = self.meta.get_attr(ino).await?;
         // TODO: fix me
         Ok(InodeAttr::default())
@@ -468,12 +477,13 @@ impl KisekiVFS {
     ) -> Result<Entry> {
         debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
-            return Err(VFSError::ErrLIBC { kind: libc::EEXIST });
+            return ErrLIBCSnafu { kind: libc::EEXIST }.fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
-            return Err(VFSError::ErrLIBC {
+            return ErrLIBCSnafu {
                 kind: libc::ENAMETOOLONG,
-            });
+            }
+            .fail()?;
         };
         let (ino, attr) = self.meta.mkdir(ctx, parent, name, mode, umask).await?;
         let ttl = self.get_entry_ttl(&attr);
@@ -489,27 +499,21 @@ impl KisekiVFS {
             inode, flags, ctx.pid
         );
 
-        let mut opened_fh = 0;
-        let mut entry: Entry;
         if inode.is_special() {
             // TODO: at present, we don't implement the same logic as the juicefs.
-            return Err(ErrLIBC { kind: EACCES });
+            return ErrLIBCSnafu { kind: EACCES }.fail()?;
             // if inode != CONTROL_INODE && flags & libc::O_ACCMODE !=
             // libc::O_RDONLY { }
         }
 
-        match self.meta.open_inode(ctx, inode, flags).await {
-            Ok(mut attr) => {
-                self.update_length_by_attr(inode, &mut attr);
-                opened_fh = self.new_file_handle(inode, attr.length, flags)?;
-                let ttl = self.get_ttl(attr.kind);
-                entry = Entry::new_with_attr(inode, "", attr)
-                    .with_generation(1)
-                    .with_ttl(ttl)
-                    .to_owned();
-            }
-            Err(e) => return Err(e)?,
-        }
+        let mut attr = self.meta.open_inode(ctx, inode, flags).await?;
+        self.update_length_by_attr(inode, &mut attr);
+        let opened_fh = self.new_file_handle(inode, attr.length, flags)?;
+        let ttl = self.get_ttl(attr.kind);
+        let entry = Entry::new_with_attr(inode, "", attr)
+            .with_generation(1)
+            .with_ttl(ttl)
+            .to_owned();
 
         let opened_flags = if inode.is_special() {
             fuser::consts::FOPEN_DIRECT_IO
@@ -529,7 +533,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn read(
         &self,
-        ctx: &MetaContext,
+        _ctx: &MetaContext,
         ino: Ino,
         fh: u64,
         offset: i64,
@@ -554,31 +558,34 @@ impl KisekiVFS {
         let offset = offset as u64;
         let size = size as u64;
 
-        let handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        let _handle = self.find_handle(ino, fh).ok_or(ErrLIBC {
+            kind: EBADF,
+            location: location!(),
+        })?;
         if offset >= MAX_FILE_SIZE as u64 || offset + size >= MAX_FILE_SIZE as u64 {
-            return Err(ErrLIBC { kind: EFBIG });
+            return ErrLIBCSnafu { kind: EFBIG }.fail()?;
         }
-        let fr = self
-            .data_engine
-            .find_file_reader(ino, fh)
-            .ok_or(ErrLIBC { kind: EBADF })?;
+        let fr = self.data_engine.find_file_reader(ino, fh).ok_or(ErrLIBC {
+            kind: EBADF,
+            location: location!(),
+        })?;
         self.data_engine.flush_if_exists(ino).await?;
         let mut buf = vec![0u8; size as usize];
-        let read_len = fr.read(offset as usize, buf.as_mut_slice()).await?;
+        let _read_len = fr.read(offset as usize, buf.as_mut_slice()).await?;
         Ok(Bytes::from(buf))
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn write(
         &self,
-        ctx: &MetaContext,
+        _ctx: &MetaContext,
         ino: Ino,
         fh: u64,
         offset: i64,
         data: &[u8],
-        write_flags: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
     ) -> Result<u32> {
         let size = data.len();
         debug!(
@@ -588,9 +595,12 @@ impl KisekiVFS {
 
         let offset = offset as usize;
         if offset >= MAX_FILE_SIZE || offset + size >= MAX_FILE_SIZE {
-            return Err(ErrLIBC { kind: EFBIG });
+            return ErrLIBCSnafu { kind: EFBIG }.fail()?;
         }
-        let mut handle = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        let _handle = self.find_handle(ino, fh).ok_or(ErrLIBC {
+            kind: EBADF,
+            location: location!(),
+        })?;
         if ino == CONTROL_INODE {
             todo!()
         }
@@ -599,7 +609,7 @@ impl KisekiVFS {
                 "fs:write with ino {:?} fh {:?} offset {:?} size {:?} failed; maybe open flag contains problem",
                 ino, fh, offset, size
             );
-            return Err(ErrLIBC { kind: EBADF });
+            return ErrLIBCSnafu { kind: EBADF }.fail()?;
         }
 
         let len = self.data_engine.write(ino, offset, data).await?;
@@ -610,7 +620,10 @@ impl KisekiVFS {
 
     pub async fn flush(&self, ctx: &MetaContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
         debug!("do flush manually on ino {:?} fh {:?}", ino, fh);
-        let mut h = self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        let h = self.find_handle(ino, fh).ok_or(ErrLIBC {
+            kind: EBADF,
+            location: location!(),
+        })?;
         if ino.is_special() {
             return Ok(());
         };
@@ -619,8 +632,8 @@ impl KisekiVFS {
             fw.do_flush().await?;
         }
 
-        if lock_owner != h.get_ofd_owner() {
-            h.set_ofd_owner(0);
+        if lock_owner != h.get_ofd_owner().await {
+            h.set_ofd_owner(0).await;
         }
 
         if h.locks & 2 != 0 {
@@ -639,17 +652,26 @@ impl KisekiVFS {
         Ok(())
     }
 
-    pub async fn fsync(&self, ctx: &MetaContext, ino: Ino, fh: u64, data_sync: bool) -> Result<()> {
+    pub async fn fsync(
+        &self,
+        _ctx: &MetaContext,
+        ino: Ino,
+        fh: u64,
+        _data_sync: bool,
+    ) -> Result<()> {
         if ino.is_special() {
             return Ok(());
         }
 
-        self.find_handle(ino, fh).ok_or(ErrLIBC { kind: EBADF })?;
+        self.find_handle(ino, fh).ok_or(ErrLIBC {
+            kind: EBADF,
+            location: Location::default(),
+        })?;
         if let Some(fw) = self.data_engine.find_file_writer(ino) {
             fw.do_flush().await?;
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -663,7 +685,7 @@ pub struct Opened {
 
 // TODO: review me, use a better way.
 fn get_file_type(mode: mode_t) -> Result<FileType> {
-    match (mode & (libc::S_IFMT & 0xffff)) as u32 {
+    match mode & (libc::S_IFMT & 0xffff) {
         libc::S_IFIFO => Ok(FileType::NamedPipe),
         libc::S_IFSOCK => Ok(FileType::Socket),
         libc::S_IFLNK => Ok(FileType::Symlink),
@@ -671,7 +693,7 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
         libc::S_IFBLK => Ok(FileType::BlockDevice),
         libc::S_IFDIR => Ok(FileType::Directory),
         libc::S_IFCHR => Ok(FileType::CharDevice),
-        _ => Err(ErrLIBC { kind: libc::EPERM }),
+        _ => ErrLIBCSnafu { kind: EPERM }.fail()?,
     }
 }
 
@@ -719,12 +741,12 @@ mod tests {
 
         vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
 
-        sequential_write(&vfs, entry.inode, fh).await;
+        sequential_write(vfs, entry.inode, fh).await;
     }
     async fn sequential_write(vfs: &KisekiVFS, inode: Ino, fh: FH) {
         let meta_ctx = MetaContext::background();
         let data = vec![0u8; 128 << 10];
-        for i in 0..=1000 {
+        for _i in 0..=1000 {
             let write_len = vfs
                 .write(&meta_ctx, inode, fh, 128 << 10, &data, 0, 0, None)
                 .await

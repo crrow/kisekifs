@@ -38,11 +38,11 @@ pub mod internal_nodes {
         util::UID_GID,
     };
 
-    pub const LOG_INODE_NAME: &'static str = ".accesslog";
-    pub const CONTROL_INODE_NAME: &'static str = ".control";
-    pub const STATS_INODE_NAME: &'static str = ".stats";
-    pub const CONFIG_INODE_NAME: &'static str = ".config";
-    pub const TRASH_INODE_NAME: &'static str = ".trash";
+    pub const LOG_INODE_NAME: &str = ".accesslog";
+    pub const CONTROL_INODE_NAME: &str = ".control";
+    pub const STATS_INODE_NAME: &str = ".stats";
+    pub const CONFIG_INODE_NAME: &str = ".config";
+    pub const TRASH_INODE_NAME: &str = ".trash";
     #[derive(Debug)]
     pub struct PreInternalNodes {
         nodes: HashMap<&'static str, InternalNode>,
@@ -116,7 +116,7 @@ pub mod internal_nodes {
             self.nodes.remove(TRASH_INODE_NAME);
         }
         pub fn add_prefix(&mut self) {
-            for (_, n) in &mut self.nodes {
+            for n in self.nodes.values_mut() {
                 n.0.name = format!(".kfs{}", n.0.name);
             }
         }
@@ -128,15 +128,15 @@ pub mod internal_nodes {
     #[derive(Debug)]
     pub struct InternalNode(pub Entry);
 
-    impl Into<Entry> for InternalNode {
-        fn into(self) -> Entry {
-            self.0
+    impl From<InternalNode> for Entry {
+        fn from(val: InternalNode) -> Self {
+            val.0
         }
     }
 
-    impl Into<Entry> for &'_ InternalNode {
-        fn into(self) -> Entry {
-            self.0.clone()
+    impl From<&'_ InternalNode> for Entry {
+        fn from(val: &'_ InternalNode) -> Self {
+            val.0.clone()
         }
     }
 
@@ -170,6 +170,7 @@ impl<'a> From<&'a fuser::Request<'a>> for MetaContext {
 }
 
 impl MetaContext {
+    #[allow(dead_code)]
     pub(crate) fn background() -> Self {
         Self {
             gid: 1,
@@ -186,8 +187,8 @@ impl MetaContext {
 }
 
 pub const MAX_NAME_LENGTH: usize = 255;
-pub const DOT: &'static str = ".";
-pub const DOT_DOT: &'static str = "..";
+pub const DOT: &str = ".";
+pub const DOT_DOT: &str = "..";
 
 pub const MODE_MASK_R: u8 = 0b100;
 pub const MODE_MASK_W: u8 = 0b010;

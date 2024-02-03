@@ -14,22 +14,22 @@
 
 use std::{
     fmt::Debug,
-    sync::{
-        atomic::{AtomicI64, Ordering},
-        Arc, RwLock, Weak,
-    },
+    sync::{atomic::AtomicI64, Arc},
     time::Duration,
 };
 
 use dashmap::DashMap;
 use libc::EPERM;
-use tokio::{sync::Notify, time::Instant};
-use tracing::{debug, instrument};
+use tokio::{
+    sync::{Notify, RwLock},
+    time::Instant,
+};
+use tracing::instrument;
 
-use crate::vfs::FH;
+use crate::vfs::err::ErrLIBCSnafu;
 use crate::{
     meta::types::{Entry, Ino},
-    vfs::{err::Result, KisekiVFS, VFSError},
+    vfs::{err::Result, KisekiVFS},
 };
 
 impl KisekiVFS {
@@ -59,18 +59,18 @@ impl KisekiVFS {
     pub(crate) fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<u64> {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => Handle::new_with(fh, inode, |h| {
+            libc::O_RDONLY => Handle::new_with(fh, inode, |_h| {
                 self.data_engine.new_file_reader(inode, fh, length as usize);
             }),
-            libc::O_WRONLY | libc::O_RDWR => Handle::new_with(fh, inode, |h| {
+            libc::O_WRONLY | libc::O_RDWR => Handle::new_with(fh, inode, |_h| {
                 self.data_engine.new_file_reader(inode, fh, length as usize);
                 self.data_engine.new_file_writer(inode, length);
             }),
-            _ => return Err(VFSError::ErrLIBC { kind: EPERM }),
+            _ => return ErrLIBCSnafu { kind: EPERM }.fail()?,
         };
         self.handles
             .entry(inode)
-            .or_insert_with(DashMap::new)
+            .or_default()
             .insert(fh, Arc::new(h));
 
         Ok(fh)
@@ -139,12 +139,12 @@ impl Handle {
         self.inode
     }
 
-    pub(crate) fn get_ofd_owner(&self) -> u64 {
-        self.inner.read().unwrap().ofd_owner
+    pub(crate) async fn get_ofd_owner(&self) -> u64 {
+        self.inner.read().await.ofd_owner
     }
 
-    pub(crate) fn set_ofd_owner(&self, value: u64) {
-        self.inner.write().unwrap().ofd_owner = value;
+    pub(crate) async fn set_ofd_owner(&self, value: u64) {
+        self.inner.write().await.ofd_owner = value;
     }
 }
 

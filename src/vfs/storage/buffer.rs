@@ -5,12 +5,12 @@ use std::{
     sync::Arc,
 };
 
-use scopeguard::defer;
-use snafu::{ensure, ResultExt};
+use snafu::ensure;
 use tracing::debug;
 
+use crate::vfs::err::ErrLIBCSnafu;
 use crate::vfs::{
-    err::{EOFSnafu, Result, StorageError},
+    err::{Result, StorageError},
     storage::{sto::StoEngine, EngineConfig},
 };
 
@@ -38,7 +38,7 @@ impl ReadBuffer {
 
     pub(crate) fn read_at(&self, offset: usize, dst: &mut [u8]) -> Result<usize> {
         let expected_read_len = dst.len();
-        if expected_read_len <= 0 {
+        if expected_read_len == 0 {
             return Ok(0);
         }
 
@@ -91,7 +91,7 @@ impl ReadBuffer {
 
         let key = generate_slice_key(self.slice_id, block_idx, read_block_size);
         debug!("block_idx: {block_idx}, try to read [{key}]");
-        let mut buf = self.sto.get(&key)?;
+        let buf = self.sto.get(&key)?;
         debug!(
             "read block: {block_idx} from object storage succeed, read len: {} kib",
             buf.len() / 1024,
@@ -139,7 +139,6 @@ impl WriteBuffer {
     pub(crate) fn new(config: Arc<EngineConfig>, sto: Arc<dyn StoEngine>) -> WriteBuffer {
         WriteBuffer {
             block_slots: (0..(config.chunk_size / config.block_size))
-                .into_iter()
                 .map(|_| Block::Empty)
                 .collect(),
             config,
@@ -160,7 +159,7 @@ impl WriteBuffer {
 
     pub(crate) fn write_at(&mut self, offset: usize, data: &[u8]) -> Result<usize> {
         let expected_write_len = data.len();
-        if expected_write_len <= 0 {
+        if expected_write_len == 0 {
             return Ok(0);
         }
 
@@ -237,11 +236,11 @@ impl WriteBuffer {
     /// Read data from the write buffer, which actually we should not do it.
     fn read_at(&mut self, offset: usize, dst: &mut [u8]) -> Result<usize> {
         let expected_read_len = dst.len();
-        if expected_read_len <= 0 {
+        if expected_read_len == 0 {
             return Ok(0);
         }
 
-        ensure!(offset >= self.length, EOFSnafu);
+        ensure!(offset >= self.length, ErrLIBCSnafu { kind: libc::EOF });
 
         debug!(
             "reading buffer, at offset: {}, expect read len: {}",
@@ -274,7 +273,7 @@ impl WriteBuffer {
 
             match block {
                 Block::Empty => {
-                    return Err(StorageError::EOF)?;
+                    return Err(StorageError::ReadEmptyBlock)?;
                 }
                 Block::Occupy(buf) => {
                     dst[total_read_len..(total_read_len + read_len)]
@@ -296,18 +295,16 @@ impl WriteBuffer {
             .iter_mut()
             .enumerate()
             .filter(|(idx, b)| match b {
-                Block::Empty | Block::Released => {
-                    return false;
-                }
+                Block::Empty | Block::Released => false,
                 Block::Occupy(..) => {
                     let block_idx = *idx;
                     let end = (block_idx + 1) * self.config.block_size;
                     end <= offset
                 }
             })
-            .map(|(idx, mut b)| match b {
+            .map(|(idx, b)| match b {
                 Block::Occupy(data) => {
-                    let data = std::mem::replace(data, vec![]);
+                    let data = std::mem::take(data);
                     *b = Block::Released;
                     let l = self.length;
                     let block_size = self.config.block_size;
@@ -444,7 +441,7 @@ mod tests {
         wb.flush_to(config.block_size + 3).unwrap();
         wb.finish().unwrap();
 
-        let mut rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
+        let rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
         let dst = &mut [0; 5];
         let n = rb.read_at(6, dst).unwrap();
         assert_eq!(n, 5);
@@ -477,7 +474,7 @@ mod tests {
         let size = wb.length;
         wb.finish().unwrap();
 
-        let mut rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
+        let rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
         let dst = &mut [0; 1];
         let n = rb.read_at(0, dst).unwrap();
         assert_eq!(n, 1);

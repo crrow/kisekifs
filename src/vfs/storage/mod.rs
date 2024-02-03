@@ -13,7 +13,7 @@ mod sto;
 mod worker;
 mod writer;
 
-pub(crate) use sto::{new_debug_sto, ObjectSto, StoEngine};
+pub(crate) use sto::{new_debug_sto, StoEngine};
 
 pub(crate) const DEFAULT_CHUNK_SIZE: usize = 64 << 20; // 64 MiB
 pub(crate) const DEFAULT_BLOCK_SIZE: usize = 4 << 20; // 4 MiB

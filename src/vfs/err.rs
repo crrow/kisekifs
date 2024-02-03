@@ -15,14 +15,14 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub(crate) enum StorageError {
-    #[snafu(display("unexpected end of file"))]
-    EOF,
-    #[snafu(display("out of memory: {source}"))]
-    OOM {
-        source: datafusion_common::DataFusionError,
-    },
+    #[snafu(display("cannot read empty block"))]
+    ReadEmptyBlock,
     #[snafu(display("object storage error: {source}"))]
-    ObjectStorageError { source: opendal::Error },
+    ErrObjectStorage {
+        source: opendal::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     // ====workers====
     #[snafu(display("Failed to join handle"))]
@@ -61,8 +61,11 @@ pub(crate) enum StorageError {
 }
 
 impl From<StorageError> for VFSError {
-    fn from(value: StorageError) -> Self {
-        VFSError::ErrLIBC { kind: libc::EINTR }
+    fn from(_value: StorageError) -> Self {
+        VFSError::ErrLIBC {
+            kind: libc::EINTR,
+            location: Location::default(),
+        }
     }
 }
 
@@ -74,6 +77,8 @@ pub enum VFSError {
     },
     ErrLIBC {
         kind: c_int,
+        #[snafu(implicit)]
+        location: Location,
     },
     #[snafu(display("try acquire lock timeout {:?}", timeout))]
     ErrTimeout {
@@ -100,7 +105,7 @@ impl ToErrno for VFSError {
     fn to_errno(&self) -> c_int {
         match self {
             VFSError::ErrMeta { source } => source.to_errno(),
-            VFSError::ErrLIBC { kind } => kind.to_owned(),
+            VFSError::ErrLIBC { kind, .. } => kind.to_owned(),
             VFSError::ErrTimeout { .. } => libc::ETIMEDOUT,
         }
     }
