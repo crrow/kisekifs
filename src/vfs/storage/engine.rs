@@ -8,14 +8,13 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::vfs::storage::reader_v2::Handle2FileReadersRef;
+use crate::vfs::storage::reader::FileReadersRef;
 use crate::{
     meta::{engine::MetaEngine, types::Ino},
     vfs::{
         err::Result,
         storage::{
             buffer::ReadBuffer,
-            reader::FileReadersRef,
             scheduler::BackgroundTaskPool,
             sto::StoEngine,
             worker,
@@ -91,7 +90,6 @@ pub(crate) struct Engine {
     workers: Worker,
     pub(crate) file_writers: FileWritersRef,
     pub(crate) file_readers: FileReadersRef,
-    pub(crate) file_readers_v2: Handle2FileReadersRef,
     pub(crate) id_generator: sonyflake::Sonyflake,
 }
 
@@ -118,8 +116,7 @@ impl Engine {
             meta_engine,
             workers: worker,
             file_writers,
-            file_readers: Arc::new(DashMap::new()),
-            file_readers_v2: Arc::new(Default::default()),
+            file_readers: Arc::new(Default::default()),
             id_generator,
         }
     }
