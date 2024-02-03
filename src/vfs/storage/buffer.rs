@@ -165,9 +165,8 @@ impl WriteBuffer {
         }
 
         debug!(
-            "writing buffer, at offset: {}, expect write len: {} KiB",
-            offset,
-            expected_write_len / 1024
+            "writing buffer, at offset: {}, expect write len: {}",
+            offset, expected_write_len
         );
         debug_assert!(
             offset + expected_write_len <= self.config.chunk_size,

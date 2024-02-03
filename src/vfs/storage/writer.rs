@@ -232,12 +232,12 @@ impl FileWriter {
                             debug!("flush chunk {} failed: {}", idx, e);
                             return;
                         }
-                        let guard = cw.slices.write().await;
-                        if guard.is_empty() {
-                            // all slices have been flushed.
-                            // we can release this chunk writer.
-                            chunk_writers_ref.remove(&idx);
-                        };
+                        // let guard = cw.slices.write().await;
+                        // if guard.is_empty() {
+                        //     // all slices have been flushed.
+                        //     // we can release this chunk writer.
+                        //     chunk_writers_ref.remove(&idx);
+                        // };
                     })
                 })
                 .collect::<Vec<_>>();
@@ -409,10 +409,10 @@ impl ChunkWriterBackgroundTask {
                     // free this chunk writer.
                     if self.cw.write_cnt.load(Ordering::Acquire) == 0 {
                         // no one is writing, we can free this chunk writer.
-                        self.parent
-                            .chunk_writers
-                            .remove(&self.chunk_idx)
-                            .expect("chunk writer should exist");
+                        debug!(
+                            "exit the ChunkWriterBackgroundTask on ino {} chunk {}",
+                            self.ino, self.chunk_idx
+                        );
                         return;
                     }
                 }
@@ -454,7 +454,7 @@ impl ChunkWriterBackgroundTask {
                     .meta_engine
                     .write_slice(
                         self.parent.ino,
-                        self.chunk_idx as u32,
+                        self.chunk_idx,
                         sw.chunk_start_offset,
                         meta_slice,
                         mtime,

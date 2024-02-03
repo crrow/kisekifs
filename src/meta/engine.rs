@@ -332,6 +332,14 @@ impl OpenFiles {
             of.chunks.insert(chunk_idx, views);
         }
     }
+
+    pub(crate) fn invalidate_chunk_slice_info(&self, inode: Ino, chunk_idx: usize) {
+        defer!(debug!("invalidate ino: {}, chunk: {},  slice info succeed", inode, chunk_idx););
+        if let Some(mut of) = self.files.get_mut(&inode) {
+            let mut of = of.value_mut();
+            of.chunks.remove(&chunk_idx);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1209,7 +1217,7 @@ impl MetaEngine {
     pub async fn write_slice(
         &self,
         inode: Ino,
-        chunk_idx: u32,
+        chunk_idx: usize,
         chunk_pos: usize,
         slice: Slice, // FIXME: introduce another slice type.
         mtime: Instant,
@@ -1227,8 +1235,11 @@ impl MetaEngine {
             mtime
         );
 
-        let of = self.open_files.files.get_mut(&inode);
-        defer!(drop(of););
+        // TODO: juicefs lock the open file here, should we also lock it ?
+        if let Some(mut open_file) = self.open_files.files.get_mut(&inode) {
+            // invalidate the cache.
+            open_file.chunks.remove(&chunk_idx);
+        }
 
         let mut attr = self.sto_get_attr(inode).await?.unwrap_or(
             InodeAttr::default()
@@ -1319,11 +1330,17 @@ impl MetaEngine {
         let of = self.open_files.files.get_mut(&inode);
         if let Some(of) = of {
             if let Some(svs) = of.chunks.get(&chunk_index) {
+                debug!(
+                    "read ino {} chunk {} slice info from cache, get count {}",
+                    inode,
+                    chunk_index,
+                    svs.len(),
+                );
                 return Ok(Some(svs.clone()));
             }
         };
 
-        let slice_info_buf = self.sto_get_chunk_info(inode, chunk_index as u32).await?;
+        let slice_info_buf = self.sto_get_chunk_info(inode, chunk_index).await?;
         let slice_info_buf = match slice_info_buf {
             Some(buf) => buf,
             None => {

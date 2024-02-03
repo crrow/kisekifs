@@ -49,6 +49,10 @@ impl Slices {
         });
         rm
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]

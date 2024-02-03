@@ -1,13 +1,14 @@
 use crate::meta::engine::MetaEngine;
-use crate::meta::types::{Ino, OverlookedSlicesRef};
+use crate::meta::types::{Ino, OverlookedSlicesRef, Slice};
 use crate::vfs::storage::Engine;
 use crate::vfs::{err::Result, VFSError, FH};
 use dashmap::DashMap;
 use itertools::Itertools;
+use rangemap::RangeMap;
 use std::cmp::min;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
-use tracing::warn;
+use tracing::{debug, warn};
 
 type ChunkIdx = usize;
 
@@ -53,54 +54,83 @@ impl FileReaderV2 {
         let chunk_size = engine.config.chunk_size;
         let start_chunk_idx = offset / chunk_size;
         let end_chunk_idx = (offset + expected_read_len - 1) / chunk_size;
-        let mut chunk_pos = offset % chunk_size;
 
         let mut total_read_len = 0;
         let mut left_to_read = expected_read_len;
-
         for chunk_idx in start_chunk_idx..=end_chunk_idx {
+            // offset to current chunk.
+            let mut chunk_pos = (offset + total_read_len) % chunk_size;
+            // max can read in current chunk.
             let max_can_read = min(chunk_size - chunk_pos, left_to_read);
+            // then we get the range to read in current chunk.
             let current_read_range = chunk_pos..chunk_pos + max_can_read;
-
+            // according to current chunk idx, we can get the slices.
             let raw_slices = meta_engine
                 .read_slice(self.ino, chunk_idx)
                 .await?
                 .expect("slices should not be none");
+
+            for x in raw_slices.0.iter() {
+                debug!("find raw-slice in chunk: {:?}, slice: {:?}", chunk_idx, x);
+            }
+
+            // make a virtual slice map to record the slice and hole.
+            let mut virtual_slice_map = RangeMap::new();
+            {
+                let overlap = raw_slices.overlook();
+                let overlap_slices = overlap.iter().collect_vec();
+                println!("overlap_slices: {:?}", overlap_slices);
+            }
+
             let range_map = raw_slices.overlook();
-            let gaps = range_map.gaps(&current_read_range).collect_vec();
-            if gaps.len() != 0 {
-                warn!("we should not found a hole in the slices once we have the length");
-                return Err(VFSError::ErrLIBC { kind: libc::EIO });
+            for x in range_map.gaps(&current_read_range) {
+                debug!("current range: {:?}, find gap: {:?}", current_read_range, x);
+                virtual_slice_map.insert(x, VirtualSlice::Hole);
             }
-
-            let mut inner_chunk_pos = chunk_pos;
-            let mut inner_left_to_read = max_can_read;
             for (r, s) in range_map.overlapping(&current_read_range) {
-                // we should use underlying size here, otherwise, we will fail to fetch the slice data.
-                let rb = engine.new_read_buffer(s.get_id(), s.get_underlying_size());
-                // at present, don't consider the Borrowed slice.
-                let offset_of_slice = if r.start < inner_chunk_pos {
-                    inner_chunk_pos - r.start
-                } else {
-                    0
-                };
-                let max_read_len = min(inner_left_to_read, r.end - r.start - offset_of_slice);
-                let n = rb.read_at(
-                    offset_of_slice,
-                    &mut dst[total_read_len..total_read_len + max_read_len],
-                )?;
-                assert_eq!(n, max_read_len);
-                inner_chunk_pos += max_read_len;
-                inner_left_to_read -= max_read_len;
-                total_read_len += max_read_len;
+                virtual_slice_map.insert(r.clone(), VirtualSlice::Slice(s.clone()));
             }
+            drop(range_map);
 
-            chunk_pos = offset + max_can_read;
-            left_to_read -= max_can_read;
+            for (r, vs) in virtual_slice_map {
+                let start = total_read_len + r.start - chunk_pos;
+                let end = total_read_len + r.end - chunk_pos;
+                let len = end - start;
+
+                match vs {
+                    VirtualSlice::Hole => {
+                        debug!(
+                            "chunk_size{}, find hole in chunk: {:?}, range: {:?}",
+                            chunk_size, chunk_idx, r,
+                        );
+                        // we may even don't have to write the 0.
+                        for i in r {
+                            dst[i - chunk_pos] = 0;
+                        }
+                    }
+                    VirtualSlice::Slice(s) => {
+                        debug!(
+                            "find slice in chunk: {:?}, range: {:?}, slice: {:?}, write buf [{start}, {end}]",
+                            chunk_idx, r, s
+                        );
+                        let rb = engine.new_read_buffer(s.get_id(), s.get_underlying_size());
+                        rb.read_at(0, &mut dst[start..end])?;
+                    }
+                }
+                total_read_len += len;
+                left_to_read -= len;
+                chunk_pos += len;
+            }
         }
 
         Ok(total_read_len)
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum VirtualSlice {
+    Hole,
+    Slice(Slice),
 }
 
 #[cfg(test)]
@@ -115,12 +145,48 @@ mod tests {
     fn get_from_range_map() {
         let mut range_map = rangemap::RangeMap::new();
         range_map.insert(0..10, 1);
+        range_map.insert(10..12, 2);
+        range_map.iter().for_each(|(r, v)| {
+            println!("{:?} -> {:?}", r, v);
+        });
+    }
 
-        let x = range_map.get(&1);
-        assert_eq!(*x.unwrap(), 1);
+    #[test]
+    fn make_virtual_map() {
+        let chunk_size = 1024usize;
+        let mut rm = rangemap::RangeMap::new();
+        rm.insert(0..3, Slice::new_owned(0, 0, 3));
+        rm.insert(12..15, Slice::new_owned(12, 1, 3));
+        rm.insert(
+            chunk_size - 3..chunk_size,
+            Slice::new_owned(chunk_size - 3, 2, 3),
+        );
+        rm.insert(
+            chunk_size..chunk_size + 8,
+            Slice::new_owned(chunk_size, 3, 8),
+        );
 
-        let x = range_map.get(&10);
-        assert!(x.is_none())
+        let mut virtual_slice_map = RangeMap::new();
+        let read_range = chunk_size - 4..chunk_size + 8;
+        for x in rm.gaps(&read_range) {
+            if x.end < read_range.start {
+                continue;
+            }
+            virtual_slice_map.insert(x, VirtualSlice::Hole);
+        }
+        for (r, s) in rm.overlapping(&read_range) {
+            virtual_slice_map.insert(r.clone(), VirtualSlice::Slice(s.clone()));
+        }
+        for (r, vs) in virtual_slice_map {
+            match vs {
+                VirtualSlice::Hole => {
+                    println!("find hole in range: {:?}", r);
+                }
+                VirtualSlice::Slice(s) => {
+                    println!("find slice in range: {:?}, slice: {:?}", r, s);
+                }
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -145,8 +211,8 @@ mod tests {
         ));
 
         engine.new_file_writer(inode, 0);
-
         let data = b"hello world" as &[u8];
+
         let write_len = engine
             .write(inode, 0, data)
             .await
@@ -178,15 +244,25 @@ mod tests {
             .map_err(|e| println!("{}", e))
             .unwrap();
         assert_eq!(write_len, data.len());
-        // fw.do_flush().await.unwrap();
+
+        fw.do_flush().await.unwrap();
 
         let mut read_data = vec![0u8; 11];
+
+        let file_reader = Arc::new(FileReaderV2 {
+            engine: Arc::downgrade(&engine),
+            fh: 0,
+            ino: inode,
+            length: chunk_size + 8,
+            chunks: Default::default(),
+            closing: Default::default(),
+        });
         let read_len = file_reader
             .read(chunk_size - 3, read_data.as_mut_slice())
             .await
             .unwrap();
         assert_eq!(read_len, 11);
-        assert!(read_data.starts_with(b"hello world"));
         println!("{}", String::from_utf8_lossy(&read_data));
+        assert!(read_data.starts_with(b"hello world"));
     }
 }

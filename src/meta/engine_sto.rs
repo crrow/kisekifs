@@ -278,9 +278,9 @@ impl MetaEngine {
     pub(crate) async fn sto_get_chunk_info(
         &self,
         inode: Ino,
-        chunk_idx: u32,
+        chunk_idx: usize,
     ) -> Result<Option<Vec<u8>>> {
-        let chunk_key = generate_chunk_key_str(inode, chunk_idx);
+        let chunk_key = generate_chunk_key_str(inode, chunk_idx as u32);
         match self.operator.read(&chunk_key).await {
             Ok(buf) => Ok(Some(buf)),
             Err(e) => {
@@ -298,7 +298,7 @@ impl MetaEngine {
     pub(crate) async fn sto_set_chunk_info(
         &self,
         inode: Ino,
-        chunk_idx: u32,
+        chunk_idx: usize,
         val: Vec<u8>,
     ) -> Result<()> {
         let chunk_key = generate_chunk_key_str(inode, chunk_idx as u32);
