@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use crc32fast::Hasher;
 use dashmap::{DashMap, DashSet};
 use futures::FutureExt;
-use opendal::{Operator as ObjectStorage, Reader};
+use opendal::{Builder, Operator as ObjectStorage, Reader};
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -109,15 +109,15 @@ impl JuiceFileCacheBuilder {
             used: Arc::new(Default::default()),
             stage_full: Arc::new(Default::default()),
             raw_full: Arc::new(Default::default()),
-            total_buffered_block_cnt: Arc::new(Default::default()),
+            memory_usage: Arc::new(Default::default()),
             pending_set: DashSet::with_capacity(self.max_pending_cnt),
             memory_index: Default::default(),
             cancel_token,
             disk_item_tx: sender,
             task_tracker: tracker,
-            in_cleanup: Arc::new(Default::default()),
-            cleanup_finished_notify: Arc::new(Default::default()),
-            cleanup_tx: cleanup_full_tx,
+            in_cleanup_full: Arc::new(Default::default()),
+            cleanup_full_finished_notify: Arc::new(Default::default()),
+            cleanup_full_tx,
         });
 
         let flush_task = FlushTask {
@@ -130,7 +130,7 @@ impl JuiceFileCacheBuilder {
         let free_space_checker = FreeSpaceChecker {
             fc: fc.clone(),
             cancel_token: fc.cancel_token.clone(),
-            rx: cleanup_full_rx,
+            cleanup_full_rx,
         };
 
         let handle = &runtime::handle();
@@ -153,8 +153,12 @@ impl JuiceFileCacheBuilder {
     }
 }
 fn new_fs_store(path: &str) -> Result<ObjectStorage> {
+    let temp_dir = format!("{}-temp", path);
     let mut builder = opendal::services::Fs::default();
     builder.root(path);
+    // when doesn't enable it, encounter a case that read a file then the file
+    // get deleted.
+    builder.atomic_write_dir(&temp_dir);
     let obj = opendal::Operator::new(builder)
         .context(OpenDalSnafu)?
         .finish();
@@ -230,19 +234,21 @@ pub(crate) struct JuiceFileCacheInner {
     used: Arc<AtomicIsize>,
     stage_full: Arc<AtomicBool>,
     raw_full: Arc<AtomicBool>, // TODO: rename me
-    total_buffered_block_cnt: Arc<AtomicUsize>,
     memory_index: DashMap<SliceID, Arc<IndexValue>>,
     cancel_token: CancellationToken,
     // if the slice is in the pending set, we won't cache it again.
     // when the background task is processing the block, we remove
     // the key from the pending set.
     pending_set: DashSet<SliceID>,
+    // check how many memory use while we caching the block.
+    memory_usage: Arc<AtomicUsize>,
+
     disk_item_tx: mpsc::Sender<DiskItem>,
     task_tracker: TaskTracker,
     // we may call the cleanup manually, so maintain the state to reject the new requests.
-    in_cleanup: Arc<AtomicBool>,
-    cleanup_finished_notify: Arc<Notify>,
-    cleanup_tx: watch::Sender<SliceID>,
+    in_cleanup_full: Arc<AtomicBool>,
+    cleanup_full_finished_notify: Arc<Notify>,
+    cleanup_full_tx: watch::Sender<SliceID>,
 }
 
 impl JuiceFileCacheInner {
@@ -320,16 +326,16 @@ impl JuiceFileCacheInner {
             return false;
         }
         // check if in cleanup.
-        if self.in_cleanup.load(Ordering::Acquire) {
+        if self.in_cleanup_full.load(Ordering::Acquire) {
             if weak {
                 return false;
             }
             // wait the cleanup finished
             let cancel_token = self.cancel_token.clone();
-            while self.in_cleanup.load(Ordering::Acquire) {
+            while self.in_cleanup_full.load(Ordering::Acquire) {
                 select! {
                     // wait the cleanup finished
-                    _ = self.cleanup_finished_notify.notified() => {}
+                    _ = self.cleanup_full_finished_notify.notified() => {}
                     _ = cancel_token.cancelled() => {
                         debug!("cache is cancelled");
                         return false;
@@ -338,8 +344,9 @@ impl JuiceFileCacheInner {
             }
         }
 
+        let block_len = block.len();
         // update the total blocks.
-        self.total_buffered_block_cnt.fetch_add(1, Ordering::AcqRel);
+        self.memory_usage.fetch_add(block_len, Ordering::AcqRel);
         // cache the memory buf.
         self.pending_set.insert(slice_id);
         if let Err(e) = self.disk_item_tx.send(DiskItem { slice_id, block }).await {
@@ -349,7 +356,7 @@ impl JuiceFileCacheInner {
                 slice_id
             );
             self.pending_set.remove(&slice_id);
-            self.total_buffered_block_cnt.fetch_sub(1, Ordering::AcqRel);
+            self.memory_usage.fetch_sub(block_len, Ordering::AcqRel);
             return false;
         };
         true
@@ -401,21 +408,20 @@ impl JuiceFileCacheInner {
     }
 
     async fn notify_to_cleanup_full(self: &Arc<Self>, changed: u64) {
-        if self.in_cleanup.load(Ordering::Acquire) {
+        if self.in_cleanup_full.load(Ordering::Acquire) {
             return;
         }
 
-        if let Err(e) = self.cleanup_tx.send(changed) {
+        if let Err(e) = self.cleanup_full_tx.send(changed) {
             warn!("failed to notify the cleanup full: {:?}", e);
         }
     }
 
     // we should not call this method directly, it's for the background task.
     async fn do_clean_up_full(self: &Arc<Self>) {
-        debug!("do cleanup full");
         defer!({
-            self.in_cleanup.store(false, Ordering::Release);
-            self.cleanup_finished_notify.notify_waiters();
+            self.in_cleanup_full.store(false, Ordering::Release);
+            self.cleanup_full_finished_notify.notify_waiters();
         });
         let mut goal = self.capacity * 95 / 100;
         // Returns an approximate number of entries in this cache.
@@ -467,7 +473,6 @@ impl JuiceFileCacheInner {
         for e in self.memory_index.iter() {
             let k = e.key();
             let v = e.value();
-            debug!("check memory index: {}/{}", k, v.path);
             if v.block_size < 0 {
                 continue; // staging
             }
@@ -516,6 +521,10 @@ impl JuiceFileCacheInner {
                 warn!("failed to delete cache file: {:?}", e);
             }
         }
+        // re calculate the free ratio
+        let (br, fr) = self.cur_free_ratio();
+        let full = br < self.free_ratio || fr < self.free_ratio;
+        self.raw_full.store(full, Ordering::Release);
     }
 
     pub(crate) fn cur_free_ratio(self: &Arc<Self>) -> (f32, f32) {
@@ -527,9 +536,9 @@ impl JuiceFileCacheInner {
     /// This function will wait on cleanup, and all background tasks to finish.
     pub(crate) async fn close(self: &Arc<Self>) {
         debug!("closing file cache");
-        if self.in_cleanup.load(Ordering::Acquire) {
+        if self.in_cleanup_full.load(Ordering::Acquire) {
             debug!("wait on cleanup finished");
-            self.cleanup_finished_notify.notified().await;
+            self.cleanup_full_finished_notify.notified().await;
         }
         self.cancel_token.cancel();
         self.task_tracker.wait().await;
@@ -548,6 +557,10 @@ impl JuiceFileCacheInner {
             &self.cache_root_dir,
             start.elapsed()
         );
+    }
+
+    pub(crate) async fn memory_usage(self: &Arc<Self>) -> usize {
+        self.memory_usage.load(Ordering::Acquire)
     }
 }
 
@@ -673,7 +686,7 @@ impl FlushTask {
                             fc.memory_index.remove(&slice_id);
                         };
                         fc.flush_finished_notify.notify_one();
-                        fc.total_buffered_block_cnt.fetch_sub(1, Ordering::AcqRel);
+                        fc.memory_usage.fetch_sub(block_len, Ordering::AcqRel);
                     }
                 }
             }
@@ -685,27 +698,28 @@ impl FlushTask {
 struct FreeSpaceChecker {
     fc: Arc<JuiceFileCacheInner>,
     cancel_token: CancellationToken,
-    rx: watch::Receiver<SliceID>,
+    cleanup_full_rx: watch::Receiver<SliceID>,
 }
 
 impl FreeSpaceChecker {
     #[instrument(skip(self))]
     async fn run(mut self) {
         debug!("free space checker is started");
-        let mut check_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut check_disk_usage_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut check_expire_interval =
+            tokio::time::interval(Duration::min(Duration::from_secs(60), self.fc.cache_expire));
         loop {
             select! {
-                _ = check_interval.tick() => {},
-                _ = self.rx.changed() => {
-                    assert!(self.fc.in_cleanup.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok());
+                _ = check_disk_usage_interval.tick() => {
+                    self.check_free_ratio().await;
+                },
+                _ = check_expire_interval.tick() => {
+                    self.check_expire().await;
+                },
+                _ = self.cleanup_full_rx.changed() => {
+                    assert!(self.fc.in_cleanup_full.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok());
                     debug!("free space checker is notified, we need to do cleanup full");
-                    select! {
-                        _ = self.fc.do_clean_up_full() => {
-                            let (br, fr) = self.fc.cur_free_ratio();
-                            let full = br < self.fc.free_ratio || fr < self.fc.free_ratio;
-                            self.fc.raw_full.store(full, Ordering::Release);
-                        }
-                    }
+                    self.fc.do_clean_up_full().await;
                     continue;
                 },
                 _ = self.cancel_token.cancelled() => {
@@ -713,46 +727,98 @@ impl FreeSpaceChecker {
                     return;
                 }
             }
-            let (bfr, ffr) = get_free_ratio(&self.fc.cache_root_dir);
-            let stage_full = bfr < self.fc.free_ratio / 2.0 || ffr < self.fc.free_ratio / 2.0;
-            let raw_full = bfr < self.fc.free_ratio || ffr < self.fc.free_ratio;
-            // update the state back, make we can reject the new requests.
-            self.fc.stage_full.store(stage_full, Ordering::Release);
-            self.fc.raw_full.store(raw_full, Ordering::Release);
+        }
+    }
 
-            if raw_full && !matches!(self.fc.cache_eviction, CacheEviction::Disable) {
-                trace!(
+    async fn check_expire(&mut self) {
+        let cut_off = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Error getting Unix timestamp")
+            .as_secs()
+            - self.fc.cache_expire.as_secs();
+
+        let mut freed = 0;
+        let mut to_expire = vec![];
+        for (idx, e) in self.fc.memory_index.iter().enumerate() {
+            if idx >= MAX_EXPIRE_CNT {
+                break;
+            }
+            if e.access_time < cut_off {
+                freed += e.block_size as isize + CACHE_SIZE_PADDING;
+                to_expire.push((e.key().clone(), e.path.clone()));
+            }
+        }
+        let new_used = self.fc.used.load(Ordering::Acquire) - freed;
+        if !to_expire.is_empty() {
+            debug!(
+                "Cleanup expired cache ({}): {} blocks ({:.1} MB), expired {} blocks ({:.1} MB)",
+                &self.fc.cache_root_dir,
+                self.fc.memory_index.len(),
+                new_used as f64 / 1024.0 / 1024.0,
+                to_expire.len(),
+                freed as f64 / 1024.0 / 1024.0
+            );
+        }
+        if self
+            .fc
+            .local_store
+            .remove(
+                to_expire
+                    .into_iter()
+                    .map(|(sid, path)| {
+                        self.fc.memory_index.remove(&sid);
+                        path
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .is_err()
+        {
+            warn!("{} failed to remove expired cache", &self.fc.cache_root_dir);
+        }
+    }
+
+    async fn check_free_ratio(&mut self) {
+        let (bfr, ffr) = get_free_ratio(&self.fc.cache_root_dir);
+        let stage_full = bfr < self.fc.free_ratio / 2.0 || ffr < self.fc.free_ratio / 2.0;
+        let raw_full = bfr < self.fc.free_ratio || ffr < self.fc.free_ratio;
+        // update the state back, make we can reject the new requests.
+        self.fc.stage_full.store(stage_full, Ordering::Release);
+        self.fc.raw_full.store(raw_full, Ordering::Release);
+
+        // check if we need to clean all.
+        if raw_full && !matches!(self.fc.cache_eviction, CacheEviction::Disable) {
+            trace!(
                     "Cleanup cache when checking free space {}: free ratio ({:.2}%), space usage ({:.2}%), inodes usage ({:.2}%)",
                     &self.fc.cache_root_dir,
                     self.fc.free_ratio * 100.0,
                     bfr * 100.0,
                     ffr * 100.0
                 );
+            select! {
+                _ = self.cancel_token.cancelled() => {
+                    debug!("free space checker is cancelled");
+                    return;
+                }
+                _ = self.fc.do_clean_up_full() => {
+                    debug!("cleanup full finished");
+                }
+            }
+            // we still raw_full, we won't accept new requests.
+            if self.fc.raw_full.load(Ordering::Acquire) {
                 select! {
                     _ = self.cancel_token.cancelled() => {
                         debug!("free space checker is cancelled");
                         return;
                     }
-                    _ = self.fc.do_clean_up_full() => {
-                        let (br, fr) = self.fc.cur_free_ratio();
-                        let full = br < self.fc.free_ratio || fr < self.fc.free_ratio;
-                        self.fc.raw_full.store(full, Ordering::Release);
-                    }
-                }
-                // we still raw_full, we won't accept new requests.
-                if self.fc.raw_full.load(Ordering::Acquire) {
-                    select! {
-                        _ = self.cancel_token.cancelled() => {
-                            debug!("free space checker is cancelled");
-                            return;
-                        }
-                        _ = self.fc.upload_staging() => {}
-                    }
+                    _ = self.fc.upload_staging() => {}
                 }
             }
         }
     }
 }
+
+const MAX_EXPIRE_CNT: usize = 1000;
 
 #[cfg(test)]
 mod tests {
@@ -766,7 +832,7 @@ mod tests {
 
         let cache = JuiceFileCacheBuilder::default()
             .with_capacity(ReadableSize::mb(1))
-            .with_free_ratio(0.1)
+            .with_free_ratio(0.5)
             .inner_build()
             .unwrap();
         basic(cache.clone()).await;
