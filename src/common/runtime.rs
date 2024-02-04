@@ -5,13 +5,17 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 
 static GLOBAL_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
-    debug!("build runtime for worker");
+    debug!("start tokio runtime");
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
         .build()
         .unwrap()
 });
+
+pub(crate) fn handle() -> tokio::runtime::Handle {
+    GLOBAL_RUNTIME.handle().clone()
+}
 
 pub(crate) fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where

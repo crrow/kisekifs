@@ -1,13 +1,24 @@
 use std::sync::Arc;
 
 use bincode::serialize;
+use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::meta::err::{ErrBincodeDeserializeFailedSnafu, ErrInvalidSliceBufSnafu, Result};
 
+lazy_static! {
+    pub static ref ID_GENERATOR: sonyflake::Sonyflake =
+        sonyflake::Sonyflake::new().expect("failed to create id generator");
+}
+
 pub type SliceID = u64;
+
+pub fn random_slice_id() -> u64 {
+    ID_GENERATOR.next_id().expect("failed to generate id")
+}
+
 pub type OverlookedSlices = RangeMap<usize, Slice>;
 pub type OverlookedSlicesRef = Arc<OverlookedSlices>;
 

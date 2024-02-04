@@ -1,4 +1,5 @@
 mod file_cache;
+mod juice_cache;
 mod write_cache;
 
 use std::{fmt::Debug, sync::Arc};

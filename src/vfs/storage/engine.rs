@@ -18,18 +18,11 @@ use crate::{
 
 const DEFAULT_BUFFER_CAPACITY: usize = 300 << 20; // 300 MiB
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CacheEviction {
-    Disable,
-    Random,
-}
-
 /// The configuration of the storage [Engine].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     // ========Cache Configs ===>
     pub capacity: usize,
-    pub eviction: CacheEviction,
 
     // ========Worker configs ===>
     /// Number of region workers (default: 1/2 of cpu cores).
@@ -64,7 +57,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             capacity: 100 << 10,
-            eviction: CacheEviction::Random,
             number_of_workers: divide_num_cpus(2),
             worker_channel_size: 128,
             worker_request_batch_size: 64,
