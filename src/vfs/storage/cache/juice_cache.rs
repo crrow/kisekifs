@@ -38,16 +38,19 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
 
-use crate::meta::types::random_slice_id;
 use crate::{
     common::{readable_size::ReadableSize, runtime},
-    meta::types::SliceID,
+    meta::types::{random_slice_id, SliceID},
     vfs::{
         err::{CacheIOSnafu, OpenDalSnafu, Result},
         storage::cache::Cache,
         VFSError,
     },
 };
+
+const CACHE_SIZE_PADDING: isize = 4096;
+const MAX_EXPIRE_CNT: usize = 1000;
+const RAW_CACHE_DIR: &'static str = "raw";
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CacheEviction {
@@ -165,8 +168,6 @@ fn new_fs_store(path: &str) -> Result<ObjectStorage> {
     Ok(obj)
 }
 
-const RAW_CACHE_DIR: &'static str = "raw";
-
 fn cache_file_path(cache_file_dir: &str, slice_id: SliceID) -> String {
     join_path(cache_file_dir, &format!("{}", slice_id))
 }
@@ -185,6 +186,7 @@ struct IndexValue {
 }
 
 pub(crate) struct JuiceFileCache(Arc<JuiceFileCacheInner>);
+
 impl Clone for JuiceFileCache {
     fn clone(&self) -> Self {
         JuiceFileCache(self.0.clone())
@@ -215,6 +217,14 @@ impl Cache for JuiceFileCache {
 
     async fn close(&self) {
         self.0.close().await
+    }
+
+    async fn remove(&self, slice_id: SliceID) {
+        self.0.remove(slice_id).await
+    }
+
+    async fn stage(&self, slice_id: SliceID, data: Arc<Vec<u8>>, keep_cache: bool) {
+        self.0.stage(slice_id, data, keep_cache).await
     }
 }
 
@@ -307,7 +317,7 @@ impl JuiceFileCacheInner {
         self.do_cache(slice_id, block, true).await
     }
 
-    pub(crate) async fn do_cache(
+    async fn do_cache(
         self: &Arc<Self>,
         slice_id: SliceID,
         block: Arc<Vec<u8>>,
@@ -531,6 +541,15 @@ impl JuiceFileCacheInner {
         get_free_ratio(&self.cache_root_dir)
     }
 
+    pub(crate) async fn stage(
+        self: &Arc<Self>,
+        slice_id: SliceID,
+        data: Arc<Vec<u8>>,
+        keep_cache: bool,
+    ) {
+        // TODO: implement the stage logic.
+    }
+
     pub(crate) async fn upload_staging(self: &Arc<Self>) {}
 
     /// This function will wait on cleanup, and all background tasks to finish.
@@ -562,9 +581,28 @@ impl JuiceFileCacheInner {
     pub(crate) async fn memory_usage(self: &Arc<Self>) -> usize {
         self.memory_usage.load(Ordering::Acquire)
     }
-}
 
-const CACHE_SIZE_PADDING: isize = 4096;
+    pub(crate) async fn remove(self: &Arc<Self>, slice_id: SliceID) {
+        if self.pending_set.remove(&slice_id).is_some() {
+            // the block is in the pending set, we can return now
+            return;
+        };
+
+        // the slice has been cached, clean it.
+        if let Some((_, iv)) = self.memory_index.remove(&slice_id) {
+            if iv.block_size > 0 {
+                self.used.fetch_sub(
+                    iv.block_size as isize + CACHE_SIZE_PADDING,
+                    Ordering::AcqRel,
+                );
+            }
+            if let Err(e) = self.local_store.delete(&iv.path).await {
+                warn!("failed to delete cache file: {:?}", e);
+            }
+            // TODO: remove stage.
+        }
+    }
+}
 
 // 1. The proportion of free space available on the disk relative to its total
 //    capacity.
@@ -672,6 +710,13 @@ impl FlushTask {
                         let path = fc.cache_path(disk_item.slice_id);
                         let block_len = disk_item.block.len();
                         let slice_id = disk_item.slice_id;
+                        if !fc.pending_set.contains(&slice_id) {
+                            // someone cancel this block, we should not cache it.
+                            // update the memory usage.
+                            fc.flush_finished_notify.notify_one();
+                            fc.memory_usage.fetch_sub(block_len, Ordering::AcqRel);
+                            continue;
+                        }
                         // do the real work
                         if persistent_block(sto.clone(), &path, disk_item.block, fc.add_checksum)
                             .await.is_ok() {
@@ -679,10 +724,13 @@ impl FlushTask {
                         }
                         // remove the block from memory buffer
                         if fc.pending_set.remove(&disk_item.slice_id).is_none() {
-                            // TODO: review me, is this case real happen?
-                            // the block is already removed by other thread.
+                            // When we just persistent the block to the disk,
+                            // but then the block is already removed by other thread.
                             // we should remove the block we just added to the disk.
                             let _ = sto.delete(&path).await;
+                            // we need to remove the item from memory index, since
+                            // we just update the index when we successfully persistent
+                            // the block to the disk.
                             fc.memory_index.remove(&slice_id);
                         };
                         fc.flush_finished_notify.notify_one();
@@ -789,12 +837,12 @@ impl FreeSpaceChecker {
         // check if we need to clean all.
         if raw_full && !matches!(self.fc.cache_eviction, CacheEviction::Disable) {
             trace!(
-                    "Cleanup cache when checking free space {}: free ratio ({:.2}%), space usage ({:.2}%), inodes usage ({:.2}%)",
-                    &self.fc.cache_root_dir,
-                    self.fc.free_ratio * 100.0,
-                    bfr * 100.0,
-                    ffr * 100.0
-                );
+                "Cleanup cache when checking free space {}: free ratio ({:.2}%), space usage ({:.2}%), inodes usage ({:.2}%)",
+                &self.fc.cache_root_dir,
+                self.fc.free_ratio * 100.0,
+                bfr * 100.0,
+                ffr * 100.0
+            );
             select! {
                 _ = self.cancel_token.cancelled() => {
                     debug!("free space checker is cancelled");
@@ -817,8 +865,6 @@ impl FreeSpaceChecker {
         }
     }
 }
-
-const MAX_EXPIRE_CNT: usize = 1000;
 
 #[cfg(test)]
 mod tests {
