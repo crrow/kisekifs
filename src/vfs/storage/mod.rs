@@ -3,6 +3,8 @@ mod buffer;
 pub(crate) use buffer::WriteBuffer;
 
 mod cache;
+
+pub use cache::{new_juice_builder, Cache};
 mod engine;
 
 pub use engine::Config as EngineConfig;

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use async_trait::async_trait;
+use std::fmt::{Debug, Formatter};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
@@ -35,6 +37,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
 
+use crate::vfs::storage::cache::Cache;
 use crate::{
     common::{readable_size::ReadableSize, runtime},
     meta::types::SliceID,
@@ -50,14 +53,14 @@ pub enum CacheEviction {
     Random,
 }
 
-pub(crate) struct JuiceFileCacheBuilder {
-    pub(crate) cache_dir: String,
-    pub(crate) capacity: ReadableSize,
-    pub(crate) free_ratio: f32,
-    pub(crate) add_checksum: bool,
-    pub(crate) cache_eviction: CacheEviction,
-    pub(crate) cache_expire: Duration,
-    pub(crate) max_pending_cnt: usize,
+pub struct JuiceFileCacheBuilder {
+    pub cache_dir: String,
+    pub capacity: ReadableSize,
+    pub free_ratio: f32,
+    pub add_checksum: bool,
+    pub cache_eviction: CacheEviction,
+    pub cache_expire: Duration,
+    pub max_pending_cnt: usize,
 }
 
 impl Default for JuiceFileCacheBuilder {
@@ -80,13 +83,18 @@ impl Default for JuiceFileCacheBuilder {
 }
 
 impl JuiceFileCacheBuilder {
-    pub(crate) fn build(self) -> Result<Arc<JuiceFileCache>> {
+    pub fn build(self) -> Result<Arc<dyn Cache>> {
+        let jc = self.inner_build()?;
+        Ok(Arc::new(jc))
+    }
+
+    pub(crate) fn inner_build(self) -> Result<JuiceFileCache> {
         debug!("create juice file cache at {}", &self.cache_dir);
         let local_store = new_fs_store(&self.cache_dir)?;
         let (sender, receiver) = mpsc::channel(self.max_pending_cnt);
         let cancel_token = CancellationToken::new();
         let tracker = TaskTracker::new();
-        let fc = Arc::new(JuiceFileCache {
+        let fc = Arc::new(JuiceFileCacheInner {
             cache_root_dir: self.cache_dir,
             add_checksum: self.add_checksum,
             free_ratio: self.free_ratio,
@@ -124,15 +132,14 @@ impl JuiceFileCacheBuilder {
         // Once we spawned everything, we close the tracker.
         fc.task_tracker.close();
 
-        Ok(fc)
+        Ok(JuiceFileCache(fc))
     }
 
-    pub(crate) fn with_capacity(mut self, capacity: ReadableSize) -> Self {
+    pub fn with_capacity(mut self, capacity: ReadableSize) -> Self {
         self.capacity = capacity;
         self
     }
 }
-
 fn new_fs_store(path: &str) -> Result<ObjectStorage> {
     let mut builder = opendal::services::Fs::default();
     builder.root(path);
@@ -161,8 +168,35 @@ struct IndexValue {
     path: String,
 }
 
+pub(crate) struct JuiceFileCache(Arc<JuiceFileCacheInner>);
+
+impl Debug for JuiceFileCache {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JuiceFileCache")
+    }
+}
+
+#[async_trait]
+impl Cache for JuiceFileCache {
+    async fn cache(&self, slice_id: u64, block: Arc<Vec<u8>>) -> bool {
+        self.0.cache(slice_id, block).await
+    }
+
+    async fn get(&self, slice_id: SliceID) -> Option<Reader> {
+        self.0.get(slice_id).await
+    }
+
+    async fn wait_on_all_flush_finish(&self) {
+        self.0.wait_on_all_flush_finish().await
+    }
+
+    async fn close(&self) {
+        self.0.close().await
+    }
+}
+
 /// The JuiceFS file cache implementation.
-pub(crate) struct JuiceFileCache {
+pub(crate) struct JuiceFileCacheInner {
     cache_root_dir: String,
     add_checksum: bool,
     free_ratio: f32,
@@ -188,7 +222,7 @@ pub(crate) struct JuiceFileCache {
     task_tracker: TaskTracker,
 }
 
-impl JuiceFileCache {
+impl JuiceFileCacheInner {
     /// Load a block from cache.
     pub(crate) async fn get(self: &Arc<Self>, slice_id: SliceID) -> Option<Reader> {
         if !self.memory_index.contains_key(&slice_id) {
@@ -232,18 +266,18 @@ impl JuiceFileCache {
         }
     }
 
-    pub(crate) async fn cache(self: &Arc<Self>, slice_id: SliceID, block: Arc<Vec<u8>>) {
+    pub(crate) async fn cache(self: &Arc<Self>, slice_id: SliceID, block: Arc<Vec<u8>>) -> bool {
         // check the memory index
         if self.memory_index.contains_key(&slice_id) {
-            return;
+            return false;
         }
         // check the memory buffer
         if self.pending_set.contains(&slice_id) {
-            return;
+            return false;
         }
         // reject the new requests if the cache is full.
         if self.raw_full.load(Ordering::Acquire) {
-            return;
+            return false;
         }
         // update the total blocks.
         self.total_buffered_block_cnt.fetch_add(1, Ordering::AcqRel);
@@ -257,7 +291,9 @@ impl JuiceFileCache {
             );
             self.pending_set.remove(&slice_id);
             self.total_buffered_block_cnt.fetch_sub(1, Ordering::AcqRel);
-        }
+            return false;
+        };
+        true
     }
 
     fn cache_path(self: &Arc<Self>, slice_id: SliceID) -> String {
@@ -371,7 +407,7 @@ impl JuiceFileCache {
 
     pub(crate) async fn upload_staging(self: &Arc<Self>) {}
 
-    pub(crate) async fn close(&self) {
+    pub(crate) async fn close(self: &Arc<Self>) {
         debug!("closing file cache");
         self.cancel_token.cancel();
         self.task_tracker.wait().await;
@@ -477,7 +513,7 @@ struct DiskItem {
 
 /// The background job to flush the cache to the local store.
 struct FlushTask {
-    fc: Arc<JuiceFileCache>,
+    fc: Arc<JuiceFileCacheInner>,
     rx: mpsc::Receiver<DiskItem>,
     cancel_token: CancellationToken,
     notify: Arc<Notify>,
@@ -530,7 +566,7 @@ impl FlushTask {
 
 /// FreeSpaceChecker is used for checking the free space of the disk.
 struct FreeSpaceChecker {
-    fc: Arc<JuiceFileCache>,
+    fc: Arc<JuiceFileCacheInner>,
     cancel_token: CancellationToken,
 }
 
@@ -601,7 +637,7 @@ mod tests {
 
         let cache = JuiceFileCacheBuilder::default()
             .with_capacity(ReadableSize::mb(1))
-            .build()
+            .inner_build()
             .unwrap();
         assert!(cache.get(random_slice_id()).await.is_none());
 
@@ -631,8 +667,8 @@ mod tests {
             assert_eq!(buf, req.block);
         }
 
-        assert_eq!(cache.pending_set.len(), 0);
+        assert_eq!(cache.0.pending_set.len(), 0);
 
-        cache.close().await;
+        cache.0.close().await;
     }
 }
