@@ -1,10 +1,12 @@
-use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
-use kisekifs::common::readable_size::ReadableSize;
-use kisekifs::meta::types::{random_slice_id, SliceID};
-use kisekifs::vfs::storage::{new_juice_builder, Cache};
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
-use tokio::runtime;
+
+use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
+use kisekifs::{
+    common::readable_size::ReadableSize,
+    meta::types::{random_slice_id, SliceID},
+    vfs::storage::{new_juice_builder, Cache},
+};
+use tokio::{io::AsyncReadExt, runtime};
 
 // async fn juice_rw(c: &mut Criterion, rt: &runtime::Runtime) {
 //     const BLOCK_SIZE: u64 = ReadableSize::mb(4).as_bytes();
@@ -12,9 +14,9 @@ use tokio::runtime;
 //
 //     c.bench_function("write", |b| {
 //         b.to_async(rt).iter(|| {
-//             let block = Arc::new((0..BLOCK_SIZE).map(|_| rand::random::<u8>()).collect());
-//             let slice_id = random_slice_id();
-//             cache.cache(slice_id, block).unwrap();
+//             let block = Arc::new((0..BLOCK_SIZE).map(|_|
+// rand::random::<u8>()).collect());             let slice_id =
+// random_slice_id();             cache.cache(slice_id, block).unwrap();
 //         })
 //     });
 //

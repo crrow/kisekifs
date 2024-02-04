@@ -2,11 +2,12 @@ mod file_cache;
 mod juice_cache;
 mod write_cache;
 
-use crate::meta::types::SliceID;
+use std::{fmt::Debug, sync::Arc};
+
 use async_trait::async_trait;
 use opendal::Reader;
-use std::fmt::Debug;
-use std::sync::Arc;
+
+use crate::meta::types::SliceID;
 
 pub fn new_juice_builder() -> juice_cache::JuiceFileCacheBuilder {
     juice_cache::JuiceFileCacheBuilder::default()
@@ -24,11 +25,3 @@ pub trait Cache: Send + Sync + Debug + Unpin + 'static {
 
 /// The cache manager.
 pub(crate) struct CacheManager {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_cache() {}
-}
