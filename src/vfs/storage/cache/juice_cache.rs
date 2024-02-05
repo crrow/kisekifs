@@ -327,6 +327,7 @@ impl JuiceFileCacheInner {
     }
 
     /// FIXME: handle the checksum case.
+    /// FIXME: we may handle the case when we return the reader, but then it starts to clean up.
     async fn get_reader(&self, file_path: &str) -> Result<Option<Reader>> {
         if self
             .local_store
@@ -1192,6 +1193,7 @@ mod tests {
         struct CacheReq {
             slice_key: SliceKey,
             block: Vec<u8>,
+            stage: bool,
         }
 
         let cache_reqs = (0..1024)
@@ -1201,14 +1203,22 @@ mod tests {
                 CacheReq {
                     slice_key: key,
                     block,
+                    stage: rand::random::<bool>(),
                 }
             })
             .collect::<Vec<_>>();
 
         for req in cache_reqs.iter() {
-            cache
-                .cache(req.slice_key, Arc::new(req.block.clone()))
-                .await;
+            if req.stage {
+                cache
+                    .stage(req.slice_key, Arc::new(req.block.clone()), false)
+                    .await
+                    .unwrap()
+            } else {
+                cache
+                    .cache(req.slice_key, Arc::new(req.block.clone()))
+                    .await;
+            }
         }
 
         cache.wait_on_all_flush_finish().await;
