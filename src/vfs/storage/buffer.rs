@@ -9,9 +9,8 @@ use opendal::Operator;
 use snafu::{ensure, ResultExt};
 use tracing::debug;
 
-use crate::meta::types::SliceKey;
 use crate::{
-    meta::types::{SliceID, EMPTY_SLICE_ID},
+    meta::types::{SliceID, SliceKey, EMPTY_SLICE_ID},
     vfs::{
         err::{ErrLIBCSnafu, OpenDalSnafu, Result},
         storage::{make_slice_object_key, Cache, EngineConfig},

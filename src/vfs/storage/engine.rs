@@ -13,9 +13,8 @@ use crate::{
     vfs::{
         err::Result,
         storage::{
-            buffer::ReadBuffer, new_juice_builder, reader::FileReadersRef,
-            scheduler::BackgroundTaskPool, worker, worker::Worker, writer::FileWritersRef, Cache,
-            WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
+            buffer::ReadBuffer, new_juice_builder, reader::FileReadersRef, writer::FileWritersRef,
+            Cache, WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
         },
     },
 };
@@ -27,15 +26,6 @@ const DEFAULT_BUFFER_CAPACITY: usize = 300 << 20; // 300 MiB
 pub struct Config {
     // ========Cache Configs ===>
     pub capacity: usize,
-
-    // ========Worker configs ===>
-    /// Number of region workers (default: 1/2 of cpu cores).
-    /// Sets to 0 to use the default value.
-    pub number_of_workers: usize,
-    /// Request channel size of each worker (default 128).
-    pub worker_channel_size: usize,
-    /// Max batch size for a worker to handle requests (default 64).
-    pub worker_request_batch_size: usize,
 
     // ========Buffer configs ===>
     /// The total memory size for the write/read buffer.
@@ -61,9 +51,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             capacity: 100 << 10,
-            number_of_workers: divide_num_cpus(2),
-            worker_channel_size: 128,
-            worker_request_batch_size: 64,
             total_buffer_capacity: DEFAULT_BUFFER_CAPACITY, // 300MB
             chunk_size: DEFAULT_CHUNK_SIZE,                 // 64MB
             block_size: DEFAULT_BLOCK_SIZE,                 // 4MB
@@ -85,7 +72,6 @@ pub(crate) struct Engine {
     pub(crate) config: Arc<Config>,
     object_storage: Operator,
     pub(crate) meta_engine: Arc<MetaEngine>,
-    workers: Worker,
     pub(crate) cache: Arc<dyn Cache>,
     pub(crate) file_writers: FileWritersRef,
     pub(crate) file_readers: FileReadersRef,
@@ -99,14 +85,6 @@ impl Engine {
         meta_engine: Arc<MetaEngine>,
     ) -> Result<Engine> {
         let file_writers = Arc::new(DashMap::new());
-        let worker = worker::WorkerStarter {
-            id: 0,
-            config: config.clone(),
-            task_pool_ref: Arc::new(BackgroundTaskPool::start(config.number_of_workers)),
-            listener: worker::WorkerListener::default(),
-            file_writers: file_writers.clone(),
-        }
-        .start();
         let id_generator = sonyflake::Sonyflake::new().expect("failed to create id generator");
         let cache = new_juice_builder().with_root_cache_dir("/tmp/jc").build()?;
 
@@ -114,7 +92,6 @@ impl Engine {
             config,
             object_storage,
             meta_engine,
-            workers: worker,
             cache,
             file_writers,
             file_readers: Arc::new(Default::default()),
@@ -136,12 +113,6 @@ impl Engine {
 
     fn get_config(&self) -> Arc<Config> {
         self.config.clone()
-    }
-
-    pub(crate) async fn submit_request(&self, req: worker::WorkerRequest) {
-        if let Err(e) = self.workers.submit_request(req).await {
-            warn!("submit request failed: {}", e);
-        }
     }
 }
 

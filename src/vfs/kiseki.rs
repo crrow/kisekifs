@@ -27,9 +27,8 @@ use snafu::{location, Location};
 use tokio::time::Instant;
 use tracing::{debug, info, trace};
 
-use crate::common::new_fs_sto;
 use crate::{
-    common::{err::ToErrno, new_memory_sto},
+    common::{err::ToErrno, new_fs_sto, new_memory_sto},
     meta::{
         engine::{access, MetaEngine},
         internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},

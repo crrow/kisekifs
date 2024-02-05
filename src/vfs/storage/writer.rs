@@ -13,7 +13,7 @@ use std::{
 use dashmap::DashMap;
 use libc::EIO;
 use scopeguard::defer;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::{
     select,
     sync::{Notify, RwLock},
@@ -31,11 +31,8 @@ use crate::{
     },
     vfs::{
         err::{ErrLIBCSnafu, InvalidInoSnafu, Result},
-        storage::{
-            cal_chunk_idx, cal_chunk_offset,
-            worker::{FlushAndReleaseSliceReason, WorkerRequest},
-            Engine, EngineConfig, WriteBuffer,
-        },
+        handle,
+        storage::{cal_chunk_idx, cal_chunk_offset, Engine, EngineConfig, WriteBuffer},
     },
 };
 
@@ -160,9 +157,7 @@ impl FileWriter {
                 let data =
                     &data[location.buf_start_at..location.buf_start_at + location.need_write_len];
                 let chunk_writer = self.get_chunk_writer(location.chunk_idx);
-                common::runtime::spawn(async move {
-                    chunk_writer.write(location.chunk_offset, data).await
-                })
+                tokio::spawn(async move { chunk_writer.write(location.chunk_offset, data).await })
             })
             .collect::<Vec<_>>();
 
@@ -226,7 +221,7 @@ impl FileWriter {
                     let idx = r.chunk_idx;
                     let cw = r.value().clone();
                     let _chunk_writers_ref = self.chunk_writers.clone();
-                    common::runtime::spawn(async move {
+                    tokio::spawn(async move {
                         if let Err(e) = cw.do_finish().await {
                             debug!("flush chunk {} failed: {}", idx, e);
                         }
@@ -543,10 +538,26 @@ impl ChunkWriter {
             .await?;
 
         if total_write_len == self.engine_config.chunk_size {
-            self.submit_flush_and_release_slice_req(slice, FlushAndReleaseSliceReason::Full)
-                .await;
+            let me = self.engine.upgrade().unwrap().meta_engine.clone();
+            let slice = slice.clone();
+            let handle = tokio::spawn(async move {
+                slice.prepare_slice_id(me).await?;
+                slice.finish().await
+            })
+            .await;
+            if let Err(e) = handle {
+                debug!("finish failed: {}", e);
+            }
         } else {
-            self.submit_flush_block_req(&slice, total_write_len).await;
+            let me = self.engine.upgrade().unwrap().meta_engine.clone();
+            if let Err(e) = tokio::spawn(async move {
+                slice.prepare_slice_id(me).await?;
+                slice.do_flush_to(total_write_len).await
+            })
+            .await
+            {
+                debug!("flush slice failed: {}", e);
+            }
         }
 
         if !self.has_written.load(Ordering::Acquire) {
@@ -566,6 +577,7 @@ impl ChunkWriter {
         debug!("try to find writable slice for chunk {}", self.chunk_idx);
         let read_guard = self.slices.read().await;
         debug!("get slices lock succeed");
+        let mut handles = vec![];
         for (iter_cnt, (_seq, sw)) in read_guard.iter().rev().enumerate() {
             let sw = sw.clone();
             if !sw.frozen() {
@@ -577,14 +589,11 @@ impl ChunkWriter {
                     return sw.clone();
                 }
                 if iter_cnt > 3 {
-                    self.submit_flush_and_release_slice_req(
-                        sw.clone(),
-                        FlushAndReleaseSliceReason::RandomWrite,
-                    )
-                    .await;
+                    handles.push(tokio::spawn(async move { sw.finish().await }))
                 }
             }
         }
+        futures::future::join_all(handles).await;
         drop(read_guard);
 
         let engine = self.engine.upgrade().expect("engine should not be dropped");
@@ -608,33 +617,6 @@ impl ChunkWriter {
         sw
     }
 
-    async fn submit_flush_block_req(self: &Arc<Self>, sw: &Arc<SliceWriter>, flush_to: usize) {
-        let e = self.engine.upgrade().expect("engine should not be dropped");
-        e.submit_request(WorkerRequest::new_flush_block_request(
-            self.ino,
-            self.chunk_idx,
-            sw.internal_seq,
-            flush_to,
-        ))
-        .await;
-    }
-
-    async fn submit_flush_and_release_slice_req(
-        self: &Arc<Self>,
-        sw: Arc<SliceWriter>,
-        reason: FlushAndReleaseSliceReason,
-    ) {
-        let e = self.engine.upgrade().expect("engine should not be dropped");
-        sw.freeze(); // freeze this slice, make others cannot write to it.
-        e.submit_request(WorkerRequest::new_flush_and_release_slice_request(
-            self.ino,
-            self.chunk_idx,
-            sw.internal_seq,
-            reason,
-        ))
-        .await;
-    }
-
     /// Try to flush all active slices to the backend.
     async fn do_finish(self: &Arc<Self>) -> Result<()> {
         let read_guard = self.slices.read().await;
@@ -644,7 +626,7 @@ impl ChunkWriter {
             .map(|sw| {
                 let sw = sw.1.clone();
                 let me = engine.meta_engine.clone();
-                async move {
+                tokio::spawn(async move {
                     if !sw.frozen() {
                         sw.freeze();
                         if sw.prepare_slice_id(me).await.is_err() {
@@ -654,7 +636,7 @@ impl ChunkWriter {
                             return;
                         };
                     }
-                }
+                })
             })
             .collect::<Vec<_>>();
         futures::future::join_all(x).await;

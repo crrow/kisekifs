@@ -14,7 +14,6 @@ pub use engine::Config as EngineConfig;
 pub(crate) use engine::Engine;
 mod reader;
 pub(crate) mod scheduler;
-mod worker;
 mod writer;
 
 use crate::meta::types::{SliceID, SliceKey};
