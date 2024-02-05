@@ -9,6 +9,7 @@ use opendal::Operator;
 use snafu::{ensure, ResultExt};
 use tracing::debug;
 
+use crate::meta::types::SliceKey;
 use crate::{
     meta::types::{SliceID, EMPTY_SLICE_ID},
     vfs::{
@@ -305,7 +306,7 @@ impl WriteBuffer {
     pub(crate) async fn flush_to(&mut self, offset: usize) -> Result<()> {
         debug_assert!(self.flushed_length <= offset);
 
-        let datas: Vec<(String, Vec<u8>)> = self
+        let datas = self
             .block_slots
             .iter_mut()
             .enumerate()
@@ -326,20 +327,21 @@ impl WriteBuffer {
                     let block_size = cal_object_block_size(l, block_size, idx);
                     self.flushed_length += block_size;
                     assert_ne!(self.slice_id, EMPTY_SLICE_ID, "slice id should be set");
-                    let key = make_slice_object_key(self.slice_id, idx, block_size);
+                    let key = SliceKey::new(self.slice_id, idx, block_size);
                     (key, data)
                 }
                 _ => unreachable!("we have filtered out the empty and released block"),
             })
             .collect::<Vec<_>>();
-        let sto = self.object_storage.clone();
         let futures = datas
             .into_iter()
             .map(|(k, v)| {
-                let sto = sto.clone(); // Clone sto within the closure
+                // let sto = sto.clone(); // Clone sto within the closure
+                let cache = self.cache.clone();
                 async move {
                     debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
-                    let _ = sto.write(&k, v).await;
+                    // let _ = sto.write(&k, v).await;
+                    let _ = cache.stage(k, Arc::new(v), true).await;
                 }
             })
             .collect::<Vec<_>>();
