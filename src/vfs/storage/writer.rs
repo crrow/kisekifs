@@ -23,10 +23,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::meta::types::EMPTY_SLICE_ID;
 use crate::{
     common, meta,
-    meta::{engine::MetaEngine, types::Ino},
+    meta::{
+        engine::MetaEngine,
+        types::{Ino, EMPTY_SLICE_ID},
+    },
     vfs::{
         err::{ErrLIBCSnafu, InvalidInoSnafu, Result},
         storage::{
@@ -637,13 +639,25 @@ impl ChunkWriter {
     async fn do_finish(self: &Arc<Self>) -> Result<()> {
         let read_guard = self.slices.read().await;
         let engine = self.engine.upgrade().expect("engine should not be dropped");
-        for (_, sw) in read_guard.iter() {
-            if !sw.frozen() {
-                sw.freeze();
-                sw.prepare_slice_id(engine.meta_engine.clone()).await?;
-                sw.finish().await?;
-            }
-        }
+        let x = read_guard
+            .iter()
+            .map(|sw| {
+                let sw = sw.1.clone();
+                let me = engine.meta_engine.clone();
+                async move {
+                    if !sw.frozen() {
+                        sw.freeze();
+                        if sw.prepare_slice_id(me).await.is_err() {
+                            return;
+                        };
+                        if sw.finish().await.is_err() {
+                            return;
+                        };
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        futures::future::join_all(x).await;
         Ok(())
     }
 
@@ -728,14 +742,14 @@ impl SliceWriter {
             return Ok(());
         }
 
-        guard.finish()?;
+        guard.finish().await?;
         self.done.store(true, Ordering::Release);
         Ok(())
     }
 
     pub(crate) async fn do_flush_to(self: &Arc<Self>, offset: usize) -> Result<()> {
         let mut guard = self.write_buffer.write().await;
-        guard.flush_to(offset)?;
+        guard.flush_to(offset).await?;
         Ok(())
     }
 
@@ -779,19 +793,25 @@ impl Drop for SliceWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{common::install_fmt_log, meta::MetaConfig, vfs::storage::new_debug_sto};
+    use crate::{
+        common::{install_fmt_log, new_memory_sto},
+        meta::MetaConfig,
+    };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn find_chunk_to_write() {
         install_fmt_log();
 
         let meta_engine = MetaConfig::default().open().unwrap();
-        let sto_engine = new_debug_sto();
-        let engine = Arc::new(Engine::new(
-            Arc::new(EngineConfig::default()),
-            sto_engine,
-            Arc::new(meta_engine),
-        ));
+        let sto_engine = new_memory_sto();
+        let engine = Arc::new(
+            Engine::new(
+                Arc::new(EngineConfig::default()),
+                sto_engine,
+                Arc::new(meta_engine),
+            )
+            .unwrap(),
+        );
         let chunk_size = engine.config.chunk_size;
 
         struct TestCase {
@@ -893,12 +913,15 @@ mod tests {
         install_fmt_log();
 
         let meta_engine = MetaConfig::default().open().unwrap();
-        let sto_engine = new_debug_sto();
-        let engine = Arc::new(Engine::new(
-            Arc::new(EngineConfig::default()),
-            sto_engine,
-            Arc::new(meta_engine),
-        ));
+        let sto_engine = new_memory_sto();
+        let engine = Arc::new(
+            Engine::new(
+                Arc::new(EngineConfig::default()),
+                sto_engine,
+                Arc::new(meta_engine),
+            )
+            .unwrap(),
+        );
 
         engine.new_file_writer(Ino(1), 0);
         let data = vec![0u8; 65 << 20];

@@ -28,7 +28,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace};
 
 use crate::{
-    common::err::ToErrno,
+    common::{err::ToErrno, new_memory_sto},
     meta::{
         engine::{access, MetaEngine},
         internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
@@ -85,12 +85,12 @@ impl KisekiVFS {
         }
 
         let meta = Arc::new(meta);
-        let sto_engine = vfs_config.debug_sto_engine();
+        let object_storage = new_memory_sto();
         let storage_engine = Arc::new(Engine::new(
             Arc::new(vfs_config.engine_config.clone()),
-            sto_engine,
+            object_storage,
             meta.clone(),
-        ));
+        )?);
 
         let vfs = Self {
             config: vfs_config,

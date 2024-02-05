@@ -183,9 +183,9 @@ enum VirtualSlice {
 mod tests {
     use super::*;
     use crate::{
-        common::install_fmt_log,
+        common::{install_fmt_log, new_memory_sto},
         meta::{types::ROOT_INO, Format, MetaConfig, MetaContext},
-        vfs::storage::{new_debug_sto, EngineConfig},
+        vfs::storage::EngineConfig,
     };
 
     #[test]
@@ -250,12 +250,15 @@ mod tests {
             .await
             .unwrap();
 
-        let sto_engine = new_debug_sto();
-        let engine = Arc::new(Engine::new(
-            Arc::new(EngineConfig::default()),
-            sto_engine,
-            Arc::new(meta_engine),
-        ));
+        let sto_engine = new_memory_sto();
+        let engine = Arc::new(
+            Engine::new(
+                Arc::new(EngineConfig::default()),
+                sto_engine,
+                Arc::new(meta_engine),
+            )
+            .unwrap(),
+        );
 
         engine.new_file_writer(inode, 0);
         let data = b"hello world" as &[u8];

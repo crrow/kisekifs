@@ -54,6 +54,8 @@ alias sh-m := help-mount
     cargo run --color=always --bin kiseki help mount
 
 @mount:
+    just clean
+    just prepare
     cargo run --color=always --bin kiseki mount
 
 # ==================================================== umount
@@ -73,4 +75,18 @@ alias sh-um := help-umount
 alias sh-f := help-format
 @help-format:
     cargo run --color=always --bin kiseki help format
+
+# ==================================================== fio test
+
+@clean:
+    rm -r /tmp/kiseki /tmp/kiseki-meta/
+
+@prepare:
+    mkdir -p /tmp/kiseki /tmp/kiseki-meta/
+    just format
+
+alias sw := seq-write
+@seq-write:
+    fio --name=jfs-test --directory=/tmp/kiseki --ioengine=libaio --rw=write --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+
 

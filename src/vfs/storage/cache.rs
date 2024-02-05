@@ -1,6 +1,6 @@
 mod juice_cache;
 mod moka_cache;
-mod stack_cache;
+mod partitioned_cache;
 mod write_cache;
 
 use std::{fmt::Debug, hash::Hash, sync::Arc};
@@ -8,8 +8,7 @@ use std::{fmt::Debug, hash::Hash, sync::Arc};
 use async_trait::async_trait;
 use opendal::Reader;
 
-use crate::vfs::err::Result;
-use crate::vfs::storage::SliceKey;
+use crate::vfs::{err::Result, storage::SliceKey};
 
 pub fn new_juice_builder() -> juice_cache::JuiceFileCacheBuilder {
     juice_cache::JuiceFileCacheBuilder::default()
@@ -34,5 +33,5 @@ pub trait Cache: Send + Sync + Debug + Unpin + 'static {
     async fn stage(&self, key: SliceKey, data: Arc<Vec<u8>>, keep_cache: bool) -> Result<()>;
 }
 
-/// The cache manager.
-pub(crate) struct CacheManager {}
+/// Manages cached data for the engine.
+pub struct CacheManager {}

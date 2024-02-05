@@ -245,9 +245,6 @@ impl WorkerLoop {
                     // remove the single block flush req, since we still need to flush the full one.
                     fb_map.remove(&(fl.ino, fl.chunk_idx, fl.internal_slice_seq));
                 }
-                WorkerRequest::CommitChunk(cc) => {
-                    self.handle_commit_chunk_req(cc).await;
-                }
             }
         }
 
@@ -291,27 +288,6 @@ impl WorkerLoop {
             // TODO: do really flush and release buffer.
             debug!("flush and release: {:?}", fl_req);
         }
-    }
-
-    async fn handle_commit_chunk_req(&mut self, req: CommitChunkRequest) {
-        debug!("ino: {} commit chunk: {}", req.ino, req.chunk_idx);
-        // if self
-        //     .commit_chunk_handles
-        //     .contains_key(&(req.ino, req.chunk_idx))
-        // {
-        //     return;
-        // }
-        //
-        // if let Some(fw) = self.file_writers.get(&req.ino) {
-        //     let fw = fw.value().clone();
-        //     if let Some(cw) = fw.find_chunk_writer(req.chunk_idx) {
-        //         let handle = common::runtime::spawn(async move {
-        //             let read_guard = cw.slices.read().await;
-        //         });
-        //         self.commit_chunk_handles
-        //             .insert((req.ino, req.chunk_idx), handle);
-        //     }
-        // }
     }
 }
 

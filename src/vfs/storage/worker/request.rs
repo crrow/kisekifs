@@ -19,7 +19,6 @@ use crate::meta::types::Ino;
 pub(crate) enum WorkerRequest {
     FlushBlock(FlushBlockRequest),
     FlushReleaseSlice(FlushAndReleaseSliceRequest),
-    CommitChunk(CommitChunkRequest),
     /// Notify a worker to stop.
     Stop,
 }
@@ -51,10 +50,6 @@ impl WorkerRequest {
             internal_slice_seq,
             reason,
         })
-    }
-
-    pub(crate) fn new_commit_chunk_request(ino: Ino, chunk_idx: usize) -> Self {
-        WorkerRequest::CommitChunk(CommitChunkRequest { ino, chunk_idx })
     }
 }
 

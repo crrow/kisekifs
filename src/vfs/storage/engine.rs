@@ -1,18 +1,21 @@
 use std::{fmt::Debug, sync::Arc, time::SystemTime};
 
 use dashmap::DashMap;
+use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::meta::types::SliceID;
 use crate::{
-    meta::{engine::MetaEngine, types::Ino},
+    meta::{
+        engine::MetaEngine,
+        types::{Ino, SliceID},
+    },
     vfs::{
         err::Result,
         storage::{
-            buffer::ReadBuffer, reader::FileReadersRef, scheduler::BackgroundTaskPool,
-            sto::StoEngine, worker, worker::Worker, writer::FileWritersRef, WriteBuffer,
-            DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
+            buffer::ReadBuffer, new_juice_builder, reader::FileReadersRef,
+            scheduler::BackgroundTaskPool, worker, worker::Worker, writer::FileWritersRef, Cache,
+            WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
         },
     },
 };
@@ -80,9 +83,10 @@ fn divide_num_cpus(divisor: usize) -> usize {
 /// The core logic of the storage engine which support the vfs.
 pub(crate) struct Engine {
     pub(crate) config: Arc<Config>,
-    object_sto: Arc<dyn StoEngine>,
+    object_storage: Operator,
     pub(crate) meta_engine: Arc<MetaEngine>,
     workers: Worker,
+    pub(crate) cache: Arc<dyn Cache>,
     pub(crate) file_writers: FileWritersRef,
     pub(crate) file_readers: FileReadersRef,
     pub(crate) id_generator: sonyflake::Sonyflake,
@@ -91,9 +95,9 @@ pub(crate) struct Engine {
 impl Engine {
     pub(crate) fn new(
         config: Arc<Config>,
-        object_sto: Arc<dyn StoEngine>,
+        object_storage: Operator,
         meta_engine: Arc<MetaEngine>,
-    ) -> Engine {
+    ) -> Result<Engine> {
         let file_writers = Arc::new(DashMap::new());
         let worker = worker::WorkerStarter {
             id: 0,
@@ -104,32 +108,34 @@ impl Engine {
         }
         .start();
         let id_generator = sonyflake::Sonyflake::new().expect("failed to create id generator");
+        let cache = new_juice_builder().build()?;
 
-        Engine {
+        Ok(Engine {
             config,
-            object_sto,
+            object_storage,
             meta_engine,
             workers: worker,
+            cache,
             file_writers,
             file_readers: Arc::new(Default::default()),
             id_generator,
-        }
+        })
     }
 
     pub(crate) fn new_write_buffer(&self) -> WriteBuffer {
-        WriteBuffer::new(self.get_config(), self.get_object_sto())
+        WriteBuffer::new(
+            self.get_config(),
+            self.cache.clone(),
+            self.object_storage.clone(),
+        )
     }
 
     pub(crate) fn new_read_buffer(&self, sid: SliceID, length: usize) -> ReadBuffer {
-        ReadBuffer::new(self.get_config(), self.get_object_sto(), sid, length)
+        ReadBuffer::new(self.get_config(), self.object_storage.clone(), sid, length)
     }
 
     fn get_config(&self) -> Arc<Config> {
         self.config.clone()
-    }
-
-    fn get_object_sto(&self) -> Arc<dyn StoEngine> {
-        self.object_sto.clone()
     }
 
     pub(crate) async fn submit_request(&self, req: worker::WorkerRequest) {
