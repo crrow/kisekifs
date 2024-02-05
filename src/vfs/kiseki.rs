@@ -27,6 +27,7 @@ use snafu::{location, Location};
 use tokio::time::Instant;
 use tracing::{debug, info, trace};
 
+use crate::common::new_fs_sto;
 use crate::{
     common::{err::ToErrno, new_memory_sto},
     meta::{
@@ -85,7 +86,7 @@ impl KisekiVFS {
         }
 
         let meta = Arc::new(meta);
-        let object_storage = new_memory_sto();
+        let object_storage = new_fs_sto();
         let storage_engine = Arc::new(Engine::new(
             Arc::new(vfs_config.engine_config.clone()),
             object_storage,

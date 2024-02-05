@@ -15,3 +15,10 @@ pub(crate) fn new_memory_sto() -> Operator {
     let builder = opendal::services::Memory::default();
     Operator::new(builder).unwrap().finish()
 }
+
+pub(crate) fn new_fs_sto() -> Operator {
+    let mut builder = opendal::services::Fs::default();
+    let temp = tempfile::Builder::new().prefix("").tempdir().unwrap();
+    builder.root(temp.into_path().to_str().unwrap());
+    Operator::new(builder).unwrap().finish()
+}

@@ -166,6 +166,11 @@ impl JuiceFileCacheBuilder {
         self.free_ratio = free_ratio;
         self
     }
+
+    pub fn with_root_cache_dir(mut self, dir: &str) -> Self {
+        self.cache_dir = dir.to_string();
+        self
+    }
 }
 fn new_fs_store(path: &str) -> Result<ObjectStorage> {
     let temp_dir = format!("{}-temp", path);

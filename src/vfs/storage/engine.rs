@@ -108,7 +108,7 @@ impl Engine {
         }
         .start();
         let id_generator = sonyflake::Sonyflake::new().expect("failed to create id generator");
-        let cache = new_juice_builder().build()?;
+        let cache = new_juice_builder().with_root_cache_dir("/tmp/jc").build()?;
 
         Ok(Engine {
             config,
