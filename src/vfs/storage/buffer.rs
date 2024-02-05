@@ -4,19 +4,20 @@ use std::{
     sync::Arc,
 };
 
+use crate::meta::types::{SliceID, EMPTY_SLICE_ID};
 use bytesize::ByteSize;
 use snafu::ensure;
 use tracing::debug;
 
 use crate::vfs::{
     err::{ErrLIBCSnafu, Result},
-    storage::{sto::StoEngine, EngineConfig},
+    storage::{make_slice_object_key, sto::StoEngine, EngineConfig},
     VFSError,
 };
 
 pub(crate) struct ReadBuffer {
     config: Arc<EngineConfig>,
-    slice_id: usize,
+    slice_id: SliceID,
     length: usize,
     sto: Arc<dyn StoEngine>,
 }
@@ -25,7 +26,7 @@ impl ReadBuffer {
     pub(crate) fn new(
         config: Arc<EngineConfig>,
         sto: Arc<dyn StoEngine>,
-        slice_id: usize,
+        slice_id: SliceID,
         length: usize,
     ) -> ReadBuffer {
         ReadBuffer {
@@ -89,7 +90,7 @@ impl ReadBuffer {
             return Ok(got);
         }
 
-        let key = generate_slice_key(self.slice_id, block_idx, read_block_size);
+        let key = make_slice_object_key(self.slice_id, block_idx, read_block_size);
         debug!("block_idx: {block_idx}, try to read [{key}]");
         let buf = self.sto.get(&key)?;
         debug!(
@@ -125,7 +126,7 @@ pub(crate) struct WriteBuffer {
     config: Arc<EngineConfig>,
     // who owns this buffer, this id need to be
     // set if we need to upload the buffer to the cloud.
-    slice_id: Option<usize>,
+    slice_id: SliceID,
     // current length of this buffer.
     length: usize,
     // the length of bytes that has been released.
@@ -142,18 +143,18 @@ impl WriteBuffer {
                 .map(|_| Block::Empty)
                 .collect(),
             config,
-            slice_id: None,
+            slice_id: EMPTY_SLICE_ID,
             length: 0,
             flushed_length: 0,
             sto,
         }
     }
 
-    pub(crate) fn set_slice_id(&mut self, sid: usize) {
-        self.slice_id = Some(sid);
+    pub(crate) fn set_slice_id(&mut self, sid: SliceID) {
+        self.slice_id = sid;
     }
 
-    pub(crate) fn get_slice_id(&self) -> Option<usize> {
+    pub(crate) fn get_slice_id(&self) -> SliceID {
         self.slice_id
     }
 
@@ -310,7 +311,8 @@ impl WriteBuffer {
                     let block_size = self.config.block_size;
                     let block_size = cal_object_block_size(l, block_size, idx);
                     self.flushed_length += block_size;
-                    let key = generate_slice_key(self.slice_id.unwrap(), idx, block_size);
+                    assert_ne!(self.slice_id, EMPTY_SLICE_ID, "slice id should be set");
+                    let key = make_slice_object_key(self.slice_id, idx, block_size);
                     (key, data)
                 }
                 _ => unreachable!("we have filtered out the empty and released block"),
@@ -360,17 +362,6 @@ fn cal_object_block_size(length: usize, block_size: usize, block_idx: usize) -> 
     // min(1023 - 0 * 1024, 1024) = min(1023, 1024) = 1023
     // min(2049 - 2 * 1024, 1024) = min(1, 1024) = 1
     min(length - block_idx * block_size, block_size)
-}
-
-fn generate_slice_key(sid: usize, block_idx: usize, block_size: usize) -> String {
-    format!(
-        "chunks/{}/{}/{:08X}_{:08X}_{:08X}",
-        sid / 1000 / 1000,
-        sid / 1000,
-        sid,
-        block_idx,
-        block_size,
-    )
 }
 
 #[cfg(test)]

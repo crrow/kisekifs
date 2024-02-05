@@ -34,6 +34,7 @@ use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
+use crate::meta::types::SliceID;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -421,13 +422,13 @@ impl MetaEngine {
         format!("meta-{}", self.config.scheme)
     }
 
-    pub async fn next_slice_id(&self) -> Result<usize> {
+    pub async fn next_slice_id(&self) -> Result<SliceID> {
         let s = self
             .free_slices
             .next()
             .await
             .context(ErrFailedToDoCounterSnafu)?;
-        Ok(s as usize)
+        Ok(s)
     }
 
     /// StatFS returns summary statistics of a volume.

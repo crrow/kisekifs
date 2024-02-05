@@ -23,6 +23,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+use crate::meta::types::EMPTY_SLICE_ID;
 use crate::{
     common, meta,
     meta::{engine::MetaEngine, types::Ino},
@@ -741,14 +742,14 @@ impl SliceWriter {
     async fn prepare_slice_id(self: &Arc<Self>, meta_engine: Arc<MetaEngine>) -> Result<()> {
         if !self.slice_id_prepared.load(Ordering::Acquire) {
             let guard = self.write_buffer.read().await;
-            if guard.get_slice_id().is_none() {
+            if guard.get_slice_id() == EMPTY_SLICE_ID {
                 drop(guard);
                 if self.slice_id_prepared.load(Ordering::Acquire) {
                     // load again
                     return Ok(());
                 }
                 let mut write_guard = self.write_buffer.write().await;
-                if write_guard.get_slice_id().is_none() {
+                if write_guard.get_slice_id() == EMPTY_SLICE_ID {
                     let sid = meta_engine.next_slice_id().await?;
                     debug!("assign slice id {} to slice {}", sid, self.internal_seq);
                     write_guard.set_slice_id(sid);
@@ -763,7 +764,7 @@ impl SliceWriter {
         let guard = self.write_buffer.read().await;
         meta::types::Slice::new_owned(
             self.chunk_start_offset,
-            guard.get_slice_id().unwrap() as u64,
+            guard.get_slice_id(),
             guard.length(),
         )
     }

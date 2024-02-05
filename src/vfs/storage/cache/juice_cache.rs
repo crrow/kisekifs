@@ -24,7 +24,7 @@ use std::{
 use async_trait::async_trait;
 use crc32fast::Hasher;
 use dashmap::{DashMap, DashSet};
-use futures::FutureExt;
+use futures::{FutureExt, TryStreamExt};
 use opendal::{Builder, Operator as ObjectStorage, Reader};
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,8 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
 
+use crate::meta::types::EMPTY_SLICE_KEY;
+use crate::vfs::storage::SliceKey;
 use crate::{
     common::{readable_size::ReadableSize, runtime},
     meta::types::{random_slice_id, SliceID},
@@ -100,7 +102,7 @@ impl JuiceFileCacheBuilder {
         let (sender, receiver) = mpsc::channel(self.max_pending_cnt);
         let cancel_token = CancellationToken::new();
         let tracker = TaskTracker::new();
-        let (cleanup_full_tx, cleanup_full_rx) = watch::channel(0);
+        let (cleanup_full_tx, cleanup_full_rx) = watch::channel(EMPTY_SLICE_KEY);
         let fc = Arc::new(JuiceFileCacheInner {
             cache_root_dir: self.cache_dir,
             add_checksum: self.add_checksum,
@@ -220,14 +222,14 @@ impl Debug for JuiceFileCache {
 
 #[async_trait]
 impl Cache for JuiceFileCache {
-    async fn cache(&self, slice_id: u64, block: Arc<Vec<u8>>) -> bool {
+    async fn cache(&self, key: SliceKey, block: Arc<Vec<u8>>) -> bool {
         // we expose weak cache for low latency,
         // so we reject the request if the cache is in cleanup.
-        self.0.cache_weak(slice_id, block).await
+        self.0.cache_weak(key.clone(), block).await
     }
 
-    async fn get(&self, slice_id: SliceID) -> Option<Reader> {
-        self.0.get(slice_id).await
+    async fn get(&self, key: SliceKey) -> Option<Reader> {
+        self.0.get(key).await
     }
 
     async fn wait_on_all_flush_finish(&self) {
@@ -238,12 +240,12 @@ impl Cache for JuiceFileCache {
         self.0.close().await
     }
 
-    async fn remove(&self, slice_id: SliceID) {
-        self.0.remove(slice_id).await
+    async fn remove(&self, key: SliceKey) {
+        self.0.remove(key.clone()).await
     }
 
-    async fn stage(&self, slice_id: SliceID, data: Arc<Vec<u8>>, keep_cache: bool) -> Result<()> {
-        self.0.stage(slice_id, data, keep_cache).await
+    async fn stage(&self, key: SliceKey, data: Arc<Vec<u8>>, keep_cache: bool) -> Result<()> {
+        self.0.stage(key, data, keep_cache).await
     }
 }
 
@@ -263,34 +265,34 @@ pub(crate) struct JuiceFileCacheInner {
     used: Arc<AtomicIsize>,
     stage_full: Arc<AtomicBool>,
     raw_full: Arc<AtomicBool>, // TODO: rename me
-    memory_index: DashMap<SliceID, Arc<CacheIndexValue>>,
-    stage_index: DashMap<SliceID, Arc<StageIndexValue>>,
+    memory_index: DashMap<SliceKey, Arc<CacheIndexValue>>,
+    stage_index: DashMap<SliceKey, Arc<StageIndexValue>>,
     cancel_token: CancellationToken,
     // if the slice is in the pending set, we won't cache it again.
     // when the background task is processing the block, we remove
     // the key from the pending set.
-    pending_set: DashSet<SliceID>,
+    pending_set: DashSet<SliceKey>,
     // check how many memory use while we are caching the block.
     memory_usage: Arc<AtomicUsize>,
 
     disk_item_tx: mpsc::Sender<DiskItem>,
-    stage_uploader_tx: Option<mpsc::Sender<(SliceID, String)>>,
+    stage_uploader_tx: Option<mpsc::Sender<(SliceKey, String)>>,
 
     task_tracker: TaskTracker,
     // we may call the cleanup manually, so maintain the state to reject the new requests.
     in_cleanup_full: Arc<AtomicBool>,
     cleanup_full_finished_notify: Arc<Notify>,
-    cleanup_full_tx: watch::Sender<SliceID>,
+    cleanup_full_tx: watch::Sender<SliceKey>,
 }
 
 impl JuiceFileCacheInner {
     /// Load a block from cache.
-    pub(crate) async fn get(self: &Arc<Self>, slice_id: SliceID) -> Option<Reader> {
-        if !self.memory_index.contains_key(&slice_id) {
+    pub(crate) async fn get(self: &Arc<Self>, key: SliceKey) -> Option<Reader> {
+        if !self.memory_index.contains_key(&key) {
             return None;
         }
 
-        let file_path = self.cache_path(slice_id);
+        let file_path = self.cache_path(key);
         match self.get_reader(&file_path).await {
             Ok(Some(reader)) => {
                 return Some(reader);
@@ -305,7 +307,7 @@ impl JuiceFileCacheInner {
         }
 
         // We remove the file from the index.
-        self.memory_index.remove(&slice_id);
+        self.memory_index.remove(&key);
         None
     }
 
@@ -328,30 +330,26 @@ impl JuiceFileCacheInner {
         }
     }
 
-    pub(crate) async fn cache(self: &Arc<Self>, slice_id: SliceID, block: Arc<Vec<u8>>) -> bool {
-        self.do_cache(slice_id, block, false).await
+    pub(crate) async fn cache(self: &Arc<Self>, key: SliceKey, block: Arc<Vec<u8>>) -> bool {
+        self.do_cache(key, block, false).await
     }
 
-    pub(crate) async fn cache_weak(
-        self: &Arc<Self>,
-        slice_id: SliceID,
-        block: Arc<Vec<u8>>,
-    ) -> bool {
-        self.do_cache(slice_id, block, true).await
+    pub(crate) async fn cache_weak(self: &Arc<Self>, key: SliceKey, block: Arc<Vec<u8>>) -> bool {
+        self.do_cache(key, block, true).await
     }
 
     async fn do_cache(
         self: &Arc<Self>,
-        slice_id: SliceID,
+        key: SliceKey,
         block: Arc<Vec<u8>>,
         weak: bool, // weak means we can reject the request if the cache is in cleanup.
     ) -> bool {
         // check the memory index
-        if self.memory_index.contains_key(&slice_id) {
+        if self.memory_index.contains_key(&key) {
             return false;
         }
         // check the memory buffer
-        if self.pending_set.contains(&slice_id) {
+        if self.pending_set.contains(&key) {
             return false;
         }
         // reject the new requests if the cache is full.
@@ -381,52 +379,55 @@ impl JuiceFileCacheInner {
         // update the total blocks.
         self.memory_usage.fetch_add(block_len, Ordering::AcqRel);
         // cache the memory buf.
-        self.pending_set.insert(slice_id);
-        if let Err(e) = self.disk_item_tx.send(DiskItem { slice_id, block }).await {
+        self.pending_set.insert(key);
+        if let Err(e) = self.disk_item_tx.send(DiskItem { key, block }).await {
             // failed to send the block to the flush task, discard it
-            debug!(
-                "failed to cache block to disk: {e}, discard it {}",
-                slice_id
-            );
-            self.pending_set.remove(&slice_id);
+            debug!("failed to cache block to disk: {e}, discard it {}", key);
+            self.pending_set.remove(&key);
             self.memory_usage.fetch_sub(block_len, Ordering::AcqRel);
             return false;
         };
         true
     }
 
-    fn cache_path(self: &Arc<Self>, slice_id: SliceID) -> String {
+    fn cache_path(self: &Arc<Self>, key: SliceKey) -> String {
         join_path(
             &join_path(&self.cache_root_dir, RAW_CACHE_DIR),
-            &format!("{}", slice_id),
+            &format!("{}", key.gen_path_for_local_sto()),
         )
     }
 
-    fn stage_path(self: &Arc<Self>, slice_id: SliceID) -> String {
+    fn stage_path(self: &Arc<Self>, key: SliceKey) -> String {
         join_path(
             &join_path(&self.cache_root_dir, STAGE_CACHE_DIR),
-            &format!("{}", slice_id),
+            &format!("{}", key.gen_path_for_local_sto()),
         )
+    }
+
+    fn stage_dir(self: &Arc<Self>) -> String {
+        let output = format!("{}/{}/", self.cache_root_dir, STAGE_CACHE_DIR);
+        opendal::raw::normalize_path(&output)
     }
 
     async fn update_memory_index(
         self: &Arc<Self>,
-        slice_id: SliceID,
+        key: SliceKey,
         block_len: usize,
         access_time: u64,
     ) {
-        if let Some(old) = self.memory_index.get(&slice_id) {
+        if let Some(old) = self.memory_index.get(&key) {
             self.used.fetch_sub(
                 old.block_size as isize + CACHE_SIZE_PADDING,
                 Ordering::AcqRel,
             );
         }
+
         self.memory_index.insert(
-            slice_id,
+            key,
             Arc::new(CacheIndexValue {
                 block_size: block_len,
                 access_time,
-                path: self.cache_path(slice_id),
+                path: self.cache_path(key),
             }),
         );
         if block_len > 0 {
@@ -436,15 +437,15 @@ impl JuiceFileCacheInner {
         if self.used.load(Ordering::Acquire) > self.capacity
             && !matches!(self.cache_eviction, CacheEviction::Disable)
         {
-            self.notify_to_cleanup_full(slice_id).await;
+            self.notify_to_cleanup_full(key).await;
         }
     }
 
     pub(crate) async fn cleanup_full(self: &Arc<Self>) {
-        self.notify_to_cleanup_full(random_slice_id()).await;
+        self.notify_to_cleanup_full(SliceKey::random()).await;
     }
 
-    async fn notify_to_cleanup_full(self: &Arc<Self>, changed: u64) {
+    async fn notify_to_cleanup_full(self: &Arc<Self>, changed: SliceKey) {
         if self.in_cleanup_full.load(Ordering::Acquire) {
             return;
         }
@@ -499,7 +500,7 @@ impl JuiceFileCacheInner {
             .unwrap()
             .as_secs();
         let cutoff = now - self.cache_expire.as_secs();
-        let mut last_key = 0;
+        let mut last_key = EMPTY_SLICE_KEY;
         let mut last_value = Arc::new(CacheIndexValue {
             block_size: 0,
             access_time: 0,
@@ -511,11 +512,11 @@ impl JuiceFileCacheInner {
             let k = e.key();
             let v = e.value();
             if !matches!(self.cache_eviction, CacheEviction::Disable) && v.access_time < cutoff {
-                last_key = *k;
+                last_key = k.clone();
                 last_value = v.clone();
                 cnt += 1;
             } else if cnt == 0 || last_value.access_time > v.access_time {
-                last_key = *k;
+                last_key = k.clone();
                 last_value = v.clone();
             }
             cnt += 1;
@@ -568,7 +569,7 @@ impl JuiceFileCacheInner {
     /// Stage the slice data to local store.
     pub(crate) async fn stage(
         self: &Arc<Self>,
-        slice_id: SliceID,
+        key: SliceKey,
         data: Arc<Vec<u8>>,
         keep_in_cache: bool,
     ) -> Result<()> {
@@ -579,7 +580,7 @@ impl JuiceFileCacheInner {
             .fail();
         }
 
-        let stage_path = self.stage_path(slice_id);
+        let stage_path = self.stage_path(key);
         let block_size = data.len();
         persistent_block(
             self.local_store.clone(),
@@ -592,14 +593,14 @@ impl JuiceFileCacheInner {
         let idx = Arc::new(StageIndexValue {
             block_size,
             access_time: get_sys_time_in_secs(),
-            path: self.stage_path(slice_id),
+            path: stage_path,
             in_cache: keep_in_cache,
         });
         if keep_in_cache {
-            self.update_memory_index(slice_id, idx.block_size, idx.access_time)
+            self.update_memory_index(key, idx.block_size, idx.access_time)
                 .await;
         }
-        self.stage_index.insert(slice_id, idx);
+        self.stage_index.insert(key, idx);
 
         Ok(())
     }
@@ -624,7 +625,7 @@ impl JuiceFileCacheInner {
         };
 
         let mut cnt = 0;
-        let mut last_sid = 0;
+        let mut last_slice_key = EMPTY_SLICE_KEY;
         let mut last_sidx = Arc::new(StageIndexValue {
             block_size: 0,
             access_time: 0,
@@ -639,13 +640,16 @@ impl JuiceFileCacheInner {
                 || last_sidx.access_time / 60 == e.access_time / 60
                     && last_sidx.block_size > e.block_size
             {
-                last_sid = *e.key();
+                last_slice_key = e.key().clone();
                 last_sidx = e.value().clone();
             }
             cnt += 1;
             if cnt > 1 {
                 cnt = 0;
-                if let Err(e) = uploader.send((last_sid, last_sidx.path.clone())).await {
+                if let Err(e) = uploader
+                    .send((last_slice_key, last_sidx.path.clone()))
+                    .await
+                {
                     warn!("failed to send stage data to the uploader: {:?}", e);
                     continue;
                 }
@@ -657,7 +661,10 @@ impl JuiceFileCacheInner {
             }
         }
         if cnt > 0 {
-            if let Err(e) = uploader.send((last_sid, last_sidx.path.clone())).await {
+            if let Err(e) = uploader
+                .send((last_slice_key, last_sidx.path.clone()))
+                .await
+            {
                 warn!("failed to send stage data to the uploader: {:?}", e);
             }
         }
@@ -693,19 +700,19 @@ impl JuiceFileCacheInner {
         self.memory_usage.load(Ordering::Acquire)
     }
 
-    pub(crate) async fn remove(self: &Arc<Self>, slice_id: SliceID) {
-        tokio::join!(self.remove_cache(slice_id), self.remove_stage(slice_id),);
+    pub(crate) async fn remove(self: &Arc<Self>, key: SliceKey) {
+        tokio::join!(self.remove_cache(key), self.remove_stage(key),);
     }
 
-    pub(crate) async fn remove_cache(self: &Arc<Self>, slice_id: SliceID) {
+    pub(crate) async fn remove_cache(self: &Arc<Self>, key: SliceKey) {
         // check if the block is in the pending set.
-        if self.pending_set.remove(&slice_id).is_some() {
+        if self.pending_set.remove(&key).is_some() {
             // the block is in the pending set, we can return now
             return;
         };
 
         // the slice has been cached, clean it.
-        if let Some((_, iv)) = self.memory_index.remove(&slice_id) {
+        if let Some((_, iv)) = self.memory_index.remove(&key) {
             if iv.block_size > 0 {
                 self.used.fetch_sub(
                     iv.block_size as isize + CACHE_SIZE_PADDING,
@@ -718,8 +725,8 @@ impl JuiceFileCacheInner {
         }
     }
 
-    pub(crate) async fn remove_stage(self: &Arc<Self>, slice_id: SliceID) {
-        if let Some(e) = self.stage_index.remove(&slice_id) {
+    pub(crate) async fn remove_stage(self: &Arc<Self>, key: SliceKey) {
+        if let Some(e) = self.stage_index.remove(&key) {
             if let Err(e) = self.local_store.delete(&e.1.path).await {
                 warn!("failed to delete stage file: {:?}", e);
             }
@@ -803,7 +810,7 @@ async fn persistent_block(
 
 // DiskItem represents a block on disk.
 struct DiskItem {
-    slice_id: SliceID,
+    key: SliceKey,
     block: Arc<Vec<u8>>,
 }
 
@@ -828,11 +835,11 @@ impl FlushTask {
                 }
                 disk_item = self.rx.recv() => {
                     if let Some(disk_item) = disk_item {
-                        debug!("flush task received a flush block req: {}", disk_item.slice_id);
+                        debug!("flush task received a flush block req: {}", disk_item.key);
                         let sto = fc.local_store.clone();
-                        let path = fc.cache_path(disk_item.slice_id);
+                        let path = fc.cache_path(disk_item.key);
                         let block_len = disk_item.block.len();
-                        let slice_id = disk_item.slice_id;
+                        let slice_id = disk_item.key;
                         if !fc.pending_set.contains(&slice_id) {
                             // someone cancel this block, we should not cache it.
                             // update the memory usage.
@@ -846,7 +853,7 @@ impl FlushTask {
                             fc.update_memory_index(slice_id, block_len, get_sys_time_in_secs()).await;
                         }
                         // remove the block from memory buffer
-                        if fc.pending_set.remove(&disk_item.slice_id).is_none() {
+                        if fc.pending_set.remove(&disk_item.key).is_none() {
                             // When we just persistent the block to the disk,
                             // but then the block is already removed by other thread.
                             // we should remove the block we just added to the disk.
@@ -869,7 +876,7 @@ impl FlushTask {
 struct FreeSpaceChecker {
     fc: Arc<JuiceFileCacheInner>,
     cancel_token: CancellationToken,
-    cleanup_full_rx: watch::Receiver<SliceID>,
+    cleanup_full_rx: watch::Receiver<SliceKey>,
 }
 
 impl FreeSpaceChecker {
@@ -989,6 +996,33 @@ impl FreeSpaceChecker {
     }
 }
 
+/// In case of the cache is full and then the service is shutdown,
+/// we need to upload the staging data to the remote when we
+/// start the service again.
+///
+/// This scanner only run once when the service is started.
+struct StageScanner {
+    fc: Arc<JuiceFileCacheInner>,
+    cancel_token: CancellationToken,
+}
+
+impl StageScanner {
+    async fn run(mut self) -> Result<()> {
+        let stage_dir = self.fc.stage_dir();
+        let mut lister = self
+            .fc
+            .local_store
+            .lister(&stage_dir)
+            .await
+            .context(OpenDalSnafu)?;
+        while let Some(mut de) = lister.try_next().await.context(OpenDalSnafu)? {
+            // TODO: check the validation of the stage path
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncReadExt;
@@ -1010,28 +1044,33 @@ mod tests {
     }
 
     async fn basic(cache: JuiceFileCache) {
-        assert!(cache.get(random_slice_id()).await.is_none());
+        assert!(cache.get(SliceKey::random()).await.is_none());
         struct CacheReq {
-            slice_id: SliceID,
+            slice_key: SliceKey,
             block: Vec<u8>,
         }
 
         let cache_reqs = (0..1024)
             .map(|_| {
-                let slice_id = random_slice_id();
+                let key = SliceKey::random();
                 let block = (0..1024).map(|_| rand::random::<u8>()).collect();
-                CacheReq { slice_id, block }
+                CacheReq {
+                    slice_key: key,
+                    block,
+                }
             })
             .collect::<Vec<_>>();
 
         for req in cache_reqs.iter() {
-            cache.cache(req.slice_id, Arc::new(req.block.clone())).await;
+            cache
+                .cache(req.slice_key, Arc::new(req.block.clone()))
+                .await;
         }
 
         cache.wait_on_all_flush_finish().await;
 
         for req in cache_reqs.iter() {
-            let mut reader = cache.get(req.slice_id).await;
+            let mut reader = cache.get(req.slice_key).await;
             if let Some(r) = reader.as_mut() {
                 let mut buf = vec![];
                 r.read_to_end(&mut buf).await.unwrap();

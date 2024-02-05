@@ -1,3 +1,6 @@
+use std::cmp::Ordering;
+use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use bincode::serialize;
@@ -6,12 +9,16 @@ use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::meta::err::{ErrBincodeDeserializeFailedSnafu, ErrInvalidSliceBufSnafu, Result};
+use crate::meta::err::{
+    ErrBincodeDeserializeFailedSnafu, ErrInvalidSliceBufSnafu, InvalidSliceKeyStrSnafu, Result,
+};
 
 lazy_static! {
     pub static ref ID_GENERATOR: sonyflake::Sonyflake =
         sonyflake::Sonyflake::new().expect("failed to create id generator");
 }
+
+pub const EMPTY_SLICE_ID: SliceID = 0;
 
 pub type SliceID = u64;
 
@@ -120,11 +127,11 @@ impl Slice {
             Slice::Borrowed { chunk_pos, off, .. } => *chunk_pos + off,
         }) as usize
     }
-    pub fn get_id(&self) -> usize {
+    pub fn get_id(&self) -> SliceID {
         (match self {
             Slice::Owned { id: slice_id, .. } => *slice_id,
             Slice::Borrowed { id: slice_id, .. } => *slice_id,
-        }) as usize
+        })
     }
     pub fn get_size(&self) -> usize {
         (match self {
@@ -143,6 +150,91 @@ impl Slice {
 }
 
 pub(crate) const SLICE_BYTES: usize = 28;
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord)]
+pub struct SliceKey {
+    pub slice_id: SliceID,
+    pub block_idx: usize,
+    pub block_size: usize,
+}
+
+pub const EMPTY_SLICE_KEY: SliceKey = SliceKey {
+    slice_id: 0,
+    block_idx: 0,
+    block_size: 0,
+};
+
+impl Display for SliceKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:08X}_{:08X}_{:08X}_{:08X}_{:08X}",
+            // we can overwrite a slice, so we need to avoid the conflict.
+            self.slice_id / 1000 / 1000,
+            self.slice_id / 1000,
+            self.slice_id,
+            self.block_idx,
+            self.block_size
+        )
+    }
+}
+
+impl PartialOrd for SliceKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let sc = self.slice_id.cmp(&other.slice_id);
+        if sc == Ordering::Equal {
+            let bc = self.block_idx.cmp(&other.block_idx);
+            Some(bc)
+        } else {
+            Some(sc)
+        }
+    }
+}
+
+impl SliceKey {
+    pub fn new(slice_id: SliceID, block_idx: usize, block_size: usize) -> Self {
+        Self {
+            slice_id,
+            block_idx,
+            block_size,
+        }
+    }
+
+    pub fn gen_path_for_local_sto(&self) -> String {
+        format!("{}", self)
+    }
+
+    pub fn gen_path_for_object_sto(&self) -> String {
+        format!("chunks{}", self)
+    }
+
+    pub fn random() -> Self {
+        SliceKey {
+            slice_id: ID_GENERATOR.next_id().expect("failed to generate id"),
+            block_idx: 0,
+            block_size: 0,
+        }
+    }
+}
+
+impl FromStr for SliceKey {
+    type Err = crate::meta::err::MetaError; // Define the error type for parsing
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let parts = s.strip_prefix("chunks/").unwrap_or(s) // Remove the "chunks-" prefix
+            .split('_')
+            .map(|part| u64::from_str(part) ) // Parse hexadecimal parts
+            .collect::<std::result::Result<Vec<_>, _>>().context(crate::meta::err::FailedToParseSliceKeySnafu { str: s.to_string() })?;
+        if parts.len() != 5 {
+            return InvalidSliceKeyStrSnafu { str: s.to_string() }.fail();
+        }
+        Ok(SliceKey {
+            slice_id: parts[2],
+            block_idx: parts[3] as usize,
+            block_size: parts[4] as usize,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -22,7 +22,6 @@ pub enum VFSError {
         #[snafu(implicit)]
         location: Location,
     },
-
     #[snafu(display("no more space in cache dir {}", cache_dir))]
     ErrStageNoMoreSpace {
         cache_dir: String,

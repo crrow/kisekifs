@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use crate::meta::types::SliceID;
 use crate::{
     meta::{engine::MetaEngine, types::Ino},
     vfs::{
@@ -119,7 +120,7 @@ impl Engine {
         WriteBuffer::new(self.get_config(), self.get_object_sto())
     }
 
-    pub(crate) fn new_read_buffer(&self, sid: usize, length: usize) -> ReadBuffer {
+    pub(crate) fn new_read_buffer(&self, sid: SliceID, length: usize) -> ReadBuffer {
         ReadBuffer::new(self.get_config(), self.get_object_sto(), sid, length)
     }
 
