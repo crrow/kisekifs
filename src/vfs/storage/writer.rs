@@ -396,7 +396,7 @@ impl ChunkWriterBackgroundTask {
                         // no one is writing, we can free this chunk writer.
                         debug!(
                             "exit the ChunkWriterBackgroundTask on ino {} chunk {}",
-                            self.ino, self.chunk_idx
+                            self.ino, self.chunk_idx,
                         );
                         return;
                     }

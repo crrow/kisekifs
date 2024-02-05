@@ -65,7 +65,7 @@ alias sh-um := help-umount
     cargo run --color=always --bin kiseki help umount
 
 @umount:
-    cargo run --color=always --bin kiseki umount
+    cargo run --release --color=always --bin kiseki umount
 
 # ==================================================== format
 
@@ -79,7 +79,8 @@ alias sh-f := help-format
 # ==================================================== fio test
 
 @clean:
-    rm -r /tmp/kiseki /tmp/kiseki-meta/
+    - rm -r /tmp/kiseki
+    echo "Done"
 
 @prepare:
     mkdir -p /tmp/kiseki /tmp/kiseki-meta/
