@@ -336,6 +336,7 @@ impl Filesystem for KisekiFuse {
     ) {
         let ctx = MetaContext::from(_req);
         let name = name.to_string_lossy().to_string();
+
         match self.runtime.block_on(
             self.vfs
                 .create(&ctx, Ino(parent), &name, mode as u16, umask as u16, flags)

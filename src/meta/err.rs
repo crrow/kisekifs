@@ -3,8 +3,10 @@ use opendal::ErrorKind;
 use snafu::{Location, Snafu};
 use tracing::error;
 
-use crate::meta::types::SliceKey;
-use crate::{common::err::ToErrno, meta::types::Ino};
+use crate::{
+    common::err::ToErrno,
+    meta::types::{Ino, SliceKey},
+};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]

@@ -40,15 +40,15 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
 
-use crate::meta::types::EMPTY_SLICE_KEY;
-use crate::vfs::err::FailedToHandleSystimeSnafu;
-use crate::vfs::storage::SliceKey;
 use crate::{
     common::{readable_size::ReadableSize, runtime},
-    meta::types::{random_slice_id, SliceID},
+    meta::types::{random_slice_id, SliceID, EMPTY_SLICE_KEY},
     vfs::{
-        err::{CacheIOSnafu, ErrStageNoMoreSpaceSnafu, OpenDalSnafu, Result},
-        storage::cache::Cache,
+        err::{
+            CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu, OpenDalSnafu,
+            Result,
+        },
+        storage::{cache::Cache, SliceKey},
         VFSError,
     },
 };
@@ -166,14 +166,17 @@ impl JuiceFileCacheBuilder {
         self.free_ratio = free_ratio;
         self
     }
+
+    pub fn with_root_cache_dir(mut self, dir: &str) -> Self {
+        self.cache_dir = dir.to_string();
+        self
+    }
 }
 fn new_fs_store(path: &str) -> Result<ObjectStorage> {
     let temp_dir = format!("{}-temp", path);
     let mut builder = opendal::services::Fs::default();
     builder.root(path);
-    // when doesn't enable it, encounter a case that read a file then the file
-    // get deleted.
-    builder.atomic_write_dir(&temp_dir);
+    builder.atomic_write_dir(&temp_dir); // TODO: review me
     let obj = opendal::Operator::new(builder)
         .context(OpenDalSnafu)?
         .finish();
@@ -327,7 +330,8 @@ impl JuiceFileCacheInner {
     }
 
     /// FIXME: handle the checksum case.
-    /// FIXME: we may handle the case when we return the reader, but then it starts to clean up.
+    /// FIXME: we may handle the case when we return the reader, but then it
+    /// starts to clean up.
     async fn get_reader(&self, file_path: &str) -> Result<Option<Reader>> {
         if self
             .local_store

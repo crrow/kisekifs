@@ -15,9 +15,3 @@ pub struct VFSConfig {
 
     pub engine_config: EngineConfig,
 }
-
-impl VFSConfig {
-    pub(crate) fn debug_sto_engine(&self) -> Arc<dyn storage::StoEngine> {
-        storage::new_debug_sto()
-    }
-}

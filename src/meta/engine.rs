@@ -34,7 +34,6 @@ use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::meta::types::SliceID;
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -43,7 +42,7 @@ use crate::{
         err::*,
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
         types::{
-            DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, Slice, Slices, ROOT_INO,
+            DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, Slice, SliceID, Slices, ROOT_INO,
             SLICE_BYTES, TRASH_INODE,
         },
         util::*,

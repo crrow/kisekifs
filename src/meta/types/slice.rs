@@ -1,7 +1,11 @@
-use std::cmp::Ordering;
-use std::fmt::{Display, Formatter};
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{
+    cmp::Ordering,
+    collections::hash_map::DefaultHasher,
+    fmt::{Display, Formatter},
+    hash::{Hash, Hasher},
+    str::FromStr,
+    sync::Arc,
+};
 
 use bincode::serialize;
 use lazy_static::lazy_static;
@@ -214,6 +218,12 @@ impl SliceKey {
             block_idx: 0,
             block_size: 0,
         }
+    }
+
+    pub fn cal_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
     }
 }
 

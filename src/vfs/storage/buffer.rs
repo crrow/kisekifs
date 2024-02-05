@@ -4,28 +4,31 @@ use std::{
     sync::Arc,
 };
 
-use crate::meta::types::{SliceID, EMPTY_SLICE_ID};
 use bytesize::ByteSize;
-use snafu::ensure;
+use opendal::Operator;
+use snafu::{ensure, ResultExt};
 use tracing::debug;
 
-use crate::vfs::{
-    err::{ErrLIBCSnafu, Result},
-    storage::{make_slice_object_key, sto::StoEngine, EngineConfig},
-    VFSError,
+use crate::{
+    meta::types::{SliceID, SliceKey, EMPTY_SLICE_ID},
+    vfs::{
+        err::{ErrLIBCSnafu, OpenDalSnafu, Result},
+        storage::{make_slice_object_key, Cache, EngineConfig},
+        VFSError,
+    },
 };
 
 pub(crate) struct ReadBuffer {
     config: Arc<EngineConfig>,
     slice_id: SliceID,
     length: usize,
-    sto: Arc<dyn StoEngine>,
+    object_storage: Operator,
 }
 
 impl ReadBuffer {
     pub(crate) fn new(
         config: Arc<EngineConfig>,
-        sto: Arc<dyn StoEngine>,
+        object_storage: Operator,
         slice_id: SliceID,
         length: usize,
     ) -> ReadBuffer {
@@ -33,7 +36,7 @@ impl ReadBuffer {
             config,
             slice_id,
             length,
-            sto,
+            object_storage,
         }
     }
 
@@ -92,7 +95,11 @@ impl ReadBuffer {
 
         let key = make_slice_object_key(self.slice_id, block_idx, read_block_size);
         debug!("block_idx: {block_idx}, try to read [{key}]");
-        let buf = self.sto.get(&key)?;
+        let buf = self
+            .object_storage
+            .blocking()
+            .read(&key)
+            .context(OpenDalSnafu)?;
         debug!(
             "read block: {block_idx} from object storage succeed, read len: {} kib",
             buf.len() / 1024,
@@ -133,11 +140,16 @@ pub(crate) struct WriteBuffer {
     flushed_length: usize,
     // the buffer is divided into blocks.
     block_slots: Vec<Block>,
-    sto: Arc<dyn StoEngine>,
+    cache: Arc<dyn Cache>,
+    object_storage: Operator,
 }
 
 impl WriteBuffer {
-    pub(crate) fn new(config: Arc<EngineConfig>, sto: Arc<dyn StoEngine>) -> WriteBuffer {
+    pub(crate) fn new(
+        config: Arc<EngineConfig>,
+        cache: Arc<dyn Cache>,
+        object_storage: Operator,
+    ) -> WriteBuffer {
         WriteBuffer {
             block_slots: (0..(config.chunk_size / config.block_size))
                 .map(|_| Block::Empty)
@@ -146,7 +158,8 @@ impl WriteBuffer {
             slice_id: EMPTY_SLICE_ID,
             length: 0,
             flushed_length: 0,
-            sto,
+            object_storage,
+            cache,
         }
     }
 
@@ -289,10 +302,11 @@ impl WriteBuffer {
     }
 
     /// Try to flush the buffer to the given offset.
-    pub(crate) fn flush_to(&mut self, offset: usize) -> Result<()> {
+    pub(crate) async fn flush_to(&mut self, offset: usize) -> Result<()> {
         debug_assert!(self.flushed_length <= offset);
 
-        self.block_slots
+        let datas = self
+            .block_slots
             .iter_mut()
             .enumerate()
             .filter(|(idx, b)| match b {
@@ -312,27 +326,34 @@ impl WriteBuffer {
                     let block_size = cal_object_block_size(l, block_size, idx);
                     self.flushed_length += block_size;
                     assert_ne!(self.slice_id, EMPTY_SLICE_ID, "slice id should be set");
-                    let key = make_slice_object_key(self.slice_id, idx, block_size);
+                    let key = SliceKey::new(self.slice_id, idx, block_size);
                     (key, data)
                 }
                 _ => unreachable!("we have filtered out the empty and released block"),
             })
-            .try_for_each(|(key, block_data)| -> Result<()> {
-                debug!(
-                    "flushing block: [{}], block_len: {} KiB",
-                    key,
-                    block_data.len() / 1024,
-                );
-                self.sto.put(&key, block_data)
-            })?;
+            .collect::<Vec<_>>();
+        let futures = datas
+            .into_iter()
+            .map(|(k, v)| {
+                // let sto = sto.clone(); // Clone sto within the closure
+                let cache = self.cache.clone();
+                async move {
+                    debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
+                    // let _ = sto.write(&k, v).await;
+                    let _ = cache.stage(k, Arc::new(v), true).await;
+                }
+            })
+            .collect::<Vec<_>>();
+
+        futures::future::join_all(futures).await;
 
         Ok(())
     }
 
     /// Flush the buffer to the cloud.
-    pub(crate) fn finish(&mut self) -> Result<()> {
+    pub(crate) async fn finish(&mut self) -> Result<()> {
         let n = self.length / self.config.block_size + 1;
-        self.flush_to(n * self.config.block_size)?;
+        self.flush_to(n * self.config.block_size).await?;
         Ok(())
     }
 
@@ -369,13 +390,14 @@ mod tests {
     use rand::RngCore;
 
     use super::*;
-    use crate::vfs::storage::sto::new_debug_sto;
+    use crate::{common::new_memory_sto, vfs::storage::new_juice_builder};
 
     #[test]
     fn buffer_write() {
         let config = Arc::new(EngineConfig::default());
-        let sto = new_debug_sto();
-        let mut wb = WriteBuffer::new(config.clone(), sto);
+        let sto = new_memory_sto();
+        let cache = new_juice_builder().build().unwrap();
+        let mut wb = WriteBuffer::new(config.clone(), cache, sto);
 
         let write_data = b"hello" as &[u8];
         let expected_write_len = write_data.len();
@@ -408,14 +430,15 @@ mod tests {
         assert_eq!(read_data, write_data);
     }
 
-    #[test]
-    fn read_and_write() {
+    #[tokio::test]
+    async fn read_and_write() {
         use crate::common::install_fmt_log;
         install_fmt_log();
 
         let config = Arc::new(EngineConfig::default());
-        let sto = new_debug_sto();
-        let mut wb = WriteBuffer::new(config.clone(), sto.clone());
+        let sto = new_memory_sto();
+        let cache = new_juice_builder().build().unwrap();
+        let mut wb = WriteBuffer::new(config.clone(), cache, sto.clone());
         wb.set_slice_id(1);
 
         let data = b"hello world" as &[u8];
@@ -429,8 +452,8 @@ mod tests {
         let size = offset + data.len();
         assert_eq!(wb.length(), size);
 
-        wb.flush_to(config.block_size + 3).unwrap();
-        wb.finish().unwrap();
+        wb.flush_to(config.block_size + 3).await.unwrap();
+        wb.finish().await.unwrap();
 
         let rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
         let dst = &mut [0; 5];
@@ -444,14 +467,15 @@ mod tests {
         assert_eq!(&page[..n], data);
     }
 
-    #[test]
-    fn write_smallest() {
+    #[tokio::test]
+    async fn write_smallest() {
         use crate::common::install_fmt_log;
         install_fmt_log();
 
         let config = Arc::new(EngineConfig::default());
-        let sto = new_debug_sto();
-        let mut wb = WriteBuffer::new(config.clone(), sto.clone());
+        let sto = new_memory_sto();
+        let cache = new_juice_builder().build().unwrap();
+        let mut wb = WriteBuffer::new(config.clone(), cache, sto.clone());
         wb.set_slice_id(1);
 
         let data = vec![0u8; 65 << 10];
@@ -463,7 +487,7 @@ mod tests {
         assert_eq!(n, data.len());
 
         let size = wb.length;
-        wb.finish().unwrap();
+        wb.finish().await.unwrap();
 
         let rb = ReadBuffer::new(config.clone(), sto.clone(), 1, size);
         let dst = &mut [0; 1];

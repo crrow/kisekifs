@@ -84,7 +84,7 @@ pub struct MountArgs {
     long,
     help = "Number of threads to use for tokio async runtime",
     help_heading = MOUNT_OPTIONS_HEADER,
-    default_value = "4",
+    default_value = "8",
     )]
     pub async_work_threads: usize,
 
