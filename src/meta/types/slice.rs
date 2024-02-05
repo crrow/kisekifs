@@ -217,6 +217,14 @@ impl SliceKey {
     }
 }
 
+impl TryFrom<&str> for SliceKey {
+    type Error = crate::meta::err::MetaError;
+
+    fn try_from(s: &str) -> std::result::Result<Self, Self::Error> {
+        SliceKey::from_str(s)
+    }
+}
+
 impl FromStr for SliceKey {
     type Err = crate::meta::err::MetaError; // Define the error type for parsing
 

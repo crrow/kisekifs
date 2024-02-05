@@ -42,6 +42,11 @@ pub enum VFSError {
         #[snafu(source)]
         error: std::io::Error,
     },
+    FailedToHandleSystime {
+        #[snafu(implicit)]
+        location: Location,
+        source: std::time::SystemTimeError,
+    },
 
     // ====workers====
     #[snafu(display("Failed to join handle"))]

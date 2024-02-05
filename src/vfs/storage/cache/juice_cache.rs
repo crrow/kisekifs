@@ -14,6 +14,7 @@
 
 use std::{
     fmt::{Debug, Formatter},
+    fs,
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
         Arc,
@@ -24,8 +25,9 @@ use std::{
 use async_trait::async_trait;
 use crc32fast::Hasher;
 use dashmap::{DashMap, DashSet};
+use datafusion_common::ExprSchema;
 use futures::{FutureExt, TryStreamExt};
-use opendal::{Builder, Operator as ObjectStorage, Reader};
+use opendal::{Builder, Lister, Operator as ObjectStorage, Reader};
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -39,6 +41,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
 
 use crate::meta::types::EMPTY_SLICE_KEY;
+use crate::vfs::err::FailedToHandleSystimeSnafu;
 use crate::vfs::storage::SliceKey;
 use crate::{
     common::{readable_size::ReadableSize, runtime},
@@ -50,7 +53,7 @@ use crate::{
     },
 };
 
-const CACHE_SIZE_PADDING: isize = 4096;
+const CACHE_SIZE_PADDING: usize = 4096;
 const MAX_EXPIRE_CNT: usize = 1000;
 const RAW_CACHE_DIR: &'static str = "raw";
 const STAGE_CACHE_DIR: &'static str = "stage";
@@ -69,6 +72,8 @@ pub struct JuiceFileCacheBuilder {
     pub cache_eviction: CacheEviction,
     pub cache_expire: Duration,
     pub max_pending_cnt: usize,
+    // only when we enable the write back, then we need the uploader.
+    pub write_back_uploader: Option<mpsc::Sender<(SliceKey, String)>>,
 }
 
 impl Default for JuiceFileCacheBuilder {
@@ -86,6 +91,7 @@ impl Default for JuiceFileCacheBuilder {
             cache_eviction: CacheEviction::Random,
             cache_expire: Duration::from_secs(1),
             max_pending_cnt: 5,
+            write_back_uploader: None,
         }
     }
 }
@@ -107,7 +113,7 @@ impl JuiceFileCacheBuilder {
             cache_root_dir: self.cache_dir,
             add_checksum: self.add_checksum,
             free_ratio: self.free_ratio,
-            capacity: self.capacity.as_bytes() as isize,
+            capacity: self.capacity.as_bytes() as usize,
             cache_eviction: self.cache_eviction,
             cache_expire: self.cache_expire,
             local_store,
@@ -121,7 +127,7 @@ impl JuiceFileCacheBuilder {
             stage_index: Default::default(),
             cancel_token,
             disk_item_tx: sender,
-            stage_uploader_tx: None,
+            stage_uploader_tx: self.write_back_uploader,
             task_tracker: tracker,
             in_cleanup_full: Arc::new(Default::default()),
             cleanup_full_finished_notify: Arc::new(Default::default()),
@@ -144,6 +150,7 @@ impl JuiceFileCacheBuilder {
         let handle = &runtime::handle();
         fc.task_tracker.spawn_on(flush_task.run(), handle);
         fc.task_tracker.spawn_on(free_space_checker.run(), handle);
+
         // Once we spawned everything, we close the tracker.
         fc.task_tracker.close();
 
@@ -195,6 +202,7 @@ struct CacheIndexValue {
     access_time: u64,
     // the path of the block on the local store.
     path: String,
+    link: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -254,7 +262,7 @@ pub(crate) struct JuiceFileCacheInner {
     cache_root_dir: String,
     add_checksum: bool,
     free_ratio: f32,
-    capacity: isize,
+    capacity: usize,
     cache_eviction: CacheEviction,
     cache_expire: Duration,
 
@@ -262,7 +270,9 @@ pub(crate) struct JuiceFileCacheInner {
 
     // for test and benchmark, tell the caller that we have finished the flush.
     flush_finished_notify: Arc<Notify>,
-    used: Arc<AtomicIsize>,
+    // used represents the total size we stored in cache dir.
+    // if we store in stage, then we don't calculate the size.
+    used: Arc<AtomicUsize>,
     stage_full: Arc<AtomicBool>,
     raw_full: Arc<AtomicBool>, // TODO: rename me
     memory_index: DashMap<SliceKey, Arc<CacheIndexValue>>,
@@ -307,7 +317,12 @@ impl JuiceFileCacheInner {
         }
 
         // We remove the file from the index.
-        self.memory_index.remove(&key);
+        if let Some(e) = self.memory_index.remove(&key) {
+            if e.1.block_size > 0 && !e.1.link {
+                self.used
+                    .fetch_sub(e.1.block_size + CACHE_SIZE_PADDING, Ordering::AcqRel);
+            }
+        }
         None
     }
 
@@ -376,50 +391,27 @@ impl JuiceFileCacheInner {
         }
 
         let block_len = block.len();
-        // update the total blocks.
-        self.memory_usage.fetch_add(block_len, Ordering::AcqRel);
         // cache the memory buf.
         self.pending_set.insert(key);
         if let Err(e) = self.disk_item_tx.send(DiskItem { key, block }).await {
             // failed to send the block to the flush task, discard it
             debug!("failed to cache block to disk: {e}, discard it {}", key);
             self.pending_set.remove(&key);
-            self.memory_usage.fetch_sub(block_len, Ordering::AcqRel);
             return false;
         };
         true
     }
 
-    fn cache_path(self: &Arc<Self>, key: SliceKey) -> String {
-        join_path(
-            &join_path(&self.cache_root_dir, RAW_CACHE_DIR),
-            &format!("{}", key.gen_path_for_local_sto()),
-        )
-    }
-
-    fn stage_path(self: &Arc<Self>, key: SliceKey) -> String {
-        join_path(
-            &join_path(&self.cache_root_dir, STAGE_CACHE_DIR),
-            &format!("{}", key.gen_path_for_local_sto()),
-        )
-    }
-
-    fn stage_dir(self: &Arc<Self>) -> String {
-        let output = format!("{}/{}/", self.cache_root_dir, STAGE_CACHE_DIR);
-        opendal::raw::normalize_path(&output)
-    }
-
-    async fn update_memory_index(
+    async fn add_memory_index(
         self: &Arc<Self>,
         key: SliceKey,
         block_len: usize,
         access_time: u64,
+        link: bool,
     ) {
         if let Some(old) = self.memory_index.get(&key) {
-            self.used.fetch_sub(
-                old.block_size as isize + CACHE_SIZE_PADDING,
-                Ordering::AcqRel,
-            );
+            self.used
+                .fetch_sub(old.block_size + CACHE_SIZE_PADDING, Ordering::AcqRel);
         }
 
         self.memory_index.insert(
@@ -428,21 +420,32 @@ impl JuiceFileCacheInner {
                 block_size: block_len,
                 access_time,
                 path: self.cache_path(key),
+                link,
             }),
         );
-        if block_len > 0 {
+        if block_len > 0 && !link {
             self.used
-                .fetch_add(block_len as isize + CACHE_SIZE_PADDING, Ordering::AcqRel);
+                .fetch_add(block_len + CACHE_SIZE_PADDING, Ordering::AcqRel);
         }
-        if self.used.load(Ordering::Acquire) > self.capacity
-            && !matches!(self.cache_eviction, CacheEviction::Disable)
-        {
+        let used = self.used.load(Ordering::Acquire);
+        if used > self.capacity && !matches!(self.cache_eviction, CacheEviction::Disable) {
+            debug!("cache is full {}, start to cleanup", used);
             self.notify_to_cleanup_full(key).await;
+        }
+    }
+
+    async fn del_cache_index(self: &Arc<Self>, key: SliceKey, link: bool) {
+        if let Some(old) = self.memory_index.remove(&key) {
+            if old.1.block_size > 0 && !link {
+                self.used
+                    .fetch_sub(old.1.block_size + CACHE_SIZE_PADDING, Ordering::AcqRel);
+            }
         }
     }
 
     pub(crate) async fn cleanup_full(self: &Arc<Self>) {
         self.notify_to_cleanup_full(SliceKey::random()).await;
+        // TODO: wait on cleanup full finished.
     }
 
     async fn notify_to_cleanup_full(self: &Arc<Self>, changed: SliceKey) {
@@ -453,117 +456,6 @@ impl JuiceFileCacheInner {
         if let Err(e) = self.cleanup_full_tx.send(changed) {
             warn!("failed to notify the cleanup full: {:?}", e);
         }
-    }
-
-    // we should not call this method directly, it's for the background task.
-    async fn do_clean_up_full(self: &Arc<Self>) {
-        defer!({
-            self.in_cleanup_full.store(false, Ordering::Release);
-            self.cleanup_full_finished_notify.notify_waiters();
-        });
-        let mut goal = self.capacity * 95 / 100;
-        // Returns an approximate number of entries in this cache.
-        let mut num = self.memory_index.len() as isize * 99 / 100;
-        // make sure we have enough free space after cleanup
-        let (bfr, ffr) = get_free_ratio(&self.cache_root_dir);
-        let mut du_cache = None;
-        let mut used_cache = None;
-        if bfr < self.free_ratio {
-            let du = get_disk_usage(&self.cache_root_dir).unwrap_or_default();
-            let to_free = ((self.free_ratio - bfr) * du.total as f32) as isize;
-            du_cache = Some(du);
-            let used = self.used.load(Ordering::Acquire);
-            used_cache = Some(used);
-            if to_free > used {
-                goal = 0;
-            } else if used - to_free < goal {
-                goal = used - to_free;
-            }
-        }
-        if ffr < self.free_ratio {
-            let du = du_cache
-                .unwrap_or_else(|| get_disk_usage(&self.cache_root_dir).unwrap_or_default());
-            let to_free = ((self.free_ratio - ffr) * du.files as f32) as isize;
-            let cnt = self.memory_index.len() as isize;
-            if to_free > cnt {
-                num = 0;
-            } else {
-                num = cnt - to_free
-            };
-        }
-
-        let mut to_del = vec![];
-        let mut cnt: usize = 0;
-        let mut freed: isize = 0;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let cutoff = now - self.cache_expire.as_secs();
-        let mut last_key = EMPTY_SLICE_KEY;
-        let mut last_value = Arc::new(CacheIndexValue {
-            block_size: 0,
-            access_time: 0,
-            path: "".to_string(),
-        });
-        let mut new_used = used_cache.unwrap_or_else(|| self.used.load(Ordering::Acquire));
-        // for each two random keys, then compare the access time, evict the older one
-        for e in self.memory_index.iter() {
-            let k = e.key();
-            let v = e.value();
-            if !matches!(self.cache_eviction, CacheEviction::Disable) && v.access_time < cutoff {
-                last_key = k.clone();
-                last_value = v.clone();
-                cnt += 1;
-            } else if cnt == 0 || last_value.access_time > v.access_time {
-                last_key = k.clone();
-                last_value = v.clone();
-            }
-            cnt += 1;
-            if cnt > 1 {
-                let size = last_value.block_size as isize + CACHE_SIZE_PADDING;
-                freed += size;
-                new_used -= size;
-                to_del.push((last_key, v.clone()));
-                cnt = 0;
-                if (self.memory_index.len() as isize) < num && new_used < goal {
-                    self.used.store(new_used, Ordering::Release);
-                    break;
-                };
-            }
-        }
-        if to_del.len() > 0 {
-            debug!(
-                "cleanup cache {}, {} blocks {} MB, freed {} blocks {} MB",
-                self.cache_root_dir,
-                self.memory_index.len(),
-                self.used.load(Ordering::Acquire) >> 20,
-                to_del.len(),
-                freed >> 20,
-            );
-        }
-        let handles = to_del
-            .iter()
-            .map(|(sid, iv)| {
-                self.memory_index.remove(sid);
-                debug!("delete cache file: {}", iv.path);
-                self.local_store.delete(&iv.path)
-            })
-            .collect::<Vec<_>>();
-        // wait for all the delete operations finished
-        for r in futures::future::join_all(handles).await {
-            if let Err(e) = r {
-                warn!("failed to delete cache file: {:?}", e);
-            }
-        }
-        // re calculate the free ratio
-        let (br, fr) = self.cur_free_ratio();
-        let full = br < self.free_ratio || fr < self.free_ratio;
-        self.raw_full.store(full, Ordering::Release);
-    }
-
-    pub(crate) fn cur_free_ratio(self: &Arc<Self>) -> (f32, f32) {
-        get_free_ratio(&self.cache_root_dir)
     }
 
     /// Stage the slice data to local store.
@@ -593,11 +485,13 @@ impl JuiceFileCacheInner {
         let idx = Arc::new(StageIndexValue {
             block_size,
             access_time: get_sys_time_in_secs(),
-            path: stage_path,
+            path: stage_path.clone(),
             in_cache: keep_in_cache,
         });
         if keep_in_cache {
-            self.update_memory_index(key, idx.block_size, idx.access_time)
+            let cache_path = self.cache_path(key);
+            std::os::unix::fs::symlink(&stage_path, &cache_path).context(CacheIOSnafu)?;
+            self.add_memory_index(key, block_size, idx.access_time, true)
                 .await;
         }
         self.stage_index.insert(key, idx);
@@ -608,7 +502,7 @@ impl JuiceFileCacheInner {
     /// When the cache is full, we should upload the staging data to the remote.
     async fn upload_staging(self: &Arc<Self>) {
         let uploader = match self.stage_uploader_tx {
-            Some(ref tx) => tx,
+            Some(ref tx) => tx.clone(),
             None => return,
         };
         let (br, fr) = self.cur_free_ratio();
@@ -619,9 +513,9 @@ impl JuiceFileCacheInner {
                 1
             };
             let min = if br > fr { fr } else { br };
-            (total as f64 * self.free_ratio as f64 - min as f64) as isize
+            (total as f64 * self.free_ratio as f64 - min as f64) as usize
         } else {
-            0isize
+            0usize
         };
 
         let mut cnt = 0;
@@ -653,7 +547,7 @@ impl JuiceFileCacheInner {
                     warn!("failed to send stage data to the uploader: {:?}", e);
                     continue;
                 }
-                to_free -= last_sidx.block_size as isize + CACHE_SIZE_PADDING;
+                to_free -= last_sidx.block_size + CACHE_SIZE_PADDING;
             }
 
             if to_free <= 0 {
@@ -695,11 +589,10 @@ impl JuiceFileCacheInner {
             start.elapsed()
         );
     }
+}
 
-    pub(crate) async fn memory_usage(self: &Arc<Self>) -> usize {
-        self.memory_usage.load(Ordering::Acquire)
-    }
-
+// ===== Remove
+impl JuiceFileCacheInner {
     pub(crate) async fn remove(self: &Arc<Self>, key: SliceKey) {
         tokio::join!(self.remove_cache(key), self.remove_stage(key),);
     }
@@ -713,24 +606,195 @@ impl JuiceFileCacheInner {
 
         // the slice has been cached, clean it.
         if let Some((_, iv)) = self.memory_index.remove(&key) {
-            if iv.block_size > 0 {
-                self.used.fetch_sub(
-                    iv.block_size as isize + CACHE_SIZE_PADDING,
-                    Ordering::AcqRel,
-                );
-            }
             if let Err(e) = self.local_store.delete(&iv.path).await {
                 warn!("failed to delete cache file: {:?}", e);
+            }
+            if !iv.link {
+                self.used
+                    .fetch_sub(iv.block_size + CACHE_SIZE_PADDING, Ordering::AcqRel);
             }
         }
     }
 
     pub(crate) async fn remove_stage(self: &Arc<Self>, key: SliceKey) {
         if let Some(e) = self.stage_index.remove(&key) {
+            if e.1.in_cache {
+                self.memory_index.remove(&key);
+            }
             if let Err(e) = self.local_store.delete(&e.1.path).await {
                 warn!("failed to delete stage file: {:?}", e);
             }
         }
+    }
+}
+
+// ===== Fetches
+impl JuiceFileCacheInner {
+    fn cache_path(self: &Arc<Self>, key: SliceKey) -> String {
+        join_path(
+            &join_path(&self.cache_root_dir, RAW_CACHE_DIR),
+            &format!("{}", key.gen_path_for_local_sto()),
+        )
+    }
+
+    fn cache_dir(self: &Arc<Self>) -> String {
+        let output = format!("{}/{}/", self.cache_root_dir, RAW_CACHE_DIR);
+        opendal::raw::normalize_path(&output)
+    }
+
+    fn stage_path(self: &Arc<Self>, key: SliceKey) -> String {
+        join_path(
+            &join_path(&self.cache_root_dir, STAGE_CACHE_DIR),
+            &format!("{}", key.gen_path_for_local_sto()),
+        )
+    }
+
+    fn stage_dir(self: &Arc<Self>) -> String {
+        let output = format!("{}/{}/", self.cache_root_dir, STAGE_CACHE_DIR);
+        opendal::raw::normalize_path(&output)
+    }
+
+    pub(crate) fn cur_free_ratio(self: &Arc<Self>) -> (f32, f32) {
+        get_free_ratio(&self.cache_root_dir)
+    }
+
+    pub(crate) async fn memory_usage(self: &Arc<Self>) -> usize {
+        self.memory_usage.load(Ordering::Acquire)
+    }
+}
+
+// ===== Recover
+impl JuiceFileCacheInner {
+    /// Recovers the index from local store.
+    pub(crate) async fn recover(self: &Arc<Self>) -> Result<()> {
+        if self.stage_uploader_tx.is_some() {
+            tokio::try_join!(self.recover_cache(), self.recover_stage())?;
+        } else {
+            self.recover_cache().await?;
+        }
+        return Ok(());
+    }
+
+    async fn recover_cache(self: &Arc<Self>) -> Result<()> {
+        let now = Instant::now();
+        let cache_dir = self.stage_dir();
+        let mut lister = self
+            .local_store
+            .lister_with(&cache_dir)
+            .await
+            .context(OpenDalSnafu)?;
+        let (mut total_size, mut total_cnt) = (0, 0);
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let meta = entry.metadata();
+            if !meta.is_file() {
+                continue;
+            }
+            let slice_key = match SliceKey::try_from(entry.name()) {
+                Ok(slice_key) => slice_key,
+                Err(e) => {
+                    warn!("invalid cache file name: {:?}, {:?}", entry.name(), e);
+                    continue;
+                }
+            };
+
+            let metadata = fs::metadata(entry.path()).context(CacheIOSnafu)?;
+            let block_size = slice_key.block_size;
+            assert_eq!(
+                block_size as u64,
+                meta.content_length(),
+                "invalid block size {}",
+                entry.path()
+            );
+            let atime = metadata
+                .accessed()
+                .context(CacheIOSnafu)?
+                .duration_since(UNIX_EPOCH)
+                .context(FailedToHandleSystimeSnafu)?
+                .as_secs();
+            total_size += block_size;
+            total_cnt += 1;
+            self.add_memory_index(slice_key, block_size, atime, metadata.is_symlink())
+                .await;
+        }
+
+        debug!(
+            "Recovered file cache, num_keys: {}, num_bytes: {}, cost: {:?}",
+            total_size,
+            total_cnt,
+            now.elapsed()
+        );
+
+        Ok(())
+    }
+
+    /// In case of the cache is full and then the service is shutdown,
+    /// we need to upload the staging data to the remote when we
+    /// start the service again.
+    ///
+    /// This scanner only run once when the service is started.
+    ///
+    /// We discard the error inside scanner, just hope the freeSpaceChecker
+    /// can do its job.
+    async fn recover_stage(self: &Arc<Self>) -> Result<()> {
+        debug!("start recover stage data");
+        let uploader_tx = match self.stage_uploader_tx {
+            Some(ref tx) => tx.clone(),
+            None => panic!("stage uploader tx is not set"),
+        };
+        let start = Instant::now();
+        let stage_dir = self.stage_dir();
+        let mut lister = self
+            .local_store
+            .lister(&stage_dir)
+            .await
+            .context(OpenDalSnafu)?;
+        let mut count = 0;
+        let mut staged_size = 0;
+
+        while let Some(mut de) = select! {
+            r =  lister.try_next() => {
+                match r {
+                    Ok(v) => {v},
+                    Err(_) => None
+                }
+            }
+            _ = self.cancel_token.cancelled() => {
+                None
+            }
+        } {
+            // TODO: check the validation of the stage path
+            if !matches!(de.metadata().mode(), opendal::EntryMode::FILE) {
+                continue;
+            }
+            let name = de.name();
+            let slice_key = match SliceKey::try_from(name) {
+                Ok(slice_key) => slice_key,
+                Err(e) => {
+                    warn!("invalid stage file name: {:?}, {:?}", name, e);
+                    continue;
+                }
+            };
+            if slice_key.block_size == 0 {
+                // possible ?
+                continue;
+            }
+
+            staged_size += slice_key.block_size;
+            if let Err(e) = uploader_tx.send((slice_key, de.path().to_string())).await {
+                panic!("failed to send stage data to the uploader: {:?}", e);
+            }
+            count += 1;
+        }
+
+        debug!(
+            "Found {} staging blocks ({} bytes) in {} with {:?}",
+            count,
+            staged_size,
+            self.cache_root_dir,
+            start.elapsed(),
+        );
+
+        Ok(())
     }
 }
 
@@ -850,7 +914,7 @@ impl FlushTask {
                         // do the real work
                         if persistent_block(sto.clone(), &path, disk_item.block, fc.add_checksum)
                             .await.is_ok() {
-                            fc.update_memory_index(slice_id, block_len, get_sys_time_in_secs()).await;
+                            fc.add_memory_index(slice_id, block_len, get_sys_time_in_secs(), false).await;
                         }
                         // remove the block from memory buffer
                         if fc.pending_set.remove(&disk_item.key).is_none() {
@@ -897,7 +961,7 @@ impl FreeSpaceChecker {
                 _ = self.cleanup_full_rx.changed() => {
                     assert!(self.fc.in_cleanup_full.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok());
                     debug!("free space checker is notified, we need to do cleanup full");
-                    self.fc.do_clean_up_full().await;
+                    self.clean_up_full().await;
                     continue;
                 },
                 _ = self.cancel_token.cancelled() => {
@@ -922,7 +986,7 @@ impl FreeSpaceChecker {
                 break;
             }
             if e.access_time < cut_off {
-                freed += e.block_size as isize + CACHE_SIZE_PADDING;
+                freed += e.block_size + CACHE_SIZE_PADDING;
                 to_expire.push((e.key().clone(), e.path.clone()));
             }
         }
@@ -963,6 +1027,7 @@ impl FreeSpaceChecker {
         // update the state back, make we can reject the new requests.
         self.fc.stage_full.store(stage_full, Ordering::Release);
         self.fc.raw_full.store(raw_full, Ordering::Release);
+        let cancel_token = self.cancel_token.clone();
 
         // check if we need to clean all.
         if raw_full && !matches!(self.fc.cache_eviction, CacheEviction::Disable) {
@@ -974,16 +1039,16 @@ impl FreeSpaceChecker {
                 ffr * 100.0
             );
             select! {
-                _ = self.cancel_token.cancelled() => {
+                _ = cancel_token.cancelled() => {
                     debug!("free space checker is cancelled");
                     return;
                 }
-                _ = self.fc.do_clean_up_full() => {
+                _ = self.clean_up_full() => {
                     debug!("cleanup full finished");
                 }
             }
             // we still raw_full, we won't accept new requests.
-            if self.fc.raw_full.load(Ordering::Acquire) {
+            if self.fc.raw_full.load(Ordering::Acquire) && self.fc.stage_uploader_tx.is_some() {
                 select! {
                     _ = self.cancel_token.cancelled() => {
                         debug!("free space checker is cancelled");
@@ -994,32 +1059,111 @@ impl FreeSpaceChecker {
             }
         }
     }
-}
 
-/// In case of the cache is full and then the service is shutdown,
-/// we need to upload the staging data to the remote when we
-/// start the service again.
-///
-/// This scanner only run once when the service is started.
-struct StageScanner {
-    fc: Arc<JuiceFileCacheInner>,
-    cancel_token: CancellationToken,
-}
+    async fn clean_up_full(&mut self) {
+        defer!({
+            self.fc.in_cleanup_full.store(false, Ordering::Release);
+            self.fc.cleanup_full_finished_notify.notify_waiters();
+        });
+        let free_ratio = self.fc.free_ratio;
+        let cache_dir = self.fc.cache_root_dir.clone();
 
-impl StageScanner {
-    async fn run(mut self) -> Result<()> {
-        let stage_dir = self.fc.stage_dir();
-        let mut lister = self
-            .fc
-            .local_store
-            .lister(&stage_dir)
-            .await
-            .context(OpenDalSnafu)?;
-        while let Some(mut de) = lister.try_next().await.context(OpenDalSnafu)? {
-            // TODO: check the validation of the stage path
+        let mut goal = self.fc.capacity * 95 / 100;
+        // Returns an approximate number of entries in this cache.
+        let mut num = self.fc.memory_index.len() as isize * 99 / 100;
+        // make sure we have enough free space after cleanup
+        let (bfr, ffr) = get_free_ratio(&self.fc.cache_root_dir);
+        let mut du_cache = None;
+        let mut used_cache = None;
+        if bfr < free_ratio {
+            let du = get_disk_usage(&cache_dir).unwrap_or_default();
+            let to_free = ((free_ratio - bfr) * du.total as f32) as usize;
+            du_cache = Some(du);
+            let used = self.fc.used.load(Ordering::Acquire);
+            used_cache = Some(used);
+            if to_free > used {
+                goal = 0;
+            } else if used - to_free < goal {
+                goal = used - to_free;
+            }
+        }
+        if ffr < free_ratio {
+            let du = du_cache.unwrap_or_else(|| get_disk_usage(&cache_dir).unwrap_or_default());
+            let to_free = ((free_ratio - ffr) * du.files as f32) as isize;
+            let cnt = self.fc.memory_index.len() as isize;
+            if to_free > cnt {
+                num = 0;
+            } else {
+                num = cnt - to_free
+            };
         }
 
-        Ok(())
+        let mut to_del = vec![];
+        let mut cnt: usize = 0;
+        let mut freed: usize = 0;
+        let now = get_sys_time_in_secs();
+        let cutoff = now - self.fc.cache_expire.as_secs();
+        let mut last_key = EMPTY_SLICE_KEY;
+        let mut last_value = Arc::new(CacheIndexValue {
+            block_size: 0,
+            access_time: 0,
+            path: "".to_string(),
+            link: false,
+        });
+        let mut new_used = used_cache.unwrap_or_else(|| self.fc.used.load(Ordering::Acquire));
+        // for each two random keys, then compare the access time, evict the older one
+        for e in self.fc.memory_index.iter() {
+            let k = e.key();
+            let v = e.value();
+            if !matches!(self.fc.cache_eviction, CacheEviction::Disable) && v.access_time < cutoff {
+                last_key = k.clone();
+                last_value = v.clone();
+                cnt += 1;
+            } else if cnt == 0 || last_value.access_time > v.access_time {
+                last_key = k.clone();
+                last_value = v.clone();
+            }
+            cnt += 1;
+            if cnt > 1 {
+                let size = last_value.block_size + CACHE_SIZE_PADDING;
+                freed += size;
+                new_used -= size;
+                to_del.push((last_key, v.clone()));
+                cnt = 0;
+                if (self.fc.memory_index.len() as isize) < num && new_used < goal {
+                    self.fc.used.store(new_used, Ordering::Release);
+                    break;
+                };
+            }
+        }
+        if to_del.len() > 0 {
+            debug!(
+                "cleanup cache {}, {} blocks {} MB, freed {} blocks {} MB",
+                &cache_dir,
+                self.fc.memory_index.len(),
+                self.fc.used.load(Ordering::Acquire) >> 20,
+                to_del.len(),
+                freed >> 20,
+            );
+        }
+        let handles = to_del
+            .iter()
+            .map(|(sid, iv)| {
+                self.fc.memory_index.remove(sid);
+                debug!("delete cache file: {}", iv.path);
+                self.fc.local_store.delete(&iv.path)
+            })
+            .collect::<Vec<_>>();
+        // wait for all the delete operations finished
+        for r in futures::future::join_all(handles).await {
+            if let Err(e) = r {
+                warn!("failed to delete cache file: {:?}", e);
+            }
+        }
+        // re calculate the free ratio
+        let (br, fr) = self.fc.cur_free_ratio();
+        let full = br < self.fc.free_ratio || fr < self.fc.free_ratio;
+        self.fc.raw_full.store(full, Ordering::Release);
     }
 }
 
@@ -1028,7 +1172,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use super::*;
-    use crate::{common::install_fmt_log, meta::types::random_slice_id};
+    use crate::common::install_fmt_log;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_full() {
         install_fmt_log();
