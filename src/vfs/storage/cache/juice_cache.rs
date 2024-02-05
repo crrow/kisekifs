@@ -42,7 +42,7 @@ use crate::{
     common::{readable_size::ReadableSize, runtime},
     meta::types::{random_slice_id, SliceID},
     vfs::{
-        err::{CacheIOSnafu, OpenDalSnafu, Result},
+        err::{CacheIOSnafu, ErrStageNoMoreSpaceSnafu, OpenDalSnafu, Result},
         storage::cache::Cache,
         VFSError,
     },
@@ -51,6 +51,7 @@ use crate::{
 const CACHE_SIZE_PADDING: isize = 4096;
 const MAX_EXPIRE_CNT: usize = 1000;
 const RAW_CACHE_DIR: &'static str = "raw";
+const STAGE_CACHE_DIR: &'static str = "stage";
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CacheEviction {
@@ -115,8 +116,10 @@ impl JuiceFileCacheBuilder {
             memory_usage: Arc::new(Default::default()),
             pending_set: DashSet::with_capacity(self.max_pending_cnt),
             memory_index: Default::default(),
+            stage_index: Default::default(),
             cancel_token,
             disk_item_tx: sender,
+            stage_uploader_tx: None,
             task_tracker: tracker,
             in_cleanup_full: Arc::new(Default::default()),
             cleanup_full_finished_notify: Arc::new(Default::default()),
@@ -177,12 +180,28 @@ fn join_path(parent: &str, child: &str) -> String {
     opendal::raw::normalize_path(&output)
 }
 
+fn get_sys_time_in_secs() -> u64 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_secs(),
+        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+}
+
 #[derive(Debug, Clone)]
-struct IndexValue {
+struct CacheIndexValue {
     block_size: usize,
     access_time: u64,
     // the path of the block on the local store.
     path: String,
+}
+
+#[derive(Debug, Clone)]
+struct StageIndexValue {
+    block_size: usize,
+    access_time: u64,
+    // the path of the block on the local store.
+    path: String,
+    in_cache: bool, // if the stage data also in the cache.
 }
 
 pub(crate) struct JuiceFileCache(Arc<JuiceFileCacheInner>);
@@ -223,7 +242,7 @@ impl Cache for JuiceFileCache {
         self.0.remove(slice_id).await
     }
 
-    async fn stage(&self, slice_id: SliceID, data: Arc<Vec<u8>>, keep_cache: bool) {
+    async fn stage(&self, slice_id: SliceID, data: Arc<Vec<u8>>, keep_cache: bool) -> Result<()> {
         self.0.stage(slice_id, data, keep_cache).await
     }
 }
@@ -244,16 +263,19 @@ pub(crate) struct JuiceFileCacheInner {
     used: Arc<AtomicIsize>,
     stage_full: Arc<AtomicBool>,
     raw_full: Arc<AtomicBool>, // TODO: rename me
-    memory_index: DashMap<SliceID, Arc<IndexValue>>,
+    memory_index: DashMap<SliceID, Arc<CacheIndexValue>>,
+    stage_index: DashMap<SliceID, Arc<StageIndexValue>>,
     cancel_token: CancellationToken,
     // if the slice is in the pending set, we won't cache it again.
     // when the background task is processing the block, we remove
     // the key from the pending set.
     pending_set: DashSet<SliceID>,
-    // check how many memory use while we caching the block.
+    // check how many memory use while we are caching the block.
     memory_usage: Arc<AtomicUsize>,
 
     disk_item_tx: mpsc::Sender<DiskItem>,
+    stage_uploader_tx: Option<mpsc::Sender<(SliceID, String)>>,
+
     task_tracker: TaskTracker,
     // we may call the cleanup manually, so maintain the state to reject the new requests.
     in_cleanup_full: Arc<AtomicBool>,
@@ -287,6 +309,7 @@ impl JuiceFileCacheInner {
         None
     }
 
+    /// FIXME: handle the checksum case.
     async fn get_reader(&self, file_path: &str) -> Result<Option<Reader>> {
         if self
             .local_store
@@ -379,24 +402,28 @@ impl JuiceFileCacheInner {
         )
     }
 
+    fn stage_path(self: &Arc<Self>, slice_id: SliceID) -> String {
+        join_path(
+            &join_path(&self.cache_root_dir, STAGE_CACHE_DIR),
+            &format!("{}", slice_id),
+        )
+    }
+
     async fn update_memory_index(
         self: &Arc<Self>,
         slice_id: SliceID,
         block_len: usize,
-        mut access_time: u64,
+        access_time: u64,
     ) {
         if let Some(old) = self.memory_index.get(&slice_id) {
             self.used.fetch_sub(
                 old.block_size as isize + CACHE_SIZE_PADDING,
                 Ordering::AcqRel,
             );
-            if access_time == 0 {
-                access_time = old.access_time
-            };
         }
         self.memory_index.insert(
             slice_id,
-            Arc::new(IndexValue {
+            Arc::new(CacheIndexValue {
                 block_size: block_len,
                 access_time,
                 path: self.cache_path(slice_id),
@@ -473,7 +500,7 @@ impl JuiceFileCacheInner {
             .as_secs();
         let cutoff = now - self.cache_expire.as_secs();
         let mut last_key = 0;
-        let mut last_value = Arc::new(IndexValue {
+        let mut last_value = Arc::new(CacheIndexValue {
             block_size: 0,
             access_time: 0,
             path: "".to_string(),
@@ -483,9 +510,6 @@ impl JuiceFileCacheInner {
         for e in self.memory_index.iter() {
             let k = e.key();
             let v = e.value();
-            if v.block_size < 0 {
-                continue; // staging
-            }
             if !matches!(self.cache_eviction, CacheEviction::Disable) && v.access_time < cutoff {
                 last_key = *k;
                 last_value = v.clone();
@@ -541,16 +565,103 @@ impl JuiceFileCacheInner {
         get_free_ratio(&self.cache_root_dir)
     }
 
+    /// Stage the slice data to local store.
     pub(crate) async fn stage(
         self: &Arc<Self>,
         slice_id: SliceID,
         data: Arc<Vec<u8>>,
-        keep_cache: bool,
-    ) {
-        // TODO: implement the stage logic.
+        keep_in_cache: bool,
+    ) -> Result<()> {
+        if self.stage_full.load(Ordering::Acquire) {
+            return ErrStageNoMoreSpaceSnafu {
+                cache_dir: self.cache_root_dir.clone(),
+            }
+            .fail();
+        }
+
+        let stage_path = self.stage_path(slice_id);
+        let block_size = data.len();
+        persistent_block(
+            self.local_store.clone(),
+            &stage_path,
+            data,
+            self.add_checksum,
+        )
+        .await?;
+        // update the index.
+        let idx = Arc::new(StageIndexValue {
+            block_size,
+            access_time: get_sys_time_in_secs(),
+            path: self.stage_path(slice_id),
+            in_cache: keep_in_cache,
+        });
+        if keep_in_cache {
+            self.update_memory_index(slice_id, idx.block_size, idx.access_time)
+                .await;
+        }
+        self.stage_index.insert(slice_id, idx);
+
+        Ok(())
     }
 
-    pub(crate) async fn upload_staging(self: &Arc<Self>) {}
+    /// When the cache is full, we should upload the staging data to the remote.
+    async fn upload_staging(self: &Arc<Self>) {
+        let uploader = match self.stage_uploader_tx {
+            Some(ref tx) => tx,
+            None => return,
+        };
+        let (br, fr) = self.cur_free_ratio();
+        let mut to_free = if br < self.free_ratio || fr < self.free_ratio {
+            let total = if let Some(du) = get_disk_usage(&self.cache_root_dir) {
+                du.total
+            } else {
+                1
+            };
+            let min = if br > fr { fr } else { br };
+            (total as f64 * self.free_ratio as f64 - min as f64) as isize
+        } else {
+            0isize
+        };
+
+        let mut cnt = 0;
+        let mut last_sid = 0;
+        let mut last_sidx = Arc::new(StageIndexValue {
+            block_size: 0,
+            access_time: 0,
+            path: "".to_string(),
+            in_cache: false,
+        });
+        // for each two random keys, then compare the access time, upload the older one
+        for e in self.stage_index.iter() {
+            // pick the bigger one if they were accessed within the same minute
+            if cnt == 0
+                || last_sidx.access_time / 60 > e.access_time / 60
+                || last_sidx.access_time / 60 == e.access_time / 60
+                    && last_sidx.block_size > e.block_size
+            {
+                last_sid = *e.key();
+                last_sidx = e.value().clone();
+            }
+            cnt += 1;
+            if cnt > 1 {
+                cnt = 0;
+                if let Err(e) = uploader.send((last_sid, last_sidx.path.clone())).await {
+                    warn!("failed to send stage data to the uploader: {:?}", e);
+                    continue;
+                }
+                to_free -= last_sidx.block_size as isize + CACHE_SIZE_PADDING;
+            }
+
+            if to_free <= 0 {
+                break;
+            }
+        }
+        if cnt > 0 {
+            if let Err(e) = uploader.send((last_sid, last_sidx.path.clone())).await {
+                warn!("failed to send stage data to the uploader: {:?}", e);
+            }
+        }
+    }
 
     /// This function will wait on cleanup, and all background tasks to finish.
     pub(crate) async fn close(self: &Arc<Self>) {
@@ -583,6 +694,11 @@ impl JuiceFileCacheInner {
     }
 
     pub(crate) async fn remove(self: &Arc<Self>, slice_id: SliceID) {
+        tokio::join!(self.remove_cache(slice_id), self.remove_stage(slice_id),);
+    }
+
+    pub(crate) async fn remove_cache(self: &Arc<Self>, slice_id: SliceID) {
+        // check if the block is in the pending set.
         if self.pending_set.remove(&slice_id).is_some() {
             // the block is in the pending set, we can return now
             return;
@@ -599,7 +715,14 @@ impl JuiceFileCacheInner {
             if let Err(e) = self.local_store.delete(&iv.path).await {
                 warn!("failed to delete cache file: {:?}", e);
             }
-            // TODO: remove stage.
+        }
+    }
+
+    pub(crate) async fn remove_stage(self: &Arc<Self>, slice_id: SliceID) {
+        if let Some(e) = self.stage_index.remove(&slice_id) {
+            if let Err(e) = self.local_store.delete(&e.1.path).await {
+                warn!("failed to delete stage file: {:?}", e);
+            }
         }
     }
 }
@@ -720,7 +843,7 @@ impl FlushTask {
                         // do the real work
                         if persistent_block(sto.clone(), &path, disk_item.block, fc.add_checksum)
                             .await.is_ok() {
-                            fc.update_memory_index(slice_id, block_len, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()).await;
+                            fc.update_memory_index(slice_id, block_len, get_sys_time_in_secs()).await;
                         }
                         // remove the block from memory buffer
                         if fc.pending_set.remove(&disk_item.slice_id).is_none() {

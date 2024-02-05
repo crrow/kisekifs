@@ -8,7 +8,7 @@ use std::{fmt::Debug, sync::Arc};
 use async_trait::async_trait;
 use opendal::Reader;
 
-use crate::meta::types::SliceID;
+use crate::{meta::types::SliceID, vfs::err::Result};
 
 pub fn new_juice_builder() -> juice_cache::JuiceFileCacheBuilder {
     juice_cache::JuiceFileCacheBuilder::default()
@@ -30,7 +30,7 @@ pub trait Cache: Send + Sync + Debug + Unpin + 'static {
     ///
     /// When we flush the stage data to the remote, we should remove the stage
     /// date.
-    async fn stage(&self, slice_id: SliceID, data: Arc<Vec<u8>>, keep_cache: bool);
+    async fn stage(&self, slice_id: SliceID, data: Arc<Vec<u8>>, keep_cache: bool) -> Result<()>;
 }
 
 /// The cache manager.

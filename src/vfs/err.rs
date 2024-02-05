@@ -13,11 +13,19 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum VFSError {
+    // ====Storage====
     #[snafu(display("cannot read empty block"))]
     ReadEmptyBlock,
     #[snafu(display("object storage error: {source}"))]
     ErrObjectStorage {
         source: opendal::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("no more space in cache dir {}", cache_dir))]
+    ErrStageNoMoreSpace {
+        cache_dir: String,
         #[snafu(implicit)]
         location: Location,
     },
