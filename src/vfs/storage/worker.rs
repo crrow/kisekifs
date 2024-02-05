@@ -18,7 +18,7 @@ pub(crate) use listener::WorkerListener;
 mod request;
 
 use std::{
-    collections::{HashMap},
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -26,7 +26,6 @@ use std::{
 };
 
 use dashmap::DashMap;
-
 pub(crate) use request::{FlushAndReleaseSliceReason, WorkerRequest};
 use snafu::{ensure, ResultExt};
 use tokio::{

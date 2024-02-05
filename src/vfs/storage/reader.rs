@@ -1,13 +1,17 @@
-use crate::meta::types::{Ino, OverlookedSlicesRef, Slice};
-use crate::vfs::storage::Engine;
-use crate::vfs::{err::Result, FH};
+use std::{
+    cmp::min,
+    sync::{atomic::AtomicBool, Arc, Weak},
+};
+
 use dashmap::DashMap;
 use itertools::Itertools;
 use rangemap::RangeMap;
-use std::cmp::min;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Weak};
-use tracing::{debug};
+use tracing::debug;
+
+use crate::{
+    meta::types::{Ino, OverlookedSlicesRef, Slice},
+    vfs::{err::Result, storage::Engine, FH},
+};
 
 impl Engine {
     /// Get the file reader for the given inode and file handle.
@@ -33,7 +37,8 @@ impl Engine {
         fh: FH,
     ) -> Option<Arc<FileReader>> {
         self.file_readers
-            .get(&(inode, fh)).map(|m| m.value().clone())
+            .get(&(inode, fh))
+            .map(|m| m.value().clone())
     }
 
     pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
@@ -177,10 +182,11 @@ enum VirtualSlice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::install_fmt_log;
-    use crate::meta::types::ROOT_INO;
-    use crate::meta::{Format, MetaConfig, MetaContext};
-    use crate::vfs::storage::{new_debug_sto, EngineConfig};
+    use crate::{
+        common::install_fmt_log,
+        meta::{types::ROOT_INO, Format, MetaConfig, MetaContext},
+        vfs::storage::{new_debug_sto, EngineConfig},
+    };
 
     #[test]
     fn get_from_range_map() {

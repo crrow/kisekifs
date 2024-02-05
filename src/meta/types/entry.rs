@@ -14,7 +14,6 @@
 
 use std::{io::Write, time::Duration};
 
-
 use fuser::FileType;
 use serde::{Deserialize, Serialize};
 

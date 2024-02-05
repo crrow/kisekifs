@@ -10,11 +10,10 @@ use crate::{
     vfs::FH,
 };
 
-// FIXME: its ugly
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub(crate) enum StorageError {
+pub enum VFSError {
+    // ====Storage====
     #[snafu(display("cannot read empty block"))]
     ReadEmptyBlock,
     #[snafu(display("object storage error: {source}"))]
@@ -22,6 +21,31 @@ pub(crate) enum StorageError {
         source: opendal::Error,
         #[snafu(implicit)]
         location: Location,
+    },
+    #[snafu(display("no more space in cache dir {}", cache_dir))]
+    ErrStageNoMoreSpace {
+        cache_dir: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("OpenDAL operator failed"))]
+    OpenDal {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: opendal::Error,
+    },
+    CacheIO {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+    FailedToHandleSystime {
+        #[snafu(implicit)]
+        location: Location,
+        source: std::time::SystemTimeError,
     },
 
     // ====workers====
@@ -58,20 +82,6 @@ pub(crate) enum StorageError {
         #[snafu(implicit)]
         location: Location,
     },
-}
-
-impl From<StorageError> for VFSError {
-    fn from(_value: StorageError) -> Self {
-        VFSError::ErrLIBC {
-            kind: libc::EINTR,
-            location: Location::default(),
-        }
-    }
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)))]
-pub enum VFSError {
     ErrMeta {
         source: MetaError,
     },
@@ -107,6 +117,7 @@ impl ToErrno for VFSError {
             VFSError::ErrMeta { source } => source.to_errno(),
             VFSError::ErrLIBC { kind, .. } => kind.to_owned(),
             VFSError::ErrTimeout { .. } => libc::ETIMEDOUT,
+            _ => libc::EINTR,
         }
     }
 }

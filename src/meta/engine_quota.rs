@@ -25,7 +25,12 @@ impl MetaEngine {
         Ok(())
     }
 
-    pub(crate) async fn update_dir_quota(&self, _ino: Ino, _space: i64, _inodes: i64) -> Result<()> {
+    pub(crate) async fn update_dir_quota(
+        &self,
+        _ino: Ino,
+        _space: i64,
+        _inodes: i64,
+    ) -> Result<()> {
         // TODO
         Ok(())
     }

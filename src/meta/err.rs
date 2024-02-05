@@ -3,6 +3,7 @@ use opendal::ErrorKind;
 use snafu::{Location, Snafu};
 use tracing::error;
 
+use crate::meta::types::SliceKey;
 use crate::{common::err::ToErrno, meta::types::Ino};
 
 #[derive(Debug, Snafu)]
@@ -71,6 +72,19 @@ pub enum MetaError {
         #[snafu(implicit)]
         location: Location,
     },
+
+    FailedToParseSliceKey {
+        str: String,
+        source: std::num::ParseIntError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    InvalidSliceKeyStr {
+        str: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -107,6 +121,8 @@ impl ToErrno for MetaError {
             MetaError::ErrLibc { kind } => *kind,
             MetaError::ErrInvalidSliceBuf { .. } => libc::EINTR,
             MetaError::ErrAsyncTimeout { .. } => libc::EINTR,
+            MetaError::FailedToParseSliceKey { .. } => libc::EINTR,
+            MetaError::InvalidSliceKeyStr { .. } => libc::EINTR,
         }
     }
 }
