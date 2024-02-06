@@ -1,4 +1,4 @@
-workspace = { members = ["tests"] }
+workspace = { members = [ "components/utils","tests"] }
 [package]
 name = "kisekifs"
 version = "0.1.0"
