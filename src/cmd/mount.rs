@@ -236,9 +236,10 @@ impl MountArgs {
             if !self.no_log {
                 let _guard =
                     kiseki_utils::logger::init_global_logging_without_runtime("kiseki-fuse", &opts);
+
+                let _sentry_guard = kiseki_utils::sentry_init::init_sentry();
             }
-            info!("OTLP ENDPOINT: {:?}", &self.otlp_endpoint);
-            log_versions();
+
             mount(self)?;
         }
         Ok(())
@@ -270,6 +271,8 @@ fn log_env_flags() {
 
 fn mount(args: MountArgs) -> Result<(), Whatever> {
     info!("try to mount kiseki on {:?}", &args.mount_point);
+    log_versions();
+
     validate_mount_point(&args.mount_point)?;
 
     let fuse_config = args.fuse_config();
