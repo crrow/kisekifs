@@ -19,13 +19,13 @@ use std::{
 
 use clap::{Args, Parser};
 use fuser::MountOption;
+use kiseki_utils::logger::{LoggingOptions, DEFAULT_LOG_DIR};
 use snafu::{whatever, ResultExt, Whatever};
 use tracing::info;
 
 use crate::{
-    fuse,
+    build_info, fuse,
     fuse::{config::FuseConfig, null, KISEKI},
-    logging::LoggingConfig,
     meta::MetaConfig,
     vfs,
     vfs::config::VFSConfig,
@@ -89,32 +89,63 @@ pub struct MountArgs {
     pub async_work_threads: usize,
 
     #[clap(
-    short,
     long,
     help = "Write log files to a directory [default: logs written to syslog]",
     help_heading = LOGGING_OPTIONS_HEADER,
     value_name = "DIRECTORY",
+    default_value = "/tmp/kiseki.log"
     )]
-    pub log_directory: Option<PathBuf>,
-
-    #[clap(long, help = "Enable logging of summarized performance metrics", help_heading = LOGGING_OPTIONS_HEADER)]
-    pub log_metrics: bool,
+    pub log_directory: String,
 
     #[clap(
     short,
     long,
-    help = "Enable debug logging for Mountpoint",
+    help = "Log level",
     help_heading = LOGGING_OPTIONS_HEADER,
-    value_name = "bool",
+    value_name = "LEVEL",
+    default_value = "info"
+    )]
+    pub level: Option<String>,
+
+    #[clap(
+    long,
+    help = "Enable OTLP tracing",
+    help_heading = LOGGING_OPTIONS_HEADER,
     default_value = "true"
     )]
-    pub debug: bool,
+    pub enable_otlp_tracing: bool,
+
+    #[clap(
+    long,
+    help = "Specify the OTLP endpoint",
+    help_heading = LOGGING_OPTIONS_HEADER,
+    value_name = "URL",
+    default_value = "localhost:4317",
+    )]
+    pub otlp_endpoint: Option<String>,
+
+    #[clap(
+    long,
+    help = "Specify the tracing sample ratio",
+    help_heading = LOGGING_OPTIONS_HEADER,
+    default_value = "0.5",
+    value_name = "RATIO",
+    )]
+    pub tracing_sample_ratio: Option<f64>,
+
+    #[clap(
+    long,
+    help = "Append stdout to log files",
+    help_heading = LOGGING_OPTIONS_HEADER,
+    default_value = "true",
+    )]
+    pub append_stdout: bool,
 
     #[clap(
     long,
     help = "Disable all logging. You will still see stdout messages.",
     help_heading = LOGGING_OPTIONS_HEADER,
-    conflicts_with_all(["log_directory", "debug"])
+    conflicts_with_all(["log_directory", "level", "enable_otlp_tracing"])
     )]
     pub no_log: bool,
 
@@ -183,26 +214,16 @@ impl MountArgs {
         Ok(mc)
     }
 
-    fn logging_config(&self) -> LoggingConfig {
-        let default_filter = if self.no_log {
-            String::from("off")
-        } else {
-            let mut filter = if self.debug {
-                String::from("debug")
-            } else {
-                String::from("warn")
-            };
-            if self.log_metrics {
-                // TODO: metrices
-                filter.push_str(&format!(",{}=info", crate::metrics::TARGET_NAME));
-            }
-            filter
+    fn load_logging_opts(&self) -> LoggingOptions {
+        let mut opts = LoggingOptions {
+            dir: self.log_directory.clone(),
+            level: self.level.clone(),
+            enable_otlp_tracing: self.enable_otlp_tracing.clone(),
+            otlp_endpoint: self.otlp_endpoint.clone(),
+            tracing_sample_ratio: self.tracing_sample_ratio,
+            append_stdout: self.append_stdout,
         };
-        LoggingConfig {
-            log_directory: self.log_directory.clone(),
-            log_to_stdout: self.foreground,
-            default_filter,
-        }
+        opts
     }
 
     fn vfs_config(&self) -> VFSConfig {
@@ -210,20 +231,48 @@ impl MountArgs {
     }
 
     pub fn run(self) -> Result<(), Whatever> {
-        let logging_config = self.logging_config();
-        let _successful_mount_msg =
-            format!("{} is mounted at {}", KISEKI, self.mount_point.display());
         if self.foreground {
-            logging_config.init_tracing_subscriber()?;
-            let _metrics = crate::metrics::install();
+            let opts = self.load_logging_opts();
+            if !self.no_log {
+                let _guard =
+                    kiseki_utils::logger::init_global_logging_without_runtime("kiseki-fuse", &opts);
+
+                let _sentry_guard = kiseki_utils::sentry_init::init_sentry();
+            }
+
             mount(self)?;
         }
         Ok(())
     }
 }
 
+pub fn log_versions() {
+    // Report app version as gauge.
+    // APP_VERSION
+    //     .with_label_values(&[short_version(), full_version()])
+    //     .inc();
+
+    // Log version and argument flags.
+    info!(
+        "PKG_VERSION: {}, FULL_VERSION: {}",
+        build_info::PKG_VERSION,
+        build_info::FULL_VERSION,
+    );
+
+    log_env_flags();
+}
+
+fn log_env_flags() {
+    info!("command line arguments");
+    for argument in std::env::args() {
+        info!("argument: {}", argument);
+    }
+}
+
 fn mount(args: MountArgs) -> Result<(), Whatever> {
     info!("try to mount kiseki on {:?}", &args.mount_point);
+    log_versions();
+
     validate_mount_point(&args.mount_point)?;
 
     let fuse_config = args.fuse_config();

@@ -19,3 +19,5 @@ docs/node_modules/
 *.log
 *.swp
 __debug_bin
+
+.env

@@ -1,4 +1,13 @@
-workspace = { members = ["tests"] }
+[workspace]
+members = [ "components/utils","tests"]
+[workspace.dependencies]
+snafu = "0.8.0"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tokio = { version = "1.35.1", features = ["full"]}
+serde = "1.0.195"
+serde_json = "1.0.111"
+
 [package]
 name = "kisekifs"
 version = "0.1.0"
@@ -22,13 +31,19 @@ name = "bench_main"
 harness = false
 path = "benches/bench_main.rs"
 
+
+
 [dependencies]
 fuser = { version = "0.14.0", features = ["libfuse","serializable"] }
-snafu = "0.8.0"
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-serde = "1.0.195"
-serde_json = "1.0.111"
+snafu.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+kiseki-utils = {path = "components/utils"}
+
 features = { version = "0.10.0"}
 opendal = { version ="0.44.1", features = ["services-sled"]}
 clap = { version = "4.4.16", features = ["derive"]}
@@ -41,13 +56,13 @@ lazy_static = "1.4.0"
 dashmap = "5.5.3"
 byteorder = "1.5.0"
 bincode = "1.3.3"
-tokio = { version = "1.35.1", features = ["full"]}
+
 log = "0.4.20"
 metrics = "0.20.0"
 async-channel = "2.1.1"
 async-lock = "3.3.0"
 hdrhistogram = { version = "7.5.2", default-features = false }
-supports-color = "2.1.0"
+
 futures = "0.3.30"
 tempfile = "3.9.0"
 regex = "1.10.2"
