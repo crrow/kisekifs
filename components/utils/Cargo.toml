@@ -1,5 +1,5 @@
 [package]
-name = "utils"
+name = "kiseki-utils"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 snafu.workspace = true
 tokio.workspace = true
+serde.workspace = true
 
 # =================================== utils
 dotenvy = "0.15.7"
@@ -16,9 +17,12 @@ dotenvy = "0.15.7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+
+supports-color = "3.0.0"
 sentry = "0.32.1"
 opentelemetry = { version = "0.21.0" }
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.14.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-otlp = { version = "0.14.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client", "grpc-tonic"] }
 opentelemetry-semantic-conventions = "0.13.0"
 tracing-opentelemetry = "0.22.0"
+tracing-appender = "0.2.3"

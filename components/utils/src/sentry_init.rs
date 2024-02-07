@@ -1,8 +1,8 @@
-use crate::env::{required_var, var, var_parsed};
 pub use sentry::release_name;
-use sentry::types::Dsn;
-use sentry::{ClientInitGuard, IntoDsn};
+use sentry::{types::Dsn, ClientInitGuard, IntoDsn};
 use snafu::{ResultExt, Whatever};
+
+use crate::env::{required_var, var, var_parsed};
 
 pub struct SentryConfig {
     pub dsn: Option<Dsn>,
@@ -17,13 +17,12 @@ impl SentryConfig {
             format!("SENTRY_DSN_API is not a valid Sentry DSN value {}", e)
         })?;
 
-        let environment =
-            match dsn {
-                None => None,
-                Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
-                    |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
-                )?),
-            };
+        let environment = match dsn {
+            None => None,
+            Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
+                |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
+            )?),
+        };
 
         Ok(Self {
             dsn,

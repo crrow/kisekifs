@@ -27,7 +27,6 @@ use snafu::{location, Location, ResultExt};
 use tokio::time::Instant;
 use tracing::{debug, error, info, trace};
 
-use crate::vfs::err::JoinSnafu;
 use crate::{
     common::{err::ToErrno, new_fs_sto, new_memory_sto},
     meta::{
@@ -38,7 +37,7 @@ use crate::{
     },
     vfs::{
         config::VFSConfig,
-        err::{ErrLIBCSnafu, Result},
+        err::{ErrLIBCSnafu, JoinSnafu, Result},
         handle::Handle,
         storage::{Engine, MAX_FILE_SIZE},
         VFSError::ErrLIBC,

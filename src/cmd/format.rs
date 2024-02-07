@@ -10,7 +10,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use crate::{
     meta,
     meta::{Compression, MetaConfig},
-    metrics::metrics_tracing_span_layer,
 };
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
@@ -117,7 +116,7 @@ impl FormatArgs {
         format
     }
     pub fn run(&self) -> Result<(), Whatever> {
-        self.std_log();
+        // self.std_log();
 
         let mc = self.meta_config()?;
         let meta = mc
@@ -148,25 +147,25 @@ impl FormatArgs {
         Ok(())
     }
 
-    fn std_log(&self) {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_ansi(supports_color::on(supports_color::Stream::Stdout).is_some())
-            .with_filter(
-                tracing_subscriber::filter::Targets::new().with_target("kiseki", LevelFilter::INFO),
-            )
-            .with_filter(
-                tracing_subscriber::filter::Targets::new()
-                    .with_target("kiseki", LevelFilter::DEBUG),
-            );
-
-        let registry = tracing_subscriber::registry()
-            // .with(syslog_layer)
-            .with(fmt_layer)
-            // .with(file_layer)
-            .with(metrics_tracing_span_layer());
-        registry.init();
-        let _metrics = crate::metrics::install();
-    }
+    // fn std_log(&self) {
+    //     let fmt_layer = tracing_subscriber::fmt::layer()
+    //         .with_ansi(supports_color::on(supports_color::Stream::Stdout).
+    // is_some())         .with_filter(
+    //             tracing_subscriber::filter::Targets::new().with_target("kiseki",
+    // LevelFilter::INFO),         )
+    //         .with_filter(
+    //             tracing_subscriber::filter::Targets::new()
+    //                 .with_target("kiseki", LevelFilter::DEBUG),
+    //         );
+    //
+    //     let registry = tracing_subscriber::registry()
+    //         // .with(syslog_layer)
+    //         .with(fmt_layer)
+    //         // .with(file_layer)
+    //         .with(metrics_tracing_span_layer());
+    //     registry.init();
+    //     let _metrics = crate::metrics::install();
+    // }
 }
 
 const NAME_REGEX: &str = r"^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$";
