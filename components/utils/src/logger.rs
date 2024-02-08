@@ -202,3 +202,10 @@ pub fn init_global_logging_without_runtime(
     let _guard = runtime.enter();
     init_global_logging(app_name, opts)
 }
+
+#[allow(dead_code)]
+pub fn install_fmt_log() {
+    let stdout_log = tracing_subscriber::fmt::layer().pretty();
+    let subscriber = Registry::default().with(stdout_log);
+    tracing::subscriber::set_global_default(subscriber).expect("Unable to set global subscriber");
+}

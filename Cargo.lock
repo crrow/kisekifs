@@ -1866,10 +1866,14 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "proc-macro2",
+ "quote",
  "sentry",
  "serde",
  "snafu 0.8.0",
  "supports-color",
+ "syn 1.0.109",
+ "syn 2.0.48",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -3897,6 +3901,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "storage"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "kiseki-utils",
+ "lazy_static",
+ "rand",
+ "snafu 0.8.0",
+ "thingbuf",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "strsim"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4026,6 +4044,16 @@ name = "tests"
 version = "0.1.0"
 dependencies = [
  "rangemap",
+]
+
+[[package]]
+name = "thingbuf"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4706f1bfb859af03f099ada2de3cea3e515843c2d3e93b7893f16d94a37f9415"
+dependencies = [
+ "parking_lot 0.12.1",
+ "pin-project",
 ]
 
 [[package]]
