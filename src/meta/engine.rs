@@ -37,6 +37,7 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use kiseki_types::{
     ino::*,
     slice::{Slice, SliceID, Slices, SLICE_BYTES},
+    CHUNK_SIZE,
 };
 
 use crate::{
@@ -50,7 +51,6 @@ use crate::{
         util::*,
         MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },
-    vfs::storage::DEFAULT_CHUNK_SIZE,
 };
 
 pub(crate) const INODE_BATCH: u64 = 1 << 10;
@@ -1255,9 +1255,8 @@ impl MetaEngine {
 
         let mut dir_stat_length: i64 = 0;
         let mut dir_stat_space: i64 = 0;
-        let new_len = chunk_idx as u64 * DEFAULT_CHUNK_SIZE as u64
-            + chunk_pos as u64
-            + slice.get_size() as u64;
+        let new_len =
+            chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
         if new_len > attr.length {
             dir_stat_length = new_len as i64 - attr.length as i64;
             dir_stat_space = align4k(new_len - attr.length);

@@ -1845,6 +1845,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiseki-storage"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "futures",
+ "kiseki-types",
+ "kiseki-utils",
+ "lazy_static",
+ "opendal",
+ "rand",
+ "snafu 0.8.0",
+ "thingbuf",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "kiseki-types"
 version = "0.1.0"
 dependencies = [
@@ -1915,6 +1933,7 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "itertools 0.12.1",
+ "kiseki-storage",
  "kiseki-types",
  "kiseki-utils",
  "lazy_static",
@@ -3900,24 +3919,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "storage"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "futures",
- "kiseki-types",
- "kiseki-utils",
- "lazy_static",
- "opendal",
- "rand",
- "snafu 0.8.0",
- "thingbuf",
- "tokio",
- "tracing",
- "uuid",
-]
 
 [[package]]
 name = "strsim"

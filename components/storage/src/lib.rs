@@ -1,6 +1,6 @@
 mod buffer_pool;
-mod error;
-mod slice_buffer;
+pub mod error;
+pub mod slice_buffer;
 mod writer;
 
 pub struct Storage {}

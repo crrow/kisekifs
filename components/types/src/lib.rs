@@ -7,6 +7,16 @@ pub const BLOCK_SIZE: usize = 4 << 20;
 // The max size of a slice buffer can grow.
 pub const CHUNK_SIZE: usize = 64 << 20;
 
+pub const MAX_FILE_SIZE: usize = CHUNK_SIZE << 31;
+
+pub fn cal_chunk_idx(offset: usize, chunk_size: usize) -> usize {
+    offset / chunk_size
+}
+
+pub fn cal_chunk_offset(offset: usize, chunk_size: usize) -> usize {
+    offset % chunk_size
+}
+
 pub type ObjectStorage = opendal::Operator;
 pub type LocalStorage = opendal::Operator;
 

@@ -11,6 +11,7 @@ use std::{
 };
 
 use dashmap::DashMap;
+use kiseki_storage::slice_buffer::SliceBufferWrapper;
 use libc::EIO;
 use scopeguard::defer;
 use snafu::{OptionExt, ResultExt};
@@ -24,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use kiseki_types::{
+    cal_chunk_idx, cal_chunk_offset,
     ino::Ino,
     slice::{Slice, EMPTY_SLICE_ID},
 };
@@ -33,7 +35,7 @@ use crate::{
     meta::engine::MetaEngine,
     vfs::{
         err::{ErrLIBCSnafu, InvalidInoSnafu, Result},
-        storage::{cal_chunk_idx, cal_chunk_offset, Engine, EngineConfig, WriteBuffer},
+        storage::{Engine, EngineConfig, WriteBuffer},
     },
 };
 
@@ -606,6 +608,7 @@ impl ChunkWriter {
             slice_id_prepared: AtomicBool::new(false),
             chunk_start_offset: chunk_offset,
             write_buffer: RwLock::new(engine.new_write_buffer()),
+            // write_buffer: RwLock::new(engine.new_slice_buffer_wrapper()),
             frozen: Arc::new(AtomicBool::new(false)),
             done: Arc::new(AtomicBool::new(false)),
             done_notify: Arc::new(Default::default()),
@@ -666,6 +669,7 @@ pub(crate) struct SliceWriter {
     chunk_start_offset: usize,
     // the underlying write buffer.
     write_buffer: RwLock<WriteBuffer>,
+    // write_buffer: RwLock<SliceBufferWrapper>,
     // before we flush the slice, we need to freeze it.
     frozen: Arc<AtomicBool>,
     // as long as we aren't done, we should try to flush this
@@ -711,6 +715,7 @@ impl SliceWriter {
         let mut guard = self.write_buffer.write().await;
         let write_len = guard
             .write_at(slice_offset, data)
+            // .await
             .expect("write data failed");
         self.last_modified.write().await.replace(Instant::now());
         Ok((write_len, guard.length(), guard.flushed_length()))

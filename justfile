@@ -81,6 +81,8 @@ alias sh-f := help-format
 @clean:
     - rm -r /tmp/kiseki
     echo "Done"
+    - rm -r /tmp/kiseki-meta/
+    echo "Done"
 
 @prepare:
     mkdir -p /tmp/kiseki /tmp/kiseki-meta/

@@ -362,14 +362,6 @@ impl WriteBuffer {
     pub(crate) fn flushed_length(&self) -> usize {
         self.flushed_length
     }
-
-    pub(crate) fn block_size(&self) -> usize {
-        self.config.block_size
-    }
-
-    pub(crate) fn chunk_size(&self) -> usize {
-        self.config.chunk_size
-    }
 }
 
 fn round_to(size: usize, round: usize) -> usize {
@@ -444,7 +436,7 @@ mod tests {
         assert_eq!(n, data.len());
         assert_eq!(wb.length(), data.len());
 
-        let offset = wb.block_size() - 3;
+        let offset = config.block_size - 3;
         let n = wb.write_at(offset, data).unwrap();
         assert_eq!(n, data.len());
         let size = offset + data.len();

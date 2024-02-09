@@ -25,9 +25,12 @@ use fuser::{FileType, TimeOrNow};
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{location, Location, ResultExt};
 use tokio::time::Instant;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, instrument, trace};
 
-use kiseki_types::ino::{Ino, CONTROL_INODE, ROOT_INO};
+use kiseki_types::{
+    ino::{Ino, CONTROL_INODE, ROOT_INO},
+    MAX_FILE_SIZE,
+};
 
 use crate::{
     common::{err::ToErrno, new_fs_sto, new_memory_sto},
@@ -41,7 +44,7 @@ use crate::{
         config::VFSConfig,
         err::{ErrLIBCSnafu, JoinSnafu, Result},
         handle::Handle,
-        storage::{Engine, MAX_FILE_SIZE},
+        storage::Engine,
         VFSError::ErrLIBC,
         FH,
     },
@@ -575,6 +578,7 @@ impl KisekiVFS {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(ino, fh, offset))]
     pub async fn write(
         &self,
         _ctx: &MetaContext,

@@ -1,5 +1,5 @@
 [package]
-name = "storage"
+name = "kiseki-storage"
 version = "0.1.0"
 edition = "2021"
 description = "The core storage implementation"

@@ -36,7 +36,7 @@ pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
     pool
 }
 
-const PAGE_CNT: usize = 300 << 20 / PAGE_SIZE;
+const PAGE_CNT: usize = 4 << 30 / PAGE_SIZE;
 
 /// The global buffer pool.
 lazy_static! {
@@ -84,7 +84,7 @@ impl DerefMut for Page {
 
 impl Drop for Page {
     fn drop(&mut self) {
-        let mut inner = self.inner.take().expect("inner is None");
+        let inner = self.inner.take().expect("inner is None");
         drop(inner);
 
         assert!(GLOBAL_PAGE_POOL.push_ref().is_ok());

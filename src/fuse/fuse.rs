@@ -456,7 +456,7 @@ impl Filesystem for KisekiFuse {
         debug!("read {:?} {:?} {:?} {:?}", ino, fh, offset, bytes_read);
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
     fn write(
         &mut self,
         _req: &Request<'_>,
@@ -491,7 +491,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
+    #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
     fn flush(&mut self, req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
         let ctx = MetaContext::from(req);
         match self.runtime.block_on(

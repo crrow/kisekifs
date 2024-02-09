@@ -61,6 +61,7 @@ rangemap.workspace = true
 
 kiseki-utils = {path = "components/utils"}
 kiseki-types = {path = "components/types"}
+kiseki-storage = {path = "components/storage"}
 
 features = { version = "0.10.0"}
 clap = { version = "4.4.16", features = ["derive"]}

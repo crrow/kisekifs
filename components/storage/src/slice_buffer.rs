@@ -12,6 +12,7 @@ use snafu::ResultExt;
 use tokio::{io::AsyncWriteExt, task::JoinHandle};
 use tracing::{debug, instrument};
 
+use kiseki_types::slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID};
 use kiseki_types::{BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
 
 use crate::{
@@ -96,6 +97,62 @@ fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: Block
     // min(1023 - 0 * 1024, 1024) = min(1023, 1024) = 1023
     // min(2049 - 2 * 1024, 1024) = min(1, 1024) = 1
     min(length - block_idx * block_size, block_size)
+}
+
+pub struct SliceBufferWrapper {
+    slice_id: SliceID,
+    inner: SliceBuffer,
+    object_storage: ObjectStorage,
+}
+
+impl SliceBufferWrapper {
+    pub fn new(object_storage: ObjectStorage) -> Self {
+        Self {
+            slice_id: EMPTY_SLICE_ID,
+            inner: SliceBuffer::new(),
+            object_storage,
+        }
+    }
+    pub fn set_slice_id(&mut self, sid: SliceID) {
+        self.slice_id = sid;
+    }
+
+    pub fn get_slice_id(&self) -> SliceID {
+        self.slice_id
+    }
+
+    pub async fn write_at(&mut self, offset: usize, data: &[u8]) -> Result<usize> {
+        self.inner.write_at(offset, data).await
+    }
+
+    pub async fn flush_to(&mut self, offset: usize) -> Result<()> {
+        let sid = self.slice_id;
+
+        let key_gen = move |idx, size| -> String { make_slice_object_key(sid, idx, size) };
+        let _ = self
+            .inner
+            .flush_bulk_to(offset, key_gen, self.object_storage.clone())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn finish(&mut self) -> Result<()> {
+        let sid = self.slice_id;
+        let key_gen = move |idx, size| -> String { make_slice_object_key(sid, idx, size) };
+        let _ = self
+            .inner
+            .flush(key_gen, self.object_storage.clone())
+            .await?;
+        Ok(())
+    }
+
+    pub fn length(&self) -> usize {
+        self.inner.length
+    }
+
+    pub fn flushed_length(&self) -> usize {
+        self.inner.flushed_length
+    }
 }
 
 /// SliceAppendOnlyBuffer is a buffer that handle the write requests.
