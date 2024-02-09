@@ -12,6 +12,7 @@ use std::{
 
 use dashmap::DashMap;
 use kiseki_storage::slice_buffer::SliceBufferWrapper;
+use kiseki_utils::readable_size::ReadableSize;
 use libc::EIO;
 use scopeguard::defer;
 use snafu::{OptionExt, ResultExt};
@@ -169,7 +170,7 @@ impl FileWriter {
             match r {
                 Ok(r) => match r {
                     Ok(wl) => {
-                        debug!("write {} KiB", wl / 1024);
+                        debug!("write {}", ReadableSize(wl as u64));
                         write_len += wl
                     }
                     Err(_e) => {
@@ -530,8 +531,8 @@ impl ChunkWriter {
         defer!(self.write_cnt.fetch_sub(1, Ordering::AcqRel););
 
         debug!(
-            "write {} KiB to chunk {}",
-            data.len() / 1024,
+            "try to write {} to chunk {}",
+            ReadableSize(data.len() as u64),
             self.chunk_idx
         );
         let slice = self.find_writable_slice(chunk_pos).await;
@@ -727,6 +728,7 @@ impl SliceWriter {
         debug!("do flush and release on {}", self.internal_seq);
         let mut guard = self.write_buffer.write().await;
         if guard.length() == 0 {
+            self.done.store(true, Ordering::Release);
             return Ok(());
         }
 

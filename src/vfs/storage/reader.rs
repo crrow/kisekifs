@@ -96,6 +96,8 @@ impl FileReader {
             expected_read_len
         };
 
+        debug!("{} real can read length: {}", self.ino, expected_read_len);
+
         // get the slice inside the chunk.
         let engine = self.engine.upgrade().expect("engine should not be dropped");
         let meta_engine = engine.meta_engine.clone();

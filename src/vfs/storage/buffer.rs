@@ -333,12 +333,13 @@ impl WriteBuffer {
         let futures = datas
             .into_iter()
             .map(|(k, v)| {
-                // let sto = sto.clone(); // Clone sto within the closure
-                let cache = self.cache.clone();
+                let sto = self.object_storage.clone(); // Clone sto within the closure
+                                                       // let cache = self.cache.clone();
                 async move {
                     debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
-                    // let _ = sto.write(&k, v).await;
-                    let _ = cache.stage(k, Arc::new(v), true).await;
+                    let path = k.gen_path_for_object_sto();
+                    let _ = sto.write(&path, v).await;
+                    // let _ = cache.stage(k, Arc::new(v), true).await;
                 }
             })
             .collect::<Vec<_>>();

@@ -543,12 +543,9 @@ impl KisekiVFS {
         _flags: i32,
         _lock: Option<u64>,
     ) -> Result<Bytes> {
-        trace!(
+        debug!(
             "fs:read with ino {:?} fh {:?} offset {:?} size {:?}",
-            ino,
-            fh,
-            offset,
-            size
+            ino, fh, offset, size
         );
 
         if ino.is_special() {
@@ -578,7 +575,6 @@ impl KisekiVFS {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(ino, fh, offset))]
     pub async fn write(
         &self,
         _ctx: &MetaContext,

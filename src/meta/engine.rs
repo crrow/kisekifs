@@ -1215,13 +1215,9 @@ impl MetaEngine {
             matches!(slice, Slice::Owned { .. }),
             "slice should be owned for writing slice"
         );
-        trace!(
+        debug!(
             "write-slice: with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
-            inode,
-            chunk_idx,
-            chunk_pos,
-            slice,
-            mtime
+            inode, chunk_idx, chunk_pos, slice, mtime
         );
 
         // TODO: juicefs lock the open file here, should we also lock it ?
@@ -1257,10 +1253,12 @@ impl MetaEngine {
         let mut dir_stat_space: i64 = 0;
         let new_len =
             chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
+        debug!("ino: {}, new_len: {}", inode, new_len);
         if new_len > attr.length {
             dir_stat_length = new_len as i64 - attr.length as i64;
             dir_stat_space = align4k(new_len - attr.length);
             attr.length = new_len;
+            debug!("update {} attr length: {}", inode, new_len);
         }
         let now = SystemTime::now();
         attr.mtime = now;

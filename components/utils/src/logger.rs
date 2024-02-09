@@ -17,10 +17,12 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::Sampler};
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
+use tracing::metadata::LevelFilter;
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{RollingFileAppender, Rotation},
 };
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::{
     filter, fmt::Layer, layer::SubscriberExt, prelude::*, EnvFilter, Registry,
 };
@@ -119,9 +121,10 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
         .as_deref()
         .or(rust_log_env.as_deref())
         .unwrap_or(DEFAULT_LOG_TARGETS);
-    let filter = targets_string
+    let target_layer = targets_string
         .parse::<filter::Targets>()
         .expect("error parsing log level string");
+    // let filter = Targets::new().with_target("kiseki", LevelFilter::DEBUG);
     let sampler = opts
         .tracing_sample_ratio
         .map(Sampler::TraceIdRatioBased)
@@ -133,7 +136,7 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
 
     let subscriber = Registry::default()
         .with(fmt_layer)
-        .with(filter)
+        .with(target_layer)
         .with(stdout_logging_layer)
         .with(file_logging_layer)
         .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
