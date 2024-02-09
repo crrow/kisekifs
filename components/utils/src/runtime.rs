@@ -13,7 +13,7 @@ static GLOBAL_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
         .unwrap()
 });
 
-pub(crate) fn handle() -> tokio::runtime::Handle {
+pub fn handle() -> tokio::runtime::Handle {
     GLOBAL_RUNTIME.handle().clone()
 }
 

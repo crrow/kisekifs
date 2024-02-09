@@ -531,7 +531,7 @@ mod tests {
     use tracing::info;
 
     use super::*;
-    use crate::new_mem_object_storage;
+    use kiseki_types::new_mem_object_storage;
 
     #[tokio::test]
     async fn basic_write() {

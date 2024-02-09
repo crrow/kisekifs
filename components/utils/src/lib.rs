@@ -1,6 +1,7 @@
 pub mod env;
 pub mod logger;
 pub mod readable_size;
+pub mod runtime;
 pub mod sentry_init;
 
 lazy_static::lazy_static! {

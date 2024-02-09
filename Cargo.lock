@@ -1864,6 +1864,7 @@ version = "0.1.0"
 dependencies = [
  "dotenvy",
  "lazy_static",
+ "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
@@ -1922,7 +1923,6 @@ dependencies = [
  "metrics",
  "moka",
  "num_cpus",
- "once_cell",
  "opendal",
  "procfs",
  "rand",
