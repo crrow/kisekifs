@@ -660,17 +660,22 @@ mod tests {
         let object_sto = new_mem_object_storage(root);
 
         let mut slice_buffer = SliceBuffer::new();
-        let data = b"hello".as_slice();
+        let data = b"hello world".as_slice();
 
         let write_len = slice_buffer.write_at(0, &data).await.unwrap();
         assert_eq!(write_len, data.len());
         assert_eq!(slice_buffer.length, data.len());
+
+        let write_len = slice_buffer.write_at(BLOCK_SIZE - 3, &data).await.unwrap();
+        assert_eq!(write_len, data.len());
+        assert_eq!(slice_buffer.length, BLOCK_SIZE - 3 + data.len());
+
         slice_buffer
             .flush(key_gen, object_sto.clone())
             .await
             .unwrap();
 
-        let mut dst = vec![0u8; 5];
+        let mut dst = vec![0u8; data.len()];
         let read_len = read_slice_from_object_storage(
             key_gen,
             object_sto.clone(),
@@ -680,7 +685,20 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(read_len, 5);
+        assert_eq!(read_len, data.len());
+        assert_eq!(dst, data);
+
+        let mut dst = vec![0u8; data.len()];
+        let read_len = read_slice_from_object_storage(
+            key_gen,
+            object_sto.clone(),
+            slice_buffer.length,
+            BLOCK_SIZE - 3,
+            dst.as_mut_slice(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_len, data.len());
         assert_eq!(dst, data);
     }
 }
