@@ -10,6 +10,7 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::task::JoinHandle;
 use tracing::{debug, instrument};
 
 // read_slice_from_object_storage will allocate memory in place and then drop it.
@@ -35,6 +36,10 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
 
     let expected_read_len = min(length - offset, expected_read_len);
     let mut total_read_len = 0;
+    let mut hanldes = vec![];
+    let dst_ptr = dst.as_mut_ptr();
+    let dst_len = dst.len();
+
     while total_read_len < expected_read_len {
         let new_pos = total_read_len + offset;
         let block_idx = new_pos / BLOCK_SIZE;
@@ -44,16 +49,36 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
             expected_read_len - total_read_len,
             obj_block_size - block_offset, // don't exceed the block boundary.
         );
+
         let key = gen_key(block_idx, obj_block_size);
-        let block_buf = object_storage.read(&key).await.context(OpenDalSnafu)?;
+        let sto = object_storage.clone();
+        let dst = unsafe { std::slice::from_raw_parts_mut(dst_ptr, dst_len) };
         let dst_slice = &mut dst[total_read_len..(total_read_len + current_block_to_read_len)];
-        let mut cursor = Cursor::new(dst_slice);
-        let n = cursor
-            .write(&block_buf[block_offset..block_offset + current_block_to_read_len])
-            .await
-            .expect("in memory write should not fail");
-        total_read_len += n;
+
+        total_read_len += current_block_to_read_len;
+
+        let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
+            let block_buf = sto.read(&key).await.context(OpenDalSnafu)?;
+            let mut cursor = Cursor::new(dst_slice);
+            let n = cursor
+                .write(&block_buf[block_offset..block_offset + current_block_to_read_len])
+                .await
+                .context(UnknownIOSnafu)?;
+            Ok(n)
+        });
+        hanldes.push(handle);
     }
+
+    let mut actual_read_cnt = 0;
+    for x in futures::future::try_join_all(hanldes)
+        .await
+        .context(JoinErrSnafu)?
+        .into_iter()
+    {
+        actual_read_cnt += x?;
+    }
+    assert_eq!(actual_read_cnt, total_read_len);
+
     Ok(total_read_len)
 }
 
