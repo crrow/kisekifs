@@ -1,3 +1,4 @@
+use std::num::ParseIntError;
 use std::{
     cmp::Ordering,
     collections::hash_map::DefaultHasher,
@@ -7,19 +8,46 @@ use std::{
     sync::Arc,
 };
 
+use crate::slice::Error::InvalidSliceKeyStr;
 use bincode::serialize;
 use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, Location, ResultExt, Snafu, Whatever};
 
-use crate::meta::err::{
-    ErrBincodeDeserializeFailedSnafu, ErrInvalidSliceBufSnafu, InvalidSliceKeyStrSnafu, Result,
-};
+#[derive(Snafu, Debug)]
+#[snafu(visibility(pub))]
+pub enum Error {
+    InvalidSliceBuf {
+        len: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    InvalidSliceKeyStr {
+        str: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    DecodeSliceBufError {
+        source: bincode::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    ParseSliceKeyFailed {
+        str: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: ParseIntError,
+    },
+}
 
 lazy_static! {
     pub static ref ID_GENERATOR: sonyflake::Sonyflake =
         sonyflake::Sonyflake::new().expect("failed to create id generator");
+}
+
+pub fn make_slice_object_key(slice_id: SliceID, block_idx: usize, block_size: usize) -> String {
+    SliceKey::new(slice_id, block_idx, block_size).gen_path_for_object_sto()
 }
 
 pub const EMPTY_SLICE_ID: SliceID = 0;
@@ -37,7 +65,7 @@ pub type OverlookedSlicesRef = Arc<OverlookedSlices>;
 pub struct Slices(pub Vec<Slice>);
 
 impl Slices {
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.0.len() * SLICE_BYTES);
         for slice in &self.0 {
             buf.extend_from_slice(&slice.encode());
@@ -45,10 +73,11 @@ impl Slices {
         buf
     }
 
-    pub(crate) fn decode(buf: &[u8]) -> Result<Slices> {
-        if buf.len() % SLICE_BYTES != 0 {
-            return ErrInvalidSliceBufSnafu.fail();
-        }
+    pub fn decode(buf: &[u8]) -> Result<Slices, Error> {
+        ensure!(
+            buf.len() % SLICE_BYTES != 0,
+            InvalidSliceBufSnafu { len: buf.len() }
+        );
         let mut slices = Vec::new();
         let mut i = 0;
         while i < buf.len() {
@@ -60,7 +89,7 @@ impl Slices {
     }
 
     /// Look over all slices and build a RangeMap for them.
-    pub(crate) fn overlook(&self) -> RangeMap<usize, Slice> {
+    pub fn overlook(&self) -> RangeMap<usize, Slice> {
         let mut rm = rangemap::RangeMap::new();
         self.0.iter().for_each(|s| {
             rm.insert(
@@ -71,7 +100,7 @@ impl Slices {
         rm
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.0.len()
     }
 }
@@ -117,11 +146,12 @@ impl Slice {
         serialize(self).unwrap()
     }
 
-    pub fn decode(buf: &[u8]) -> Result<Self> {
-        if buf.len() < SLICE_BYTES {
-            return ErrInvalidSliceBufSnafu.fail();
-        }
-        let x: Slice = bincode::deserialize(buf).context(ErrBincodeDeserializeFailedSnafu)?;
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        ensure!(
+            buf.len() >= SLICE_BYTES,
+            InvalidSliceBufSnafu { len: buf.len() }
+        );
+        let x: Slice = bincode::deserialize(buf).context(DecodeSliceBufSnafu)?;
         Ok(x)
     }
 
@@ -131,12 +161,14 @@ impl Slice {
             Slice::Borrowed { chunk_pos, off, .. } => *chunk_pos + off,
         }) as usize
     }
+
     pub fn get_id(&self) -> SliceID {
         (match self {
             Slice::Owned { id: slice_id, .. } => *slice_id,
             Slice::Borrowed { id: slice_id, .. } => *slice_id,
         })
     }
+
     pub fn get_size(&self) -> usize {
         (match self {
             Slice::Owned { size, .. } => *size,
@@ -153,7 +185,7 @@ impl Slice {
     }
 }
 
-pub(crate) const SLICE_BYTES: usize = 28;
+pub const SLICE_BYTES: usize = 28;
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord)]
 pub struct SliceKey {
@@ -228,24 +260,25 @@ impl SliceKey {
 }
 
 impl TryFrom<&str> for SliceKey {
-    type Error = crate::meta::err::MetaError;
+    type Error = Error;
 
-    fn try_from(s: &str) -> std::result::Result<Self, Self::Error> {
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
         SliceKey::from_str(s)
     }
 }
 
 impl FromStr for SliceKey {
-    type Err = crate::meta::err::MetaError; // Define the error type for parsing
+    type Err = Error; // Define the error type for parsing
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts = s.strip_prefix("chunks/").unwrap_or(s) // Remove the "chunks-" prefix
             .split('_')
             .map(|part| u64::from_str(part) ) // Parse hexadecimal parts
-            .collect::<std::result::Result<Vec<_>, _>>().context(crate::meta::err::FailedToParseSliceKeySnafu { str: s.to_string() })?;
-        if parts.len() != 5 {
-            return InvalidSliceKeyStrSnafu { str: s.to_string() }.fail();
-        }
+            .collect::<Result<Vec<_>, _>>().context(ParseSliceKeyFailedSnafu { str: s.to_string()})?;
+        ensure!(
+            parts.len() == 5,
+            InvalidSliceKeyStrSnafu { str: s.to_string() }
+        );
         Ok(SliceKey {
             slice_id: parts[2],
             block_idx: parts[3] as usize,

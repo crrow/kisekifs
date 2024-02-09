@@ -26,8 +26,10 @@ use tokio::{
 };
 use tracing::instrument;
 
+use kiseki_types::ino::Ino;
+
 use crate::{
-    meta::types::{Entry, Ino},
+    meta::types::Entry,
     vfs::{
         err::{ErrLIBCSnafu, Result},
         KisekiVFS,

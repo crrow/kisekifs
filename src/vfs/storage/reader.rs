@@ -8,10 +8,12 @@ use itertools::Itertools;
 use rangemap::RangeMap;
 use tracing::debug;
 
-use crate::{
-    meta::types::{Ino, OverlookedSlicesRef, Slice},
-    vfs::{err::Result, storage::Engine, FH},
+use kiseki_types::{
+    ino::Ino,
+    slice::{OverlookedSlicesRef, Slice},
 };
+
+use crate::vfs::{err::Result, storage::Engine, FH};
 
 impl Engine {
     /// Get the file reader for the given inode and file handle.
@@ -184,9 +186,10 @@ mod tests {
     use super::*;
     use crate::{
         common::{install_fmt_log, new_memory_sto},
-        meta::{types::ROOT_INO, Format, MetaConfig, MetaContext},
+        meta::{Format, MetaConfig, MetaContext},
         vfs::storage::EngineConfig,
     };
+    use kiseki_types::ino::ROOT_INO;
 
     #[test]
     fn get_from_range_map() {

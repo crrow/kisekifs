@@ -5,11 +5,10 @@ use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use kiseki_types::{ino::Ino, slice::SliceID};
+
 use crate::{
-    meta::{
-        engine::MetaEngine,
-        types::{Ino, SliceID},
-    },
+    meta::engine::MetaEngine,
     vfs::{
         err::Result,
         storage::{

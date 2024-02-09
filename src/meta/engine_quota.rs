@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::meta::{engine::MetaEngine, err::Result, types::Ino, MetaContext};
+use crate::meta::{engine::MetaEngine, err::Result, MetaContext};
+use kiseki_types::ino::*;
 
 impl MetaEngine {
     pub fn check_quota(

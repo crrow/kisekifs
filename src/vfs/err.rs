@@ -3,12 +3,9 @@ use std::time::Duration;
 use libc::c_int;
 use snafu::{Location, Snafu};
 
-use crate::{
-    common,
-    common::err::ToErrno,
-    meta::{types::Ino, MetaError},
-    vfs::FH,
-};
+use kiseki_types::ino::Ino;
+
+use crate::{common, common::err::ToErrno, meta::MetaError, vfs::FH};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]

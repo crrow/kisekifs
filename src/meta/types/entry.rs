@@ -17,7 +17,8 @@ use std::{io::Write, time::Duration};
 use fuser::FileType;
 use serde::{Deserialize, Serialize};
 
-use crate::meta::types::{Ino, InodeAttr};
+use crate::meta::types::InodeAttr;
+use kiseki_types::ino::Ino;
 
 // Entry is an entry inside a directory.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -107,7 +108,7 @@ impl EntryInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::types::ROOT_INO;
+    use kiseki_types::ino::ROOT_INO;
 
     #[test]
     fn encode_entry() {

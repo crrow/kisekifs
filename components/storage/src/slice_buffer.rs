@@ -12,12 +12,13 @@ use snafu::ResultExt;
 use tokio::{io::AsyncWriteExt, task::JoinHandle};
 use tracing::{debug, instrument};
 
+use kiseki_types::{BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
+
 use crate::{
     buffer_pool::{get_page, Page},
     error::{
         InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
     },
-    BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE,
 };
 
 // read_slice_from_object_storage will allocate memory in place and then drop
@@ -291,6 +292,14 @@ impl SliceBuffer {
             .iter()
             .filter(|block| !block.is_full())
             .count()
+    }
+
+    pub fn flushed_len(&self) -> usize {
+        self.flushed_length
+    }
+
+    pub fn len(&self) -> usize {
+        self.length
     }
 
     pub fn status(&self) -> SliceBufferStatus {
@@ -636,7 +645,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-        // we should be able to write the next block
+                                                                               // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

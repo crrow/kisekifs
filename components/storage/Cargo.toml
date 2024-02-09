@@ -15,6 +15,7 @@ opendal.workspace =true
 futures.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
+kiseki-types = {path = "../../components/types"}
 
 thingbuf = {version = "0.1.4", features = ["static", "alloc"]}
 rand = "0.8.5"

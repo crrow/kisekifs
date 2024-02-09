@@ -9,7 +9,7 @@ use thingbuf::{Recycle, Ref, StaticThingBuf};
 use tokio::sync::Notify;
 use tracing::info;
 
-use crate::PAGE_SIZE;
+use kiseki_types::PAGE_SIZE;
 
 /// HybridBufferPool is a hybrid buffer pool,
 /// when we cannot get a buffer from the memory pool,
@@ -20,8 +20,8 @@ struct HybridBufferPool {
 }
 
 /// BufferPool is a pre-allocated buffer pool.
-pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>()
--> StaticThingBuf<Vec<u8>, CAP, PageRecycler> {
+pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
+) -> StaticThingBuf<Vec<u8>, CAP, PageRecycler> {
     let pool = StaticThingBuf::<Vec<u8>, CAP, PageRecycler>::with_recycle(PageRecycler {
         page_size: BUFFER_SIZE,
     });

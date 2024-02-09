@@ -1,5 +1,5 @@
 [workspace]
-members = [ "components/storage", "components/utils","tests"]
+members = [ "components/types", "components/storage", "components/utils","tests"]
 [workspace.dependencies]
 snafu = "0.8.0"
 tracing = "0.1.40"
@@ -12,6 +12,10 @@ lazy_static = "1.4.0"
 opendal = { version = "0.45.0", features = ["services-sled"]}
 futures = "0.3.30"
 sonyflake = "0.2.0"
+byteorder = "1.5.0"
+bincode = "1.3.3"
+rangemap = "1.4.0"
+
 
 [package]
 name = "kisekifs"
@@ -50,8 +54,12 @@ lazy_static.workspace = true
 opendal.workspace = true
 futures.workspace = true
 sonyflake.workspace = true
+byteorder.workspace = true
+bincode.workspace = true
+rangemap.workspace = true
 
 kiseki-utils = {path = "components/utils"}
+kiseki-types = {path = "components/types"}
 
 features = { version = "0.10.0"}
 clap = { version = "4.4.16", features = ["derive"]}
@@ -61,8 +69,7 @@ sys-mount = "2.1.1"
 const_format = "0.2.32"
 procfs = "0.16.0"
 dashmap = "5.5.3"
-byteorder = "1.5.0"
-bincode = "1.3.3"
+
 
 log = "0.4.20"
 metrics = "0.20.0"
@@ -85,7 +92,7 @@ arrow-buffer = "50.0.0"
 datafusion-execution = "35.0.0"
 datafusion-common = "35.0.0"
 clippy-utilities = "0.2.0"
-rangemap = "1.4.0"
+
 num_cpus = "1.16.0"
 unique_id = "0.1.5"
 

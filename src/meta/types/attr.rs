@@ -18,7 +18,8 @@ use fuser::{FileAttr, FileType};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::meta::{types::ino::*, util::UID_GID};
+use crate::meta::util::UID_GID;
+use kiseki_types::ino::{Ino, ROOT_INO};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InodeAttr {

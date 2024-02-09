@@ -23,15 +23,16 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+use kiseki_types::{
+    ino::Ino,
+    slice::{Slice, EMPTY_SLICE_ID},
+};
+
 use crate::{
     common, meta,
-    meta::{
-        engine::MetaEngine,
-        types::{Ino, EMPTY_SLICE_ID},
-    },
+    meta::engine::MetaEngine,
     vfs::{
         err::{ErrLIBCSnafu, InvalidInoSnafu, Result},
-        handle,
         storage::{cal_chunk_idx, cal_chunk_offset, Engine, EngineConfig, WriteBuffer},
     },
 };
@@ -756,9 +757,9 @@ impl SliceWriter {
         Ok(())
     }
 
-    async fn to_meta_slice(self: &Arc<Self>) -> meta::types::Slice {
+    async fn to_meta_slice(self: &Arc<Self>) -> Slice {
         let guard = self.write_buffer.read().await;
-        meta::types::Slice::new_owned(
+        Slice::new_owned(
             self.chunk_start_offset,
             guard.get_slice_id(),
             guard.length(),

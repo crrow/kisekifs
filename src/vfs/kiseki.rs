@@ -27,6 +27,8 @@ use snafu::{location, Location, ResultExt};
 use tokio::time::Instant;
 use tracing::{debug, error, info, trace};
 
+use kiseki_types::ino::{Ino, CONTROL_INODE, ROOT_INO};
+
 use crate::{
     common::{err::ToErrno, new_fs_sto, new_memory_sto},
     meta::{

@@ -27,13 +27,12 @@ use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
 use tracing::{debug, error, field, info, instrument, Instrument};
 
+use kiseki_types::ino::Ino;
+
 use crate::{
     common::err::ToErrno,
     fuse::config::FuseConfig,
-    meta::{
-        types::{Entry, Ino},
-        MetaContext, MAX_NAME_LENGTH,
-    },
+    meta::{types::Entry, MetaContext, MAX_NAME_LENGTH},
     vfs::KisekiVFS,
 };
 

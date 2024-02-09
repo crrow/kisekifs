@@ -13,10 +13,7 @@ mod engine;
 pub use engine::Config as EngineConfig;
 pub(crate) use engine::Engine;
 mod reader;
-pub(crate) mod scheduler;
 mod writer;
-
-use crate::meta::types::{SliceID, SliceKey};
 
 pub(crate) const DEFAULT_CHUNK_SIZE: usize = 64 << 20; // 64 MiB
 pub(crate) const DEFAULT_BLOCK_SIZE: usize = 4 << 20; // 4 MiB
@@ -30,8 +27,4 @@ pub(crate) fn cal_chunk_idx(offset: usize, chunk_size: usize) -> usize {
 
 pub(crate) fn cal_chunk_offset(offset: usize, chunk_size: usize) -> usize {
     offset % chunk_size
-}
-
-pub fn make_slice_object_key(slice_id: SliceID, block_idx: usize, block_size: usize) -> String {
-    SliceKey::new(slice_id, block_idx, block_size).gen_path_for_object_sto()
 }

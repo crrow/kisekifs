@@ -34,6 +34,11 @@ use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
+use kiseki_types::{
+    ino::*,
+    slice::{Slice, SliceID, Slices, SLICE_BYTES},
+};
+
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -41,10 +46,7 @@ use crate::{
         engine_sto::generate_sto_entry_key_str,
         err::*,
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
-        types::{
-            DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, Slice, SliceID, Slices, ROOT_INO,
-            SLICE_BYTES, TRASH_INODE,
-        },
+        types::{DirStat, Entry, EntryInfo, FSStates, InodeAttr},
         util::*,
         MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },

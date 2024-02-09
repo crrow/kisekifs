@@ -9,14 +9,12 @@ use opendal::Operator;
 use snafu::{ensure, ResultExt};
 use tracing::debug;
 
-use crate::{
-    meta::types::{SliceID, SliceKey, EMPTY_SLICE_ID},
-    vfs::{
-        err::{ErrLIBCSnafu, OpenDalSnafu, Result},
-        storage::{make_slice_object_key, Cache, EngineConfig},
-        VFSError,
-    },
+use crate::vfs::{
+    err::{ErrLIBCSnafu, OpenDalSnafu, Result},
+    storage::{Cache, EngineConfig},
+    VFSError,
 };
+use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
 
 pub(crate) struct ReadBuffer {
     config: Arc<EngineConfig>,

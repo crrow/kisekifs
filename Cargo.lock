@@ -1845,6 +1845,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiseki-types"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "byteorder",
+ "lazy_static",
+ "opendal",
+ "rangemap",
+ "serde",
+ "snafu 0.8.0",
+ "sonyflake",
+]
+
+[[package]]
 name = "kiseki-utils"
 version = "0.1.0"
 dependencies = [
@@ -1900,6 +1914,7 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "itertools 0.12.1",
+ "kiseki-types",
  "kiseki-utils",
  "lazy_static",
  "libc",
@@ -3892,6 +3907,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "futures",
+ "kiseki-types",
  "kiseki-utils",
  "lazy_static",
  "opendal",

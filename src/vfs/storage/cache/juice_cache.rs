@@ -42,16 +42,16 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     common::{readable_size::ReadableSize, runtime},
-    meta::types::{random_slice_id, SliceID, EMPTY_SLICE_KEY},
     vfs::{
         err::{
             CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu, OpenDalSnafu,
             Result,
         },
-        storage::{cache::Cache, SliceKey},
+        storage::cache::Cache,
         VFSError,
     },
 };
+use kiseki_types::slice::{SliceID, SliceKey, EMPTY_SLICE_KEY};
 
 const CACHE_SIZE_PADDING: usize = 4096;
 const MAX_EXPIRE_CNT: usize = 1000;
