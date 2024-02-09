@@ -1,19 +1,27 @@
-use crate::buffer_pool::{get_page, Page};
-use crate::error::{
-    InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
+use std::{
+    cmp::{max, min},
+    io::Cursor,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
-use crate::{BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
+
 use kiseki_utils::readable_size::ReadableSize;
 use snafu::ResultExt;
-use std::cmp::{max, min};
-use std::io::Cursor;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
-use tokio::task::JoinHandle;
+use tokio::{io::AsyncWriteExt, task::JoinHandle};
 use tracing::{debug, instrument};
 
-// read_slice_from_object_storage will allocate memory in place and then drop it.
+use crate::{
+    buffer_pool::{get_page, Page},
+    error::{
+        InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
+    },
+    BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE,
+};
+
+// read_slice_from_object_storage will allocate memory in place and then drop
+// it.
 #[instrument(skip_all, fields(length, offset))]
 pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> String>(
     gen_key: F,
@@ -89,14 +97,12 @@ fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: Block
     min(length - block_idx * block_size, block_size)
 }
 
-///
 /// SliceAppendOnlyBuffer is a buffer that handle the write requests.
 ///
 /// Random write requests may hit the same slice buffer.
 ///
 /// As long as the SliceBuffer is not frozen, we should be able to
 /// modify on it, for achieving better random write performance.
-///
 pub struct SliceBuffer {
     /// the slice length, the total write len of the slice.
     /// we may write some block we just write before.
@@ -426,12 +432,10 @@ pub struct SliceBufferStatus {
     pub partial_block_cnt: usize,
 }
 
-///
 /// Block represents the real data that is written to the storage.
 ///
 /// Once a block has been flushed, then it become Empty, then we
 /// can write new data to it.
-///
 enum Block {
     // The block is empty, doesn't hold any memory,
     // 1. we may just flush it
@@ -513,11 +517,12 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::new_mem_object_storage;
     use futures::{StreamExt, TryStreamExt};
     use kiseki_utils::logger::install_fmt_log;
     use tracing::info;
+
+    use super::*;
+    use crate::new_mem_object_storage;
 
     #[tokio::test]
     async fn basic_write() {
@@ -631,7 +636,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-                                                                               // we should be able to write the next block
+        // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

@@ -1,11 +1,15 @@
-use crate::PAGE_SIZE;
+use std::{
+    io::Read,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
+
 use lazy_static::lazy_static;
-use std::io::Read;
-use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use thingbuf::{Recycle, Ref, StaticThingBuf};
 use tokio::sync::Notify;
 use tracing::info;
+
+use crate::PAGE_SIZE;
 
 /// HybridBufferPool is a hybrid buffer pool,
 /// when we cannot get a buffer from the memory pool,
@@ -16,8 +20,8 @@ struct HybridBufferPool {
 }
 
 /// BufferPool is a pre-allocated buffer pool.
-pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
-) -> StaticThingBuf<Vec<u8>, CAP, PageRecycler> {
+pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>()
+-> StaticThingBuf<Vec<u8>, CAP, PageRecycler> {
     let pool = StaticThingBuf::<Vec<u8>, CAP, PageRecycler>::with_recycle(PageRecycler {
         page_size: BUFFER_SIZE,
     });
@@ -105,12 +109,16 @@ pub async fn get_page() -> Page {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        io::{Cursor, Read, Write},
+        sync::Mutex,
+        time::Instant,
+    };
+
     use rand::{thread_rng, Rng};
-    use std::io::{Cursor, Read, Write};
-    use std::sync::Mutex;
-    use std::time::Instant;
     use tracing::info;
+
+    use super::*;
 
     #[tokio::test]
     async fn pool_has_initialized() {

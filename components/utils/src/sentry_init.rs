@@ -19,13 +19,12 @@ impl SentryConfig {
             format!("SENTRY_DSN_API is not a valid Sentry DSN value {}", e)
         })?;
 
-        let environment =
-            match dsn {
-                None => None,
-                Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
-                    |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
-                )?),
-            };
+        let environment = match dsn {
+            None => None,
+            Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
+                |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
+            )?),
+        };
 
         Ok(Self {
             dsn,
