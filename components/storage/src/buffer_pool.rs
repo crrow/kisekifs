@@ -3,13 +3,20 @@ use lazy_static::lazy_static;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use thingbuf::recycling::WithCapacity;
 use thingbuf::{Recycle, Ref, StaticThingBuf};
 use tokio::sync::Notify;
 use tracing::info;
 
+/// HybridBufferPool is a hybrid buffer pool,
+/// when we cannot get a buffer from the memory pool,
+/// we will produce a file handle for writing.
+struct HybridBufferPool {
+    memory_pool: Option<Ref<'static, Vec<u8>>>,
+    notify: Arc<Notify>,
+}
+
 /// BufferPool is a pre-allocated buffer pool.
-pub fn new_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
+pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
 ) -> StaticThingBuf<Vec<u8>, CAP, PageRecycler> {
     let pool = StaticThingBuf::<Vec<u8>, CAP, PageRecycler>::with_recycle(PageRecycler {
         page_size: BUFFER_SIZE,
@@ -29,8 +36,8 @@ const PAGE_CNT: usize = 300 << 20 / PAGE_SIZE;
 
 /// The global buffer pool.
 lazy_static! {
-    static ref PAGE_POOL: StaticThingBuf<Vec<u8>, PAGE_CNT, PageRecycler> =
-        new_buffer_pool::<PAGE_SIZE, PAGE_CNT>();
+    static ref GLOBAL_PAGE_POOL: StaticThingBuf<Vec<u8>, PAGE_CNT, PageRecycler> =
+        new_memory_buffer_pool::<PAGE_SIZE, PAGE_CNT>();
     static ref AVAILABLE_NOTIFY: Arc<Notify> = Arc::new(Notify::new());
 }
 
@@ -76,7 +83,7 @@ impl Drop for Page {
         let mut inner = self.inner.take().expect("inner is None");
         drop(inner);
 
-        assert!(PAGE_POOL.push_ref().is_ok());
+        assert!(GLOBAL_PAGE_POOL.push_ref().is_ok());
 
         // Notify someone to get a page.
         self.notify.notify_one();
@@ -85,10 +92,10 @@ impl Drop for Page {
 
 /// We will block until we get a page from the pool.
 pub async fn get_page() -> Page {
-    let mut r = PAGE_POOL.pop_ref();
+    let mut r = GLOBAL_PAGE_POOL.pop_ref();
     while let None = r {
         AVAILABLE_NOTIFY.notified().await;
-        r = PAGE_POOL.pop_ref();
+        r = GLOBAL_PAGE_POOL.pop_ref();
     }
     Page {
         inner: Some(r.unwrap()),
@@ -110,9 +117,9 @@ mod tests {
         kiseki_utils::logger::install_fmt_log();
 
         let page = get_page().await;
-        assert_eq!(PAGE_POOL.len(), PAGE_CNT - 1);
+        assert_eq!(GLOBAL_PAGE_POOL.len(), PAGE_CNT - 1);
         drop(page);
-        assert_eq!(PAGE_POOL.len(), PAGE_CNT);
+        assert_eq!(GLOBAL_PAGE_POOL.len(), PAGE_CNT);
     }
 
     #[test]
@@ -148,7 +155,7 @@ mod tests {
             start.elapsed(),
         );
 
-        let x = PAGE_POOL.push_ref();
+        let x = GLOBAL_PAGE_POOL.push_ref();
         assert!(x.is_err());
 
         // should be able to get a page again

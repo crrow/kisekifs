@@ -9,6 +9,8 @@ edition = "2021"
 snafu.workspace = true
 tokio.workspace = true
 serde.workspace = true
+lazy_static.workspace = true
+sonyflake.workspace = true
 
 # =================================== utils
 dotenvy = "0.15.7"
