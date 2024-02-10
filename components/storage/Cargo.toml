@@ -6,6 +6,7 @@ description = "The core storage implementation"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
@@ -17,12 +18,10 @@ futures.workspace = true
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
 
-thingbuf = {version = "0.1.4", features = ["static", "alloc"]}
 rand = "0.8.5"
 log = "0.4.20"
 byte-pool = "0.2.4"
 crossbeam-queue = "0.3.11"
-
 
 [dev-dependencies]
 criterion.workspace = true

@@ -19,7 +19,7 @@ use kiseki_types::{BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE,
 use crate::error::{
     InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
 };
-use crate::pool::{Page, GLOBAL_PAGE_POOL};
+use crate::pool::{Page, GLOBAL_MEMORY_PAGE_POOL};
 
 // read_slice_from_object_storage will allocate memory in place and then drop
 // it.
@@ -550,7 +550,7 @@ impl Block {
         if let Block::Data(db) = self {
             let mut new_one = false;
             if matches!(db.pages[page_idx], None) {
-                let page = GLOBAL_PAGE_POOL.acquire_page().await;
+                let page = GLOBAL_MEMORY_PAGE_POOL.acquire_page().await;
                 db.pages[page_idx] = Some(page);
                 new_one = true;
             };

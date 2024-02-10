@@ -12,17 +12,18 @@ use tracing::debug;
 use kiseki_types::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 
 lazy_static! {
-    pub static ref GLOBAL_PAGE_POOL: Arc<PagePool> = PagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE);
+    pub static ref GLOBAL_MEMORY_PAGE_POOL: Arc<MemoryPagePool> =
+        MemoryPagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE);
 }
 
-pub struct PagePool {
+pub struct MemoryPagePool {
     page_size: usize,
     capacity: usize,
     queue: ArrayQueue<Vec<u8>>,
     notify: Notify,
 }
 
-impl PagePool {
+impl MemoryPagePool {
     pub fn new(page_size: usize, capacity: usize) -> Arc<Self> {
         let start_at = Instant::now();
         debug_assert!(
@@ -99,7 +100,7 @@ impl PagePool {
     }
 }
 
-impl Display for PagePool {
+impl Display for MemoryPagePool {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -117,7 +118,7 @@ impl Display for PagePool {
 /// If that is a concern, you must clear the data yourself.
 pub struct Page {
     data: mem::ManuallyDrop<Vec<u8>>,
-    _pool: Arc<PagePool>,
+    _pool: Arc<MemoryPagePool>,
 }
 
 impl Drop for Page {
@@ -148,16 +149,16 @@ impl DerefMut for Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer_pool::acquire_page;
     use kiseki_utils::logger::install_fmt_log;
     use std::io::Write;
+    use std::time::Duration;
     use tracing::info;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {
         install_fmt_log();
 
-        let pool = PagePool::new(128 << 10, 300 << 20);
+        let pool = MemoryPagePool::new(128 << 10, 300 << 20);
         let page = pool.acquire_page().await;
         assert_eq!(page.len(), 128 << 10);
         assert_eq!(pool.remain_page_cnt(), pool.total_page_cnt() - 1);
@@ -168,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn get_page_concurrently() {
         install_fmt_log();
-        let pool = PagePool::new(128 << 10, 300 << 20);
+        let pool = MemoryPagePool::new(128 << 10, 300 << 20);
 
         let start = std::time::Instant::now();
         let mut handles = vec![];
@@ -176,6 +177,7 @@ mod tests {
             let pool = pool.clone();
             let handle = tokio::spawn(async move {
                 let mut page = pool.acquire_page().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 let mut buf = page.as_mut_slice();
                 let write_len = buf.write(b"hello").unwrap();
                 assert_eq!(write_len, 5);
