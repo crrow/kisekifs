@@ -95,8 +95,12 @@ alias sh-f := help-format
 
 alias sw := seq-write
 @seq-write:
-    fio --name=jfs-test --directory=/tmp/kiseki --ioengine=libaio --rw=write --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+    - rm -r /tmp/kiseki/fio
+    mkdir -p /tmp/kiseki/fio
+    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=write --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
 
 alias rw := random-write
 @random-write:
-    fio --name=jfs-test --directory=/tmp/kiseki --ioengine=libaio --rw=randwrite --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+    - rm -r /tmp/kiseki/fio
+    mkdir -p /tmp/kiseki/fio
+    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=randwrite --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting

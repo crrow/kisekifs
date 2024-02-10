@@ -71,6 +71,7 @@ sys-mount = "2.1.1"
 const_format = "0.2.32"
 procfs = "0.16.0"
 dashmap = "5.5.3"
+clippy-utilities = "0.2.0"
 
 
 log = "0.4.20"
@@ -93,7 +94,6 @@ rustix = "0.38.30"
 arrow-buffer = "50.0.0"
 datafusion-execution = "35.0.0"
 datafusion-common = "35.0.0"
-clippy-utilities = "0.2.0"
 
 num_cpus = "1.16.0"
 unique_id = "0.1.5"

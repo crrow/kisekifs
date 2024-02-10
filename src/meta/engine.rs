@@ -454,6 +454,7 @@ impl MetaEngine {
     }
 
     async fn stat_root_fs(&self) -> (FSStates, bool) {
+        use clippy_utilities::OverflowArithmetic;
         // we don't use result here to make sure we always return a FSStates.
         #[warn(unused_assignments)]
         // Parallelize calls to get_counter()
@@ -497,10 +498,14 @@ impl MetaEngine {
         let total_space = if format.capacity_in_bytes > 0 {
             min(format.capacity_in_bytes, used_space as u64)
         } else {
-            let mut v = 1 << 50;
+            let mut v: u64 = 1 << 50;
             let us = used_space as u64;
             while v * 8 < us * 10 {
-                v *= 2;
+                let (new_v, overflow) = v.overflowing_mul(2);
+                if overflow {
+                    break;
+                }
+                v = new_v;
             }
             v
         };
@@ -515,7 +520,11 @@ impl MetaEngine {
         } else {
             let mut available_inodes: u64 = 10 << 20;
             while available_inodes * 10 > (iused + available_inodes) * 8 {
-                available_inodes *= 2;
+                let (new_v, overflow) = available_inodes.overflowing_mul(2);
+                if overflow {
+                    break;
+                }
+                available_inodes = new_v;
             }
             available_inodes
         };
