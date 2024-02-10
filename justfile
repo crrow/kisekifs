@@ -56,7 +56,12 @@ alias sh-m := help-mount
 @mount:
     just clean
     just prepare
-    cargo run --color=always --bin kiseki mount
+    cargo run --color=always --bin kiseki mount --level debug
+
+@release-mount:
+    just clean
+    just prepare
+    cargo run --release --color=always --bin kiseki mount --no-log
 
 # ==================================================== umount
 

@@ -92,8 +92,17 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
     let stdout_logging_layer = if opts.append_stdout {
         let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
         guards.push(stdout_guard);
-
-        Some(Layer::new().with_writer(stdout_writer))
+        Some(
+            Layer::new()
+                .with_writer(stdout_writer)
+                .with_file(true)
+                .with_line_number(true)
+                .with_target(true)
+                .pretty()
+                .with_filter(filter::filter_fn(|metadata| {
+                    metadata.target().starts_with("kiseki")
+                })),
+        )
     } else {
         None
     };
@@ -121,7 +130,7 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
         .as_deref()
         .or(rust_log_env.as_deref())
         .unwrap_or(DEFAULT_LOG_TARGETS);
-    let target_layer = targets_string
+    let layer_filter = targets_string
         .parse::<filter::Targets>()
         .expect("error parsing log level string");
     // let filter = Targets::new().with_target("kiseki", LevelFilter::DEBUG);
@@ -129,16 +138,10 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
         .tracing_sample_ratio
         .map(Sampler::TraceIdRatioBased)
         .unwrap_or(Sampler::AlwaysOn);
-    let fmt_layer = Layer::new()
-        .with_file(true)
-        .with_line_number(true)
-        .with_ansi(supports_color::on(supports_color::Stream::Stdout).is_some());
 
     let subscriber = Registry::default()
-        .with(fmt_layer)
-        .with(target_layer)
-        .with(stdout_logging_layer)
-        .with(file_logging_layer)
+        .with(stdout_logging_layer.map(|x| x.with_filter(layer_filter.clone())))
+        .with(file_logging_layer.with_filter(layer_filter))
         .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
 
     if enable_otlp_tracing {
