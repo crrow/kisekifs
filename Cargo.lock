@@ -1908,6 +1908,7 @@ dependencies = [
 name = "kiseki-storage"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "byte-pool",
  "bytes",
  "criterion",

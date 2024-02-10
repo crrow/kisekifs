@@ -1,21 +1,25 @@
-use std::fmt::{Display, Formatter};
-use std::io::Read;
-use std::path::Path;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    fmt::{Display, Formatter},
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crossbeam_queue::ArrayQueue;
 use fmmap::tokio::{AsyncMmapFileExt, AsyncMmapFileMut, AsyncMmapFileMutExt, AsyncOptions};
 use kiseki_utils::readable_size::ReadableSize;
 use snafu::ResultExt;
-use tokio::time::Instant;
 use tokio::{
     io::AsyncWriteExt,
     sync::{Notify, RwLock},
+    time::Instant,
 };
 use tracing::debug;
 
-use crate::error::{DiskPoolMmapSnafu, Result, UnknownIOSnafu};
-use crate::pool::memory_pool::{MemoryPagePool, Page};
+use crate::{
+    error::{DiskPoolMmapSnafu, Result, UnknownIOSnafu},
+    pool::memory_pool::{MemoryPagePool, Page},
+};
 
 struct DiskPagePool {
     // the file path of the pool.
@@ -173,13 +177,14 @@ impl Drop for FilePage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{fs, time::Duration};
+
     use bytes::Bytes;
     use kiseki_utils::logger::install_fmt_log;
-    use std::fs;
-    use std::time::Duration;
     use tokio_util::io::StreamReader;
     use tracing::info;
+
+    use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {

@@ -17,6 +17,7 @@ futures.workspace = true
 bytes.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
+async-trait.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
