@@ -12,6 +12,32 @@ use tracing::{debug, info, instrument};
 
 use kiseki_types::PAGE_SIZE;
 
+pub fn new_memory_buffer_pool(
+    page_size: usize,
+    cap: usize,
+) -> Arc<ThingBuf<Vec<u8>, PageRecycler>> {
+    let start_at = Instant::now();
+    debug!(
+        "start initialize new_memory_buffer_pool ... CAP: {}, BUFFER_SIZE: {}",
+        cap, page_size
+    );
+    let page_cnt = cap / page_size;
+    let pool = ThingBuf::with_recycle(page_cnt, PageRecycler { page_size });
+    while let Ok(mut slot) = pool.push_ref() {
+        unsafe {
+            slot.set_len(page_size);
+        }
+    }
+    info!(
+        "new_memory_buffer_pool initialize finished ... CAP: {}, BUFFER_SIZE: {}, total cost: {:?}",
+        cap,
+        page_size,
+        start_at.elapsed()
+    );
+    assert_eq!(pool.remaining(), 0);
+    Arc::new(pool)
+}
+
 /// BufferPool is a pre-allocated buffer pool.
 pub fn new_static_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
 ) -> Arc<StaticThingBuf<Vec<u8>, CAP, PageRecycler>> {
@@ -44,8 +70,8 @@ const PAGE_CNT: usize = (300 << 20) / PAGE_SIZE;
 
 /// The global buffer pool.
 lazy_static! {
-    static ref GLOBAL_PAGE_POOL: Arc<StaticThingBuf<Vec<u8>, PAGE_CNT, PageRecycler>> =
-        new_static_memory_buffer_pool::<PAGE_SIZE, PAGE_CNT>();
+    static ref GLOBAL_PAGE_POOL: Arc<ThingBuf<Vec<u8>, PageRecycler>> =
+        new_memory_buffer_pool(PAGE_SIZE, 300 << 20);
     static ref AVAILABLE_NOTIFY: Arc<Notify> = Arc::new(Notify::new());
 }
 
@@ -151,10 +177,9 @@ mod tests {
         let start = Instant::now();
 
         let mut handles = vec![];
-        for _ in 0..100 {
+        for _ in 0..PAGE_CNT {
             let handle = tokio::spawn(async move {
                 let mut page = acquire_page().await;
-                debug!("page size: {}", std::mem::size_of_val(&page));
                 let mut buf = page.as_mut_slice();
                 let write_len = buf.write(b"hello").unwrap();
                 assert_eq!(write_len, 5);
@@ -162,7 +187,7 @@ mod tests {
             handles.push(handle);
         }
 
-        futures::future::join_all(handles);
+        let _ = futures::future::join_all(handles).await;
 
         info!(
             "expect_cnt: {}, initialize and write data total cost: {:?}",
@@ -252,12 +277,5 @@ mod tests {
         let mut rng = thread_rng();
         rng.fill(data.as_mut_slice());
         data
-    }
-
-    #[test]
-    fn wtf() {
-        const PAGE_CNT: usize = (4 << 30) / PAGE_SIZE;
-        const PAGE_CNT2: usize = 4 << 30 / PAGE_SIZE;
-        println!("PAGE_CNT: {}, PAGE_CNT2: {}", PAGE_CNT, PAGE_CNT2);
     }
 }
