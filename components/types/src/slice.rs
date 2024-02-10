@@ -75,7 +75,7 @@ impl Slices {
 
     pub fn decode(buf: &[u8]) -> Result<Slices, Error> {
         ensure!(
-            buf.len() % SLICE_BYTES != 0,
+            buf.len() % SLICE_BYTES == 0,
             InvalidSliceBufSnafu { len: buf.len() }
         );
         let mut slices = Vec::new();

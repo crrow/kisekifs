@@ -450,10 +450,19 @@ impl Filesystem for KisekiFuse {
                 bytes_read = data.len();
                 reply.data(&data);
             }
-            Err(e) => reply.error(e.to_errno()),
+            Err(e) => {
+                error!("read {:?} {:?}", Ino(ino), e);
+                reply.error(e.to_errno())
+            }
         }
 
-        debug!("read {:?} {:?} {:?} {:?}", ino, fh, offset, bytes_read);
+        debug!(
+            "read {:?} FH: {:?} offset: {:?} read_count: {:?}",
+            Ino(ino),
+            fh,
+            offset,
+            bytes_read
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
