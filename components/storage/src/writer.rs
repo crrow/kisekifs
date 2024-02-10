@@ -1,20 +1,26 @@
-use crate::error::Result;
-use crate::slice_buffer::SliceBuffer;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    Arc,
+};
+
 use kiseki_types::{
     ino::Ino,
     slice::{Slice, EMPTY_SLICE_ID},
     BlockIndex, BlockSize,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
-use tokio::time::Instant;
+use tokio::{
+    sync::{Notify, RwLock},
+    time::Instant,
+};
 use tracing::debug;
+
+use crate::{error::Result, slice_buffer::SliceBuffer};
 
 /// FileWriter is concurrent free.
 pub struct FileWriter {}
 
-/// FileFlusher is the background task to flush the file to the underlying storage.
+/// FileFlusher is the background task to flush the file to the underlying
+/// storage.
 struct FileFlusher {
     inode: Ino,
 }
@@ -69,11 +75,11 @@ struct FileFlusher {
 //         self.frozen.load(Ordering::Acquire)
 //     }
 //
-//     // get the underlying write buffer's released length and total write length.
-//     async fn get_flushed_length_and_total_write_length(self: &Arc<Self>) -> (usize, usize) {
-//         let guard = self.write_buffer.read().await;
-//         let flushed_len = guard.flushed_len();
-//         let write_len = guard.len();
+//     // get the underlying write buffer's released length and total write
+// length.     async fn get_flushed_length_and_total_write_length(self:
+// &Arc<Self>) -> (usize, usize) {         let guard =
+// self.write_buffer.read().await;         let flushed_len =
+// guard.flushed_len();         let write_len = guard.len();
 //         (flushed_len, write_len)
 //     }
 //
@@ -95,8 +101,8 @@ struct FileFlusher {
 //         Ok((write_len, guard.length(), guard.flushed_length()))
 //     }
 //
-//     /// [SliceWriter::finish] will try to flush all data to the backend storage,
-//     /// and free the undelrying buffer.
+//     /// [SliceWriter::finish] will try to flush all data to the backend
+// storage,     /// and free the undelrying buffer.
 //     pub(crate) async fn finish(self: &Arc<Self>) -> Result<()> {
 //         let mut guard = self.write_buffer.write().await;
 //         if guard.length() == 0 {
@@ -107,14 +113,14 @@ struct FileFlusher {
 //         Ok(())
 //     }
 //
-//     pub(crate) async fn do_flush_to(self: &Arc<Self>, offset: usize) -> Result<()> {
-//         let mut guard = self.write_buffer.write().await;
+//     pub(crate) async fn do_flush_to(self: &Arc<Self>, offset: usize) ->
+// Result<()> {         let mut guard = self.write_buffer.write().await;
 //         guard.flush_to(offset).await?;
 //         Ok(())
 //     }
 //
-//     async fn prepare_slice_id(self: &Arc<Self>, meta_engine: Arc<MetaEngine>) -> Result<()> {
-//         if !self.slice_id.load(Ordering::Acquire) {
+//     async fn prepare_slice_id(self: &Arc<Self>, meta_engine: Arc<MetaEngine>)
+// -> Result<()> {         if !self.slice_id.load(Ordering::Acquire) {
 //             let guard = self.write_buffer.read().await;
 //             if guard.get_slice_id() == EMPTY_SLICE_ID {
 //                 drop(guard);
@@ -125,8 +131,8 @@ struct FileFlusher {
 //                 let mut write_guard = self.write_buffer.write().await;
 //                 if write_guard.get_slice_id() == EMPTY_SLICE_ID {
 //                     let sid = meta_engine.next_slice_id().await?;
-//                     debug!("assign slice id {} to slice {}", sid, self.internal_seq);
-//                     write_guard.set_slice_id(sid);
+//                     debug!("assign slice id {} to slice {}", sid,
+// self.internal_seq);                     write_guard.set_slice_id(sid);
 //                 }
 //                 self.slice_id.store(true, Ordering::Release);
 //             }

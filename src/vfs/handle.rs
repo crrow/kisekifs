@@ -19,14 +19,13 @@ use std::{
 };
 
 use dashmap::DashMap;
+use kiseki_types::ino::Ino;
 use libc::EPERM;
 use tokio::{
     sync::{Notify, RwLock},
     time::Instant,
 };
 use tracing::instrument;
-
-use kiseki_types::ino::Ino;
 
 use crate::{
     meta::types::Entry,

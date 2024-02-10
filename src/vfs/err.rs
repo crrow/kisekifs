@@ -1,10 +1,9 @@
 use std::time::Duration;
 
 use kiseki_storage::error::Error;
+use kiseki_types::ino::Ino;
 use libc::c_int;
 use snafu::{Location, Snafu};
-
-use kiseki_types::ino::Ino;
 
 use crate::{common, common::err::ToErrno, meta::MetaError, vfs::FH};
 

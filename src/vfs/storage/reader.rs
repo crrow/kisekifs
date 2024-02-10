@@ -5,14 +5,12 @@ use std::{
 
 use dashmap::DashMap;
 use itertools::Itertools;
-use rangemap::RangeMap;
-use tracing::debug;
-
-use kiseki_types::slice::Slices;
 use kiseki_types::{
     ino::Ino,
-    slice::{OverlookedSlicesRef, Slice},
+    slice::{OverlookedSlicesRef, Slice, Slices},
 };
+use rangemap::RangeMap;
+use tracing::debug;
 
 use crate::vfs::{err::Result, storage::Engine, FH};
 
@@ -199,13 +197,14 @@ enum VirtualSlice {
 
 #[cfg(test)]
 mod tests {
+    use kiseki_types::ino::ROOT_INO;
+
     use super::*;
     use crate::{
         common::{install_fmt_log, new_memory_sto},
         meta::{Format, MetaConfig, MetaContext},
         vfs::storage::EngineConfig,
     };
-    use kiseki_types::ino::ROOT_INO;
 
     #[test]
     fn get_from_range_map() {

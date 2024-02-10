@@ -7,19 +7,21 @@ use std::{
     },
 };
 
+use kiseki_types::{
+    slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
+    BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE,
+};
 use kiseki_utils::readable_size::ReadableSize;
 use snafu::ResultExt;
-use tokio::time::Instant;
-use tokio::{io::AsyncWriteExt, task::JoinHandle};
+use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
 use tracing::{debug, instrument, Instrument};
 
-use kiseki_types::slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID};
-use kiseki_types::{BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
-
-use crate::error::{
-    InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
+use crate::{
+    error::{
+        InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
+    },
+    pool::{memory_pool::Page, GLOBAL_MEMORY_PAGE_POOL},
 };
-use crate::pool::{Page, GLOBAL_MEMORY_PAGE_POOL};
 
 // read_slice_from_object_storage will allocate memory in place and then drop
 // it.
@@ -586,11 +588,11 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt, TryStreamExt};
+    use kiseki_types::new_mem_object_storage;
     use kiseki_utils::logger::install_fmt_log;
     use tracing::info;
 
     use super::*;
-    use kiseki_types::new_mem_object_storage;
 
     #[tokio::test]
     async fn basic_write() {
@@ -704,7 +706,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-                                                                               // we should be able to write the next block
+        // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

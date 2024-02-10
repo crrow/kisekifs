@@ -5,6 +5,7 @@ use std::{
 };
 
 use bytesize::ByteSize;
+use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
 use opendal::Operator;
 use snafu::{ensure, ResultExt};
 use tracing::debug;
@@ -14,7 +15,6 @@ use crate::vfs::{
     storage::{Cache, EngineConfig},
     VFSError,
 };
-use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
 
 pub(crate) struct ReadBuffer {
     config: Arc<EngineConfig>,
@@ -334,7 +334,7 @@ impl WriteBuffer {
             .into_iter()
             .map(|(k, v)| {
                 let sto = self.object_storage.clone(); // Clone sto within the closure
-                                                       // let cache = self.cache.clone();
+                // let cache = self.cache.clone();
                 async move {
                     debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
                     let path = k.gen_path_for_object_sto();

@@ -1,10 +1,10 @@
+use kiseki_types::ino::Ino;
 use libc::c_int;
 use opendal::ErrorKind;
 use snafu::{Location, Snafu};
 use tracing::error;
 
 use crate::common::err::ToErrno;
-use kiseki_types::ino::Ino;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::sentry_init::init_sentry;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::Sampler};
@@ -24,10 +23,11 @@ use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{RollingFileAppender, Rotation},
 };
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::{
-    filter, fmt::Layer, layer::SubscriberExt, prelude::*, EnvFilter, Registry,
+    filter, filter::Targets, fmt::Layer, layer::SubscriberExt, prelude::*, EnvFilter, Registry,
 };
+
+use crate::sentry_init::init_sentry;
 
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 pub const DEFAULT_LOG_DIR: &str = "/tmp/kiseki.logs";

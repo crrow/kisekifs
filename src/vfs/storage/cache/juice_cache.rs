@@ -27,6 +27,8 @@ use crc32fast::Hasher;
 use dashmap::{DashMap, DashSet};
 use datafusion_common::ExprSchema;
 use futures::{FutureExt, TryStreamExt};
+use kiseki_types::slice::{SliceID, SliceKey, EMPTY_SLICE_KEY};
+use kiseki_utils::{readable_size::ReadableSize, runtime};
 use opendal::{Builder, Lister, Operator as ObjectStorage, Reader};
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
@@ -40,9 +42,6 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
 
-use kiseki_utils::readable_size::ReadableSize;
-use kiseki_utils::runtime;
-
 use crate::vfs::{
     err::{
         CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu, OpenDalSnafu, Result,
@@ -50,7 +49,6 @@ use crate::vfs::{
     storage::cache::Cache,
     VFSError,
 };
-use kiseki_types::slice::{SliceID, SliceKey, EMPTY_SLICE_KEY};
 
 const CACHE_SIZE_PADDING: usize = 4096;
 const MAX_EXPIRE_CNT: usize = 1000;

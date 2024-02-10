@@ -14,6 +14,9 @@ lazy_static.workspace = true
 snafu.workspace = true
 opendal.workspace =true
 futures.workspace = true
+bytes.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
@@ -22,9 +25,11 @@ rand = "0.8.5"
 log = "0.4.20"
 byte-pool = "0.2.4"
 crossbeam-queue = "0.3.11"
+fmmap = {version = "0.3.3", features = ["tokio","tokio-async"]}
 
 [dev-dependencies]
 criterion.workspace = true
+tempfile.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
 

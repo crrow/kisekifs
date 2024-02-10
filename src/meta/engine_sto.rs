@@ -14,11 +14,10 @@
 
 use std::sync::atomic::Ordering;
 
+use kiseki_types::ino::*;
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};
-
-use kiseki_types::ino::*;
 
 use crate::meta::{
     engine::{Counter, MetaEngine},

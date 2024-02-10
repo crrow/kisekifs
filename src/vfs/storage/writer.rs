@@ -12,6 +12,11 @@ use std::{
 
 use dashmap::DashMap;
 use kiseki_storage::slice_buffer::SliceBufferWrapper;
+use kiseki_types::{
+    cal_chunk_idx, cal_chunk_offset,
+    ino::Ino,
+    slice::{Slice, EMPTY_SLICE_ID},
+};
 use kiseki_utils::readable_size::ReadableSize;
 use libc::EIO;
 use scopeguard::defer;
@@ -24,12 +29,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, Instrument};
-
-use kiseki_types::{
-    cal_chunk_idx, cal_chunk_offset,
-    ino::Ino,
-    slice::{Slice, EMPTY_SLICE_ID},
-};
 
 use crate::{
     common, meta,

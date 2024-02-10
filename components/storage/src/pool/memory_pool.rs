@@ -1,20 +1,16 @@
+use std::{
+    fmt::{Display, Formatter},
+    mem,
+    ops::{Deref, DerefMut},
+    ptr,
+    sync::Arc,
+};
+
 use crossbeam_queue::ArrayQueue;
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
-use std::fmt::{Display, Formatter};
-use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
-use std::{mem, ptr};
-use tokio::sync::Notify;
-use tokio::time::Instant;
+use tokio::{sync::Notify, time::Instant};
 use tracing::debug;
-
-use kiseki_types::{PAGE_BUFFER_SIZE, PAGE_SIZE};
-
-lazy_static! {
-    pub static ref GLOBAL_MEMORY_PAGE_POOL: Arc<MemoryPagePool> =
-        MemoryPagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE);
-}
 
 pub struct MemoryPagePool {
     page_size: usize,
@@ -114,8 +110,8 @@ impl Display for MemoryPagePool {
 }
 
 /// The value returned by an allocation of the pool.
-/// When it is dropped the memory gets returned into the pool, and is not zeroed.
-/// If that is a concern, you must clear the data yourself.
+/// When it is dropped the memory gets returned into the pool, and is not
+/// zeroed. If that is a concern, you must clear the data yourself.
 pub struct Page {
     data: mem::ManuallyDrop<Vec<u8>>,
     _pool: Arc<MemoryPagePool>,
@@ -148,11 +144,12 @@ impl DerefMut for Page {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{io::Write, time::Duration};
+
     use kiseki_utils::logger::install_fmt_log;
-    use std::io::Write;
-    use std::time::Duration;
     use tracing::info;
+
+    use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {

@@ -1,19 +1,20 @@
-use std::num::ParseIntError;
 use std::{
     cmp::Ordering,
     collections::hash_map::DefaultHasher,
     fmt::{Display, Formatter},
     hash::{Hash, Hasher},
+    num::ParseIntError,
     str::FromStr,
     sync::Arc,
 };
 
-use crate::slice::Error::InvalidSliceKeyStr;
 use bincode::serialize;
 use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, Location, ResultExt, Snafu, Whatever};
+
+use crate::slice::Error::InvalidSliceKeyStr;
 
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]

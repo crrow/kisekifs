@@ -6,9 +6,8 @@ mod write_cache;
 use std::{fmt::Debug, hash::Hash, sync::Arc};
 
 use async_trait::async_trait;
-use opendal::Reader;
-
 use kiseki_types::slice::SliceKey;
+use opendal::Reader;
 
 use crate::vfs::err::Result;
 

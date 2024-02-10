@@ -32,6 +32,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    DiskPoolMmapError {
+        #[snafu(implicit)]
+        location: Location,
+        source: fmmap::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

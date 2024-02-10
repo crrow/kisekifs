@@ -27,18 +27,17 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
+use kiseki_types::{
+    ino::*,
+    slice::{Slice, SliceID, Slices, SLICE_BYTES},
+    CHUNK_SIZE,
+};
 use lazy_static::lazy_static;
 use opendal::{ErrorKind, Operator};
 use scopeguard::defer;
 use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
-
-use kiseki_types::{
-    ino::*,
-    slice::{Slice, SliceID, Slices, SLICE_BYTES},
-    CHUNK_SIZE,
-};
 
 use crate::{
     common::err::ToErrno,

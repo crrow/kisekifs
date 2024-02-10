@@ -22,12 +22,11 @@ use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
+use kiseki_types::ino::Ino;
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
 use tracing::{debug, error, field, info, instrument, Instrument};
-
-use kiseki_types::ino::Ino;
 
 use crate::{
     common::err::ToErrno,
@@ -466,7 +465,8 @@ impl Filesystem for KisekiFuse {
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
-    // #[instrument(fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
+    // #[instrument(fields(req=_req.unique(), ino=ino, fh=fh, offset=offset,
+    // length=data.len(), pid=_req.pid(), name=field::Empty))]
     fn write(
         &mut self,
         _req: &Request<'_>,
