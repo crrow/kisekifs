@@ -9,14 +9,15 @@ use std::{
 
 use kiseki_utils::readable_size::ReadableSize;
 use snafu::ResultExt;
+use tokio::time::Instant;
 use tokio::{io::AsyncWriteExt, task::JoinHandle};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, Instrument};
 
 use kiseki_types::slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID};
 use kiseki_types::{BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
 
 use crate::{
-    buffer_pool::{get_page, Page},
+    buffer_pool::{acquire_page, Page},
     error::{
         InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
     },
@@ -122,7 +123,7 @@ impl SliceBufferWrapper {
     }
 
     pub async fn write_at(&mut self, offset: usize, data: &[u8]) -> Result<usize> {
-        self.inner.write_at(offset, data).await
+        self.inner.write_at(offset, data).in_current_span().await
     }
 
     pub async fn flush_to(&mut self, offset: usize) -> Result<()> {
@@ -545,14 +546,17 @@ impl Block {
     }
 
     async fn get_page(&mut self, page_idx: usize) -> (&mut Page, bool) {
+        let start = Instant::now();
         debug_assert!(!matches!(self, Block::Empty));
+        debug!("try to get a page from block.");
         if let Block::Data(db) = self {
             let mut new_one = false;
             if matches!(db.pages[page_idx], None) {
-                let page = get_page().await;
+                let page = acquire_page().await;
                 db.pages[page_idx] = Some(page);
                 new_one = true;
             };
+            debug!("get a page from block, cost: {:?}", start.elapsed());
             (db.pages[page_idx].as_mut().unwrap(), new_one)
         } else {
             panic!("Block is empty");

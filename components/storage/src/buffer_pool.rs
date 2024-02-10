@@ -5,23 +5,21 @@ use std::{
 };
 
 use lazy_static::lazy_static;
-use thingbuf::{Recycle, Ref, StaticThingBuf};
+use thingbuf::{Recycle, Ref, StaticThingBuf, ThingBuf};
 use tokio::sync::Notify;
-use tracing::info;
+use tokio::time::Instant;
+use tracing::{debug, info, instrument};
 
 use kiseki_types::PAGE_SIZE;
 
-/// HybridBufferPool is a hybrid buffer pool,
-/// when we cannot get a buffer from the memory pool,
-/// we will produce a file handle for writing.
-struct HybridBufferPool {
-    memory_pool: Option<Ref<'static, Vec<u8>>>,
-    notify: Arc<Notify>,
-}
-
 /// BufferPool is a pre-allocated buffer pool.
-pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
-) -> StaticThingBuf<Vec<u8>, CAP, PageRecycler> {
+pub fn new_static_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
+) -> Arc<StaticThingBuf<Vec<u8>, CAP, PageRecycler>> {
+    let start_at = Instant::now();
+    debug!(
+        "start initialize new_static_memory_buffer_pool ... CAP: {}, BUFFER_SIZE: {}",
+        CAP, BUFFER_SIZE
+    );
     let pool = StaticThingBuf::<Vec<u8>, CAP, PageRecycler>::with_recycle(PageRecycler {
         page_size: BUFFER_SIZE,
     });
@@ -32,16 +30,22 @@ pub fn new_memory_buffer_pool<const BUFFER_SIZE: usize, const CAP: usize>(
         }
     }
 
+    info!(
+        "new_static_memory_buffer_pool initialize finished ... CAP: {}, BUFFER_SIZE: {}, total cost: {:?}",
+        CAP,
+        BUFFER_SIZE,
+        start_at.elapsed()
+    );
     assert_eq!(pool.remaining(), 0);
-    pool
+    Arc::new(pool)
 }
 
-const PAGE_CNT: usize = 4 << 30 / PAGE_SIZE;
+const PAGE_CNT: usize = (300 << 20) / PAGE_SIZE;
 
 /// The global buffer pool.
 lazy_static! {
-    static ref GLOBAL_PAGE_POOL: StaticThingBuf<Vec<u8>, PAGE_CNT, PageRecycler> =
-        new_memory_buffer_pool::<PAGE_SIZE, PAGE_CNT>();
+    static ref GLOBAL_PAGE_POOL: Arc<StaticThingBuf<Vec<u8>, PAGE_CNT, PageRecycler>> =
+        new_static_memory_buffer_pool::<PAGE_SIZE, PAGE_CNT>();
     static ref AVAILABLE_NOTIFY: Arc<Notify> = Arc::new(Notify::new());
 }
 
@@ -86,7 +90,6 @@ impl Drop for Page {
     fn drop(&mut self) {
         let inner = self.inner.take().expect("inner is None");
         drop(inner);
-
         assert!(GLOBAL_PAGE_POOL.push_ref().is_ok());
 
         // Notify someone to get a page.
@@ -95,12 +98,23 @@ impl Drop for Page {
 }
 
 /// We will block until we get a page from the pool.
-pub async fn get_page() -> Page {
+pub async fn acquire_page() -> Page {
+    debug!(
+        "try to acquire_page ...remain: {}, total: {}",
+        GLOBAL_PAGE_POOL.len(),
+        GLOBAL_PAGE_POOL.capacity()
+    );
     let mut r = GLOBAL_PAGE_POOL.pop_ref();
     while let None = r {
+        debug!("not found any page in the pool, waiting for a page.");
         AVAILABLE_NOTIFY.notified().await;
         r = GLOBAL_PAGE_POOL.pop_ref();
     }
+    debug!(
+        "acquire_page finished ... remain: {}, total: {}",
+        GLOBAL_PAGE_POOL.len(),
+        GLOBAL_PAGE_POOL.capacity(),
+    );
     Page {
         inner: Some(r.unwrap()),
         notify: AVAILABLE_NOTIFY.clone(),
@@ -124,10 +138,37 @@ mod tests {
     async fn pool_has_initialized() {
         kiseki_utils::logger::install_fmt_log();
 
-        let page = get_page().await;
+        let page = acquire_page().await;
         assert_eq!(GLOBAL_PAGE_POOL.len(), PAGE_CNT - 1);
         drop(page);
         assert_eq!(GLOBAL_PAGE_POOL.len(), PAGE_CNT);
+    }
+
+    #[tokio::test]
+    async fn get_page_concurrently() {
+        kiseki_utils::logger::install_fmt_log();
+
+        let start = Instant::now();
+
+        let mut handles = vec![];
+        for _ in 0..100 {
+            let handle = tokio::spawn(async move {
+                let mut page = acquire_page().await;
+                debug!("page size: {}", std::mem::size_of_val(&page));
+                let mut buf = page.as_mut_slice();
+                let write_len = buf.write(b"hello").unwrap();
+                assert_eq!(write_len, 5);
+            });
+            handles.push(handle);
+        }
+
+        futures::future::join_all(handles);
+
+        info!(
+            "expect_cnt: {}, initialize and write data total cost: {:?}",
+            PAGE_CNT,
+            start.elapsed(),
+        );
     }
 
     #[test]
@@ -146,7 +187,7 @@ mod tests {
         let start = Instant::now();
 
         for _ in 0..PAGE_CNT {
-            let mut page = get_page().await;
+            let mut page = acquire_page().await;
             let mut buf = page.as_mut_slice();
             buf.copy_from_slice(&data);
 
@@ -168,7 +209,7 @@ mod tests {
 
         // should be able to get a page again
         for _ in 0..PAGE_CNT {
-            let mut page = get_page().await;
+            let mut page = acquire_page().await;
             let mut buf = page.as_mut_slice();
             buf.copy_from_slice(&data);
 
@@ -211,5 +252,12 @@ mod tests {
         let mut rng = thread_rng();
         rng.fill(data.as_mut_slice());
         data
+    }
+
+    #[test]
+    fn wtf() {
+        const PAGE_CNT: usize = (4 << 30) / PAGE_SIZE;
+        const PAGE_CNT2: usize = 4 << 30 / PAGE_SIZE;
+        println!("PAGE_CNT: {}, PAGE_CNT2: {}", PAGE_CNT, PAGE_CNT2);
     }
 }

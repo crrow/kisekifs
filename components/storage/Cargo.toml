@@ -19,6 +19,7 @@ kiseki-types = {path = "../../components/types"}
 
 thingbuf = {version = "0.1.4", features = ["static", "alloc"]}
 rand = "0.8.5"
+log = "0.4.20"
 
 
 [dev-dependencies]

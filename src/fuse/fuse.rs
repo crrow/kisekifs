@@ -67,7 +67,7 @@ impl KisekiFuse {
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(fuse_config.async_work_threads)
             .thread_name("kiseki-fuse-async-runtime")
-            .thread_stack_size(3 * 1024 * 1024)
+            .thread_stack_size(32 << 20)
             .enable_all()
             .build()
             .with_whatever_context(|e| format!("unable to built tokio runtime {e} "))?;

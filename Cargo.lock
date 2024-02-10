@@ -1853,6 +1853,7 @@ dependencies = [
  "kiseki-types",
  "kiseki-utils",
  "lazy_static",
+ "log",
  "opendal",
  "rand",
  "snafu 0.8.0",

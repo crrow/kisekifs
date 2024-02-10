@@ -23,7 +23,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, instrument, Instrument};
 
 use kiseki_types::{
     cal_chunk_idx, cal_chunk_offset,
@@ -708,6 +708,7 @@ impl SliceWriter {
 
     // return the current write len to this buffer,
     // the buffer total length, and the flushed length.
+    #[instrument(skip_all, name = "SliceWriter::write", fields(offset, len = ReadableSize(data.len() as u64).to_string()))]
     async fn write(
         self: &Arc<Self>,
         slice_offset: usize,
@@ -716,6 +717,7 @@ impl SliceWriter {
         let mut guard = self.write_buffer.write().await;
         let write_len = guard
             .write_at(slice_offset, data)
+            .in_current_span()
             .await
             .expect("write data failed");
         self.last_modified.write().await.replace(Instant::now());
