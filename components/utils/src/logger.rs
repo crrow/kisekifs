@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::sentry_init::init_sentry;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::Sampler};
 use opentelemetry_semantic_conventions::resource;
+use sentry::ClientInitGuard;
 use serde::{Deserialize, Serialize};
 use tracing::metadata::LevelFilter;
 use tracing_appender::{
@@ -83,7 +85,10 @@ impl LoggingOptions {
 const DEFAULT_LOG_TARGETS: &str = "info";
 
 #[allow(clippy::print_stdout)]
-pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerGuard> {
+pub fn init_global_logging(
+    app_name: &str,
+    opts: &LoggingOptions,
+) -> (Vec<WorkerGuard>, Option<ClientInitGuard>) {
     let mut guards = vec![];
     let dir = &opts.dir;
     let level = &opts.level;
@@ -139,10 +144,23 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
         .map(Sampler::TraceIdRatioBased)
         .unwrap_or(Sampler::AlwaysOn);
 
+    let (sentry_layer, sentry_guard) = match init_sentry() {
+        None => (None, None),
+        Some(sentry_guard) => (
+            Some(
+                sentry_tracing::layer().with_filter(filter::filter_fn(|metadata| {
+                    metadata.target().starts_with("kiseki")
+                })),
+            ),
+            Some(sentry_guard),
+        ),
+    };
+
     let subscriber = Registry::default()
         .with(stdout_logging_layer.map(|x| x.with_filter(layer_filter.clone())))
         .with(file_logging_layer.with_filter(layer_filter))
-        .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
+        .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR))
+        .with(sentry_layer);
 
     if enable_otlp_tracing {
         global::set_text_map_propagator(TraceContextPropagator::new());
@@ -177,13 +195,13 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
             .expect("error setting global tracing subscriber");
     }
 
-    guards
+    (guards, sentry_guard)
 }
 
 pub fn init_global_logging_without_runtime(
     app_name: &str,
     opts: &LoggingOptions,
-) -> Vec<WorkerGuard> {
+) -> (Vec<WorkerGuard>, Option<ClientInitGuard>) {
     // The opentelemetry batch processor and the OTLP exporter needs a Tokio
     // runtime. Create a dedicated runtime for them. One thread should be
     // enough.

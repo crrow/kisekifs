@@ -448,6 +448,7 @@ impl ChunkWriterBackgroundTask {
                         meta_slice,
                         mtime,
                     )
+                    .in_current_span()
                     .await
                 {
                     debug!(

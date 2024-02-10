@@ -233,10 +233,8 @@ impl MountArgs {
     pub fn run(self) -> Result<(), Whatever> {
         if self.foreground {
             let opts = self.load_logging_opts();
-            let _guard =
+            let (_guard, _sentry_guard) =
                 kiseki_utils::logger::init_global_logging_without_runtime("kiseki-fuse", &opts);
-            let _sentry_guard = kiseki_utils::sentry_init::init_sentry();
-
             mount(self)?;
         }
         Ok(())
