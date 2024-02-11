@@ -66,6 +66,11 @@ alias sh-m := help-mount
     just prepare
     cargo run --release --color=always --bin kiseki mount --no-log
 
+@profile-mount:
+    just clean
+    just prepare
+    cargo flamegraph --bin kiseki -- mount --no-log
+
 # ==================================================== umount
 
 alias sh-um := help-umount

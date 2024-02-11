@@ -1,7 +1,6 @@
-use std::io::Write;
 use std::{
     fmt::{Display, Formatter},
-    io::Cursor,
+    io::{Cursor, Write},
     mem,
     ops::{Deref, DerefMut},
     ptr,

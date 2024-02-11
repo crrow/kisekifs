@@ -32,6 +32,10 @@ description = "A fuse filesystem"
 exclude = ["benches"]
 autobenches = false
 
+[profile.release]
+debug = true
+
+
 [lib]
 bench = false
 

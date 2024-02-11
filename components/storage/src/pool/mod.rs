@@ -128,6 +128,10 @@ impl HybridPagePool {
     }
     /// acquire_page will wait and  acquire a page from the page pool.
     pub async fn acquire_page(self: &Arc<Self>) -> Page {
+        // let disk_pool = self.disk_pool.as_ref().unwrap();
+        // let page = disk_pool.acquire_page().await;
+        // return Page::Disk(page);
+
         if self.memory_pool.remain_page_cnt() > 0 {
             if let Some(page) = self.try_acquire_page() {
                 return page;
@@ -197,13 +201,14 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{io::Cursor, thread};
+
     use kiseki_utils::logger::install_fmt_log;
-    use std::io::Cursor;
-    use std::thread;
     use tokio::time::Instant;
     use tokio_util::io::StreamReader;
     use tracing::debug;
+
+    use super::*;
 
     #[tokio::test]
     async fn basic() {

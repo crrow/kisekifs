@@ -241,7 +241,19 @@ impl MountArgs {
                 (vec![], None)
             };
 
+            let pyroscope_guard = kiseki_utils::pyroscope_init::init_pyroscope()?;
+
             mount(self)?;
+
+            if let Some(agent_running) = pyroscope_guard {
+                // Stop Agent
+                let agent_ready = agent_running
+                    .stop()
+                    .with_whatever_context(|e| format!("failed to stop pyroscope agent {} ", e))?;
+
+                // Shutdown the Agent
+                agent_ready.shutdown();
+            }
         }
         Ok(())
     }

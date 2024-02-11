@@ -517,15 +517,11 @@ impl MetaEngine {
                 format.inodes - iused
             }
         } else {
-            let mut available_inodes: u64 = 10 << 20;
-            while available_inodes * 10 > (iused + available_inodes) * 8 {
-                let (new_v, overflow) = available_inodes.overflowing_mul(2);
-                if overflow {
-                    break;
-                }
-                available_inodes = new_v;
+            if iused > 10_000_000_000 {
+                0
+            } else {
+                10_000_000_000 - iused
             }
-            available_inodes
         };
 
         (
@@ -1474,5 +1470,12 @@ mod tests {
 
         let entry_infos = meta_engine.sto_list_entry_info(Ino(1)).await.unwrap();
         assert_eq!(entry_infos.len(), 2);
+    }
+
+    #[test]
+    fn find_possible_available_inode_cnt() {
+        let iused = 1000;
+        let available_inodes = find_available_inodes(iused);
+        println!("Available inodes: {}", available_inodes);
     }
 }

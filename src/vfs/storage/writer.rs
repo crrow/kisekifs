@@ -146,10 +146,21 @@ impl FileWriter {
         defer!(self.write_cnt.fetch_sub(1, Ordering::AcqRel););
         defer!(self.notify_flush.notify_one(););
 
-        while self.flushing_cnt.load(Ordering::Acquire) > 0 {
-            // wait for the flushing threads to finish and notify the write thread.
-            self.notify_write.notified().await;
+        let start = Instant::now();
+        debug!("wait if someone is flushing {}", self.ino);
+        while let cnt = self.flushing_cnt.load(Ordering::Acquire) {
+            if cnt > 0 {
+                // wait for the flushing threads to finish and notify the write thread.
+                self.notify_write.notified().await;
+            } else {
+                break;
+            }
         }
+        debug!(
+            "wait for flushing {} finished: {:?}",
+            self.ino,
+            start.elapsed()
+        );
 
         let data_len = data.len();
         let data_ptr = data.as_ptr();
@@ -193,6 +204,7 @@ impl FileWriter {
 
     /// do_flush will try to flush all data that in buffer to the backend object
     /// storage.
+    /// FIXME: this function is every slow !!!
     pub(crate) async fn do_flush(&self) -> Result<()> {
         debug!(
             "do flush on {}, length: {}",
@@ -244,6 +256,10 @@ impl FileWriter {
         Ok(())
     }
 
+    #[instrument(
+    name = "GetChunkWriter From FileWriter",
+    skip(self),
+    fields(ino = self.ino.0, chunk_idx = idx))]
     fn get_chunk_writer(self: &Arc<Self>, idx: usize) -> Arc<ChunkWriter> {
         let fw = self.clone();
         let c = self.chunk_writers.entry(idx).or_insert_with(|| {
@@ -526,6 +542,10 @@ impl ChunkWriter {
         })
     }
 
+    #[instrument(
+    name = "ChunkWriter::write",
+    skip_all,
+    fields(chunk_idx = self.chunk_idx, chunk_pos, expect_write_len= data.len()))]
     async fn write(self: &Arc<Self>, chunk_pos: usize, data: &[u8]) -> Result<usize> {
         self.write_cnt.fetch_add(1, Ordering::AcqRel);
         defer!(self.write_cnt.fetch_sub(1, Ordering::AcqRel););
@@ -581,7 +601,6 @@ impl ChunkWriter {
         debug!("try to find writable slice for chunk {}", self.chunk_idx);
         let read_guard = self.slices.read().await;
         debug!("get slices lock succeed");
-        let mut handles = vec![];
         for (iter_cnt, (_seq, sw)) in read_guard.iter().rev().enumerate() {
             let sw = sw.clone();
             if !sw.frozen() {
@@ -593,11 +612,12 @@ impl ChunkWriter {
                     return sw.clone();
                 }
                 if iter_cnt > 3 {
-                    handles.push(tokio::spawn(async move { sw.finish().await }))
+                    // TODO: review me
+                    sw.freeze();
+                    tokio::spawn(async move { sw.finish().await });
                 }
             }
         }
-        futures::future::join_all(handles).await;
         drop(read_guard);
 
         let engine = self.engine.upgrade().expect("engine should not be dropped");
@@ -617,6 +637,7 @@ impl ChunkWriter {
             total_slice_counter: self.total_slice_counter.clone(),
             start_at: Instant::now(),
         });
+
         let mut write_guard = self.slices.write().await;
         write_guard.insert(seq, sw.clone());
         sw
