@@ -243,15 +243,6 @@ impl SliceBuffer {
                             );
                             page.copy_to_writer(page_offset, current_page_to_read_len, &mut cursor)
                                 .await?;
-
-                            // let page_slice = page.as_slice();
-                            // dst[total_read_len..(total_read_len +
-                            // current_page_to_read_len)]
-                            //     .copy_from_slice(
-                            //         &page_slice
-                            //             [page_offset..(page_offset +
-                            // current_page_to_read_len)],
-                            //     );
                         } else {
                             // it is a hole, we should pad zero to the dst.
                             for i in total_read_len..total_read_len + current_block_to_read_len {
@@ -292,12 +283,12 @@ impl SliceBuffer {
             return InvalidSliceBufferWriteOffsetSnafu.fail()?;
         }
 
-        // debug_assert!(
-        //     offset >= self.flushed_length,
-        //     "offset: {} should be greater than flushed length: {}",
-        //     offset,
-        //     self.flushed_length
-        // );
+        debug_assert!(
+            offset >= self.flushed_length,
+            "offset: {} should be greater than flushed length: {}",
+            offset,
+            self.flushed_length
+        );
 
         let mut total_write_len = 0;
         while total_write_len < expected_write_len {
@@ -333,10 +324,6 @@ impl SliceBuffer {
                 page.copy_from_reader(page_offset, to_write_page_len, &mut reader)
                     .await?;
 
-                // let page_slice = page.as_mut_slice();
-                // page_slice[page_offset..(page_offset + to_write_page_len)]
-                //     .copy_from_slice(&data[total_write_len..(total_write_len +
-                // to_write_page_len)]);
                 total_page_write_len += to_write_page_len;
                 total_write_len += to_write_page_len;
                 block.update_len(max(block.get_len(), block_offset + total_page_write_len));

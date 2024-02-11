@@ -179,7 +179,6 @@ impl Page {
             Page::Disk(page) => page.copy_to_writer(offset, length, writer).await,
         }
     }
-
     pub(crate) async fn copy_from_reader<R>(
         &self,
         offset: usize,

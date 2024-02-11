@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::{
     fmt::{Display, Formatter},
     io::Cursor,
@@ -149,7 +150,6 @@ impl Page {
             .context(UnknownIOSnafu)?;
         Ok(())
     }
-
     pub(crate) async fn copy_from_reader<R>(
         &self,
         offset: usize,
