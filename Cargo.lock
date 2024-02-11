@@ -360,19 +360,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compat"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f68a707c1feb095d8c07f8a65b9f506b117d30af431cab89374357de7c11461b"
-dependencies = [
- "futures-core",
- "futures-io",
- "once_cell",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "async-lock"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,6 +560,16 @@ name = "bumpalo"
 version = "3.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f30e7476521f6f8af1a1c4c0b8cc94f0bee37d91763d0ca2665f299b6cd8aec"
+
+[[package]]
+name = "byte-pool"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2f1b21189f50b5625efa6227cf45e9d4cfdc2e73582df2b879e9689e78a7158"
+dependencies = [
+ "crossbeam-queue",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "bytecount"
@@ -965,6 +962,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-queue"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df0346b5d5e76ac2fe4e327c5fd1118d6be7c51dfb18f9b7922923f287471e35"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1164,6 +1170,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enum_dispatch"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f33313078bb8d4d05a2733a94ac4c2d8a0df9a2b84424ebf4f33bfc224a890e"
+dependencies = [
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.48",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1299,6 +1317,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmmap"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6099ab52d5329340a3014f60ca91bc892181ae32e752360d07be9295924dcb0b"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "enum_dispatch",
+ "fs4",
+ "memmapix",
+ "parse-display",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1336,6 +1371,18 @@ checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
 dependencies = [
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "fs4"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eeb4ed9e12f43b7fa0baae3f9cdda28352770132ef2e09a23760c29cae8bd47"
+dependencies = [
+ "async-trait",
+ "rustix",
+ "tokio",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -1858,18 +1905,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiseki-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "byte-pool",
+ "bytes",
+ "criterion",
+ "crossbeam-queue",
+ "dashmap",
+ "fmmap",
+ "futures",
+ "kiseki-types",
+ "kiseki-utils",
+ "lazy_static",
+ "log",
+ "opendal",
+ "rand",
+ "snafu 0.8.0",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "kiseki-types"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "byteorder",
+ "lazy_static",
+ "opendal",
+ "rangemap",
+ "serde",
+ "snafu 0.8.0",
+ "sonyflake",
+]
+
+[[package]]
 name = "kiseki-utils"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "lazy_static",
+ "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "proc-macro2",
+ "quote",
  "sentry",
+ "sentry-tracing",
  "serde",
  "snafu 0.8.0",
+ "sonyflake",
  "supports-color",
+ "syn 1.0.109",
+ "syn 2.0.48",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -1907,6 +2003,8 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "itertools 0.12.1",
+ "kiseki-storage",
+ "kiseki-types",
  "kiseki-utils",
  "lazy_static",
  "libc",
@@ -1914,7 +2012,6 @@ dependencies = [
  "metrics",
  "moka",
  "num_cpus",
- "once_cell",
  "opendal",
  "procfs",
  "rand",
@@ -2130,6 +2227,15 @@ name = "memchr"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "523dc4f511e55ab87b694dc30d0f820d60906ef06413f93d4d7a1385599cc149"
+
+[[package]]
+name = "memmapix"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f517ab414225d5f1755bd284d9545bd08a72a3958b3c6384d72e95de9cc1a1d3"
+dependencies = [
+ "rustix",
+]
 
 [[package]]
 name = "metrics"
@@ -2418,12 +2524,11 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.44.1"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc0ad72f7b44ca4ae59d27ea151fdc6f37305cf6efe099bdaedbb30ec34579c0"
+checksum = "3350be0d4ba326017ce22c98a9e94d21b069160fcd95bbe6c2555dac4e93c47a"
 dependencies = [
  "anyhow",
- "async-compat",
  "async-trait",
  "backon",
  "base64 0.21.7",
@@ -2436,9 +2541,7 @@ dependencies = [
  "log",
  "md-5",
  "once_cell",
- "parking_lot 0.12.1",
  "percent-encoding",
- "pin-project",
  "quick-xml 0.30.0",
  "reqsign",
  "reqwest",
@@ -2685,6 +2788,32 @@ dependencies = [
  "redox_syscall 0.4.1",
  "smallvec",
  "windows-targets 0.48.5",
+]
+
+[[package]]
+name = "parse-display"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6509d08722b53e8dafe97f2027b22ccbe3a5db83cb352931e9716b0aa44bc5c"
+dependencies = [
+ "once_cell",
+ "parse-display-derive",
+ "regex",
+]
+
+[[package]]
+name = "parse-display-derive"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68517892c8daf78da08c0db777fcc17e07f2f63ef70041718f8a7630ad84f341"
+dependencies = [
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "regex-syntax 0.7.5",
+ "structmeta",
+ "syn 2.0.48",
 ]
 
 [[package]]
@@ -3209,6 +3338,12 @@ name = "regex-syntax"
 version = "0.6.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f162c6dd7b008981e4d40210aca20b4bd0f9b60ca9271061b07f78537722f2e1"
+
+[[package]]
+name = "regex-syntax"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbb5fb1acd8a1a18b3dd5be62d25485eb770e05afb408a9627d14d451bae12da"
 
 [[package]]
 name = "regex-syntax"
@@ -3891,6 +4026,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "stable_deref_trait"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
+
+[[package]]
 name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3901,6 +4042,29 @@ name = "strsim"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73473c0e59e6d5812c5dfe2a064a6444949f089e20eec9a2e5506596494e4623"
+
+[[package]]
+name = "structmeta"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78ad9e09554f0456d67a69c1584c9798ba733a5b50349a6c0d0948710523922d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "structmeta-derive",
+ "syn 2.0.48",
+]
+
+[[package]]
+name = "structmeta-derive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a60bcaff7397072dca0017d1db428e30d5002e00b6847703e2e42005c95fbe00"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.48",
+]
 
 [[package]]
 name = "strum"
@@ -4518,9 +4682,9 @@ checksum = "711b9620af191e0cdc7468a8d14e709c3dcdb115b36f838e601583af800a370a"
 
 [[package]]
 name = "uuid"
-version = "1.6.1"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e395fcf16a7a3d8127ec99782007af141946b4795001f876d54fb0d55978560"
+checksum = "f00cc9702ca12d3c81455259621e676d0f7251cec66a21e98fe2e9a37db93b2a"
 dependencies = [
  "getrandom",
  "serde",

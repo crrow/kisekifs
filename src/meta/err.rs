@@ -1,12 +1,10 @@
+use kiseki_types::ino::Ino;
 use libc::c_int;
 use opendal::ErrorKind;
 use snafu::{Location, Snafu};
 use tracing::error;
 
-use crate::{
-    common::err::ToErrno,
-    meta::types::{Ino, SliceKey},
-};
+use crate::common::err::ToErrno;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -65,28 +63,21 @@ pub enum MetaError {
     ErrLibc {
         kind: libc::c_int,
     },
-    ErrInvalidSliceBuf {
-        #[snafu(implicit)]
-        location: Location,
-    },
     ErrAsyncTimeout {
         source: tokio::time::error::Elapsed,
         #[snafu(implicit)]
         location: Location,
     },
 
-    FailedToParseSliceKey {
-        str: String,
-        source: std::num::ParseIntError,
-        #[snafu(implicit)]
-        location: Location,
+    ErrInternalSliceError {
+        source: kiseki_types::slice::Error,
     },
+}
 
-    InvalidSliceKeyStr {
-        str: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
+impl From<kiseki_types::slice::Error> for MetaError {
+    fn from(value: kiseki_types::slice::Error) -> Self {
+        Self::ErrInternalSliceError { source: value }
+    }
 }
 
 impl From<MetaError> for crate::common::err::Error {
@@ -121,10 +112,8 @@ impl ToErrno for MetaError {
                 libc::EIO
             }
             MetaError::ErrLibc { kind } => *kind,
-            MetaError::ErrInvalidSliceBuf { .. } => libc::EINTR,
             MetaError::ErrAsyncTimeout { .. } => libc::EINTR,
-            MetaError::FailedToParseSliceKey { .. } => libc::EINTR,
-            MetaError::InvalidSliceKeyStr { .. } => libc::EINTR,
+            MetaError::ErrInternalSliceError { .. } => libc::EINTR,
         }
     }
 }

@@ -1,20 +1,19 @@
 use std::{fmt::Debug, sync::Arc, time::SystemTime};
 
 use dashmap::DashMap;
+use kiseki_storage::slice_buffer::SliceBufferWrapper;
+use kiseki_types::{ino::Ino, slice::SliceID, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
 use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    meta::{
-        engine::MetaEngine,
-        types::{Ino, SliceID},
-    },
+    meta::engine::MetaEngine,
     vfs::{
         err::Result,
         storage::{
             buffer::ReadBuffer, new_juice_builder, reader::FileReadersRef, writer::FileWritersRef,
-            Cache, WriteBuffer, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_PAGE_SIZE,
+            Cache, WriteBuffer,
         },
     },
 };
@@ -52,9 +51,9 @@ impl Default for Config {
         Self {
             capacity: 100 << 10,
             total_buffer_capacity: DEFAULT_BUFFER_CAPACITY, // 300MB
-            chunk_size: DEFAULT_CHUNK_SIZE,                 // 64MB
-            block_size: DEFAULT_BLOCK_SIZE,                 // 4MB
-            page_size: DEFAULT_PAGE_SIZE,                   // 64KB
+            chunk_size: CHUNK_SIZE,                         // 64MB
+            block_size: BLOCK_SIZE,                         // 4MB
+            page_size: PAGE_SIZE,                           // 64KB
         }
     }
 }
@@ -105,6 +104,10 @@ impl Engine {
             self.cache.clone(),
             self.object_storage.clone(),
         )
+    }
+
+    pub(crate) fn new_slice_buffer_wrapper(&self) -> SliceBufferWrapper {
+        SliceBufferWrapper::new(self.object_storage.clone())
     }
 
     pub(crate) fn new_read_buffer(&self, sid: SliceID, length: usize) -> ReadBuffer {

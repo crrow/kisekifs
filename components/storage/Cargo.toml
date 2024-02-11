@@ -1,0 +1,43 @@
+[package]
+name = "kiseki-storage"
+version = "0.1.0"
+edition = "2021"
+description = "The core storage implementation"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+lazy_static.workspace = true
+snafu.workspace = true
+opendal.workspace =true
+futures.workspace = true
+bytes.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+
+kiseki-utils = {path = "../../components/utils"}
+kiseki-types = {path = "../../components/types"}
+
+rand = "0.8.5"
+log = "0.4.20"
+byte-pool = "0.2.4"
+crossbeam-queue = "0.3.11"
+fmmap = {version = "0.3.3", features = ["tokio","tokio-async"]}
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+
+kiseki-utils = {path = "../../components/utils"}
+
+uuid = "1.7.0"
+
+[[bench]]
+name = "bench_main"
+harness = false
+path = "benches/bench_main.rs"

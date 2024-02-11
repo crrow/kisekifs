@@ -22,10 +22,14 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
+use kiseki_types::{
+    ino::{Ino, CONTROL_INODE, ROOT_INO},
+    MAX_FILE_SIZE,
+};
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{location, Location, ResultExt};
 use tokio::time::Instant;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, instrument, trace};
 
 use crate::{
     common::{err::ToErrno, new_fs_sto, new_memory_sto},
@@ -39,7 +43,7 @@ use crate::{
         config::VFSConfig,
         err::{ErrLIBCSnafu, JoinSnafu, Result},
         handle::Handle,
-        storage::{Engine, MAX_FILE_SIZE},
+        storage::Engine,
         VFSError::ErrLIBC,
         FH,
     },
@@ -538,12 +542,9 @@ impl KisekiVFS {
         _flags: i32,
         _lock: Option<u64>,
     ) -> Result<Bytes> {
-        trace!(
+        debug!(
             "fs:read with ino {:?} fh {:?} offset {:?} size {:?}",
-            ino,
-            fh,
-            offset,
-            size
+            ino, fh, offset, size
         );
 
         if ino.is_special() {
@@ -569,6 +570,10 @@ impl KisekiVFS {
         self.data_engine.flush_if_exists(ino).await?;
         let mut buf = vec![0u8; size as usize];
         let _read_len = fr.read(offset as usize, buf.as_mut_slice()).await?;
+        debug!(
+            "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: {:?}",
+            ino, fh, offset, size, _read_len
+        );
         Ok(Bytes::from(buf))
     }
 

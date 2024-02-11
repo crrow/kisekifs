@@ -11,6 +11,13 @@ use std::{
 };
 
 use dashmap::DashMap;
+use kiseki_storage::slice_buffer::SliceBufferWrapper;
+use kiseki_types::{
+    cal_chunk_idx, cal_chunk_offset,
+    ino::Ino,
+    slice::{Slice, EMPTY_SLICE_ID},
+};
+use kiseki_utils::readable_size::ReadableSize;
 use libc::EIO;
 use scopeguard::defer;
 use snafu::{OptionExt, ResultExt};
@@ -21,18 +28,14 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, instrument, Instrument};
 
 use crate::{
     common, meta,
-    meta::{
-        engine::MetaEngine,
-        types::{Ino, EMPTY_SLICE_ID},
-    },
+    meta::engine::MetaEngine,
     vfs::{
         err::{ErrLIBCSnafu, InvalidInoSnafu, Result},
-        handle,
-        storage::{cal_chunk_idx, cal_chunk_offset, Engine, EngineConfig, WriteBuffer},
+        storage::{Engine, EngineConfig, WriteBuffer},
     },
 };
 
@@ -166,7 +169,7 @@ impl FileWriter {
             match r {
                 Ok(r) => match r {
                     Ok(wl) => {
-                        debug!("write {} KiB", wl / 1024);
+                        debug!("write {}", ReadableSize(wl as u64));
                         write_len += wl
                     }
                     Err(_e) => {
@@ -377,7 +380,7 @@ impl ChunkWriterBackgroundTask {
             self.has_written.store(true, Ordering::Release);
         }
         debug!(
-            "start try clean up loop on ino {} chunk {}",
+            "ChunkWriterBackgroundTask start on inode: {} chunk {}",
             self.ino, self.chunk_idx
         );
 
@@ -395,7 +398,7 @@ impl ChunkWriterBackgroundTask {
                     if self.cw.write_cnt.load(Ordering::Acquire) == 0 {
                         // no one is writing, we can free this chunk writer.
                         debug!(
-                            "exit the ChunkWriterBackgroundTask on ino {} chunk {}",
+                            "no SliceWriter alive and no writer, exit ChunkWriterBackgroundTask: ino: {} chunk: {}",
                             self.ino, self.chunk_idx,
                         );
                         return;
@@ -444,6 +447,7 @@ impl ChunkWriterBackgroundTask {
                         meta_slice,
                         mtime,
                     )
+                    .in_current_span()
                     .await
                 {
                     debug!(
@@ -527,8 +531,8 @@ impl ChunkWriter {
         defer!(self.write_cnt.fetch_sub(1, Ordering::AcqRel););
 
         debug!(
-            "write {} KiB to chunk {}",
-            data.len() / 1024,
+            "try to write {} to chunk {}",
+            ReadableSize(data.len() as u64),
             self.chunk_idx
         );
         let slice = self.find_writable_slice(chunk_pos).await;
@@ -604,7 +608,8 @@ impl ChunkWriter {
             internal_seq: seq,
             slice_id_prepared: AtomicBool::new(false),
             chunk_start_offset: chunk_offset,
-            write_buffer: RwLock::new(engine.new_write_buffer()),
+            // write_buffer: RwLock::new(engine.new_write_buffer()),
+            write_buffer: RwLock::new(engine.new_slice_buffer_wrapper()),
             frozen: Arc::new(AtomicBool::new(false)),
             done: Arc::new(AtomicBool::new(false)),
             done_notify: Arc::new(Default::default()),
@@ -664,7 +669,8 @@ pub(crate) struct SliceWriter {
     // The chunk offset.
     chunk_start_offset: usize,
     // the underlying write buffer.
-    write_buffer: RwLock<WriteBuffer>,
+    // write_buffer: RwLock<WriteBuffer>,
+    write_buffer: RwLock<SliceBufferWrapper>,
     // before we flush the slice, we need to freeze it.
     frozen: Arc<AtomicBool>,
     // as long as we aren't done, we should try to flush this
@@ -702,6 +708,7 @@ impl SliceWriter {
 
     // return the current write len to this buffer,
     // the buffer total length, and the flushed length.
+    #[instrument(skip_all, name = "SliceWriter::write", fields(offset, len = ReadableSize(data.len() as u64).to_string()))]
     async fn write(
         self: &Arc<Self>,
         slice_offset: usize,
@@ -710,6 +717,8 @@ impl SliceWriter {
         let mut guard = self.write_buffer.write().await;
         let write_len = guard
             .write_at(slice_offset, data)
+            .in_current_span()
+            .await
             .expect("write data failed");
         self.last_modified.write().await.replace(Instant::now());
         Ok((write_len, guard.length(), guard.flushed_length()))
@@ -721,6 +730,7 @@ impl SliceWriter {
         debug!("do flush and release on {}", self.internal_seq);
         let mut guard = self.write_buffer.write().await;
         if guard.length() == 0 {
+            self.done.store(true, Ordering::Release);
             return Ok(());
         }
 
@@ -756,9 +766,9 @@ impl SliceWriter {
         Ok(())
     }
 
-    async fn to_meta_slice(self: &Arc<Self>) -> meta::types::Slice {
+    async fn to_meta_slice(self: &Arc<Self>) -> Slice {
         let guard = self.write_buffer.read().await;
-        meta::types::Slice::new_owned(
+        Slice::new_owned(
             self.chunk_start_offset,
             guard.get_slice_id(),
             guard.length(),

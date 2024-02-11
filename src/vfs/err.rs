@@ -1,14 +1,11 @@
 use std::time::Duration;
 
+use kiseki_storage::error::Error;
+use kiseki_types::ino::Ino;
 use libc::c_int;
 use snafu::{Location, Snafu};
 
-use crate::{
-    common,
-    common::err::ToErrno,
-    meta::{types::Ino, MetaError},
-    vfs::FH,
-};
+use crate::{common, common::err::ToErrno, meta::MetaError, vfs::FH};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -94,6 +91,9 @@ pub enum VFSError {
     ErrTimeout {
         timeout: Duration,
     },
+    ErrStorage {
+        source: kiseki_storage::error::Error,
+    },
 }
 
 impl From<VFSError> for common::err::Error {
@@ -108,6 +108,12 @@ impl From<VFSError> for common::err::Error {
 impl From<MetaError> for VFSError {
     fn from(value: MetaError) -> Self {
         Self::ErrMeta { source: value }
+    }
+}
+
+impl From<kiseki_storage::error::Error> for VFSError {
+    fn from(value: Error) -> Self {
+        Self::ErrStorage { source: value }
     }
 }
 

@@ -1,13 +1,9 @@
 mod attr;
 mod entry;
-mod ino;
-mod slice;
 
 pub use attr::*;
 pub use entry::*;
-pub use ino::*;
 use serde::{Deserialize, Serialize};
-pub use slice::*;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct DirStat {

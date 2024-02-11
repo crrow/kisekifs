@@ -6,9 +6,10 @@ mod write_cache;
 use std::{fmt::Debug, hash::Hash, sync::Arc};
 
 use async_trait::async_trait;
+use kiseki_types::slice::SliceKey;
 use opendal::Reader;
 
-use crate::vfs::{err::Result, storage::SliceKey};
+use crate::vfs::err::Result;
 
 pub fn new_juice_builder() -> juice_cache::JuiceFileCacheBuilder {
     juice_cache::JuiceFileCacheBuilder::default()

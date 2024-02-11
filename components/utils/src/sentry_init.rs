@@ -19,19 +19,18 @@ impl SentryConfig {
             format!("SENTRY_DSN_API is not a valid Sentry DSN value {}", e)
         })?;
 
-        let environment =
-            match dsn {
-                None => None,
-                Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
-                    |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
-                )?),
-            };
+        let environment = match dsn {
+            None => None,
+            Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
+                |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
+            )?),
+        };
 
         Ok(Self {
             dsn,
             environment,
             release: var("SENTRY_RELEASE")?,
-            traces_sample_rate: var_parsed("SENTRY_TRACES_SAMPLE_RATE")?.unwrap_or(0.0),
+            traces_sample_rate: var_parsed("SENTRY_TRACES_SAMPLE_RATE")?.unwrap_or(1.0),
         })
     }
 }
@@ -56,6 +55,8 @@ pub fn init_sentry() -> Option<ClientInitGuard> {
             return None;
         }
     };
+
+    println!("found sentry config: {:?}", config);
 
     let opts = sentry::ClientOptions {
         auto_session_tracking: true,

@@ -15,10 +15,11 @@
 use std::time::SystemTime;
 
 use fuser::{FileAttr, FileType};
+use kiseki_types::ino::{Ino, ROOT_INO};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::meta::{types::ino::*, util::UID_GID};
+use crate::meta::util::UID_GID;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InodeAttr {

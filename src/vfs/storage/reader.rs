@@ -5,13 +5,14 @@ use std::{
 
 use dashmap::DashMap;
 use itertools::Itertools;
+use kiseki_types::{
+    ino::Ino,
+    slice::{OverlookedSlicesRef, Slice, Slices},
+};
 use rangemap::RangeMap;
 use tracing::debug;
 
-use crate::{
-    meta::types::{Ino, OverlookedSlicesRef, Slice},
-    vfs::{err::Result, storage::Engine, FH},
-};
+use crate::vfs::{err::Result, storage::Engine, FH};
 
 impl Engine {
     /// Get the file reader for the given inode and file handle.
@@ -94,6 +95,11 @@ impl FileReader {
             expected_read_len
         };
 
+        debug!(
+            "{:?}, actual can read length: {}",
+            self.ino, expected_read_len
+        );
+
         // get the slice inside the chunk.
         let engine = self.engine.upgrade().expect("engine should not be dropped");
         let meta_engine = engine.meta_engine.clone();
@@ -111,10 +117,20 @@ impl FileReader {
             // then we get the range to read in current chunk.
             let current_read_range = chunk_pos..chunk_pos + max_can_read;
             // according to current chunk idx, we can get the slices.
-            let raw_slices = meta_engine
-                .read_slice(self.ino, chunk_idx)
-                .await?
-                .expect("slices should not be none");
+            let raw_slices = match meta_engine.read_slice(self.ino, chunk_idx).await {
+                Ok(v) => v,
+                Err(e) => {
+                    debug!("read slice error: {:?}", e);
+                    panic!("read slice error: {:?}", e);
+                }
+            };
+            let raw_slices = match raw_slices {
+                None => {
+                    debug!("no slice in chunk: {:?}", chunk_idx);
+                    return Ok(0);
+                }
+                Some(v) => v,
+            };
 
             for x in raw_slices.0.iter() {
                 debug!("find raw-slice in chunk: {:?}, slice: {:?}", chunk_idx, x);
@@ -181,10 +197,12 @@ enum VirtualSlice {
 
 #[cfg(test)]
 mod tests {
+    use kiseki_types::ino::ROOT_INO;
+
     use super::*;
     use crate::{
         common::{install_fmt_log, new_memory_sto},
-        meta::{types::ROOT_INO, Format, MetaConfig, MetaContext},
+        meta::{Format, MetaConfig, MetaContext},
         vfs::storage::EngineConfig,
     };
 

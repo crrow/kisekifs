@@ -5,17 +5,15 @@ use std::{
 };
 
 use bytesize::ByteSize;
+use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
 use opendal::Operator;
 use snafu::{ensure, ResultExt};
 use tracing::debug;
 
-use crate::{
-    meta::types::{SliceID, SliceKey, EMPTY_SLICE_ID},
-    vfs::{
-        err::{ErrLIBCSnafu, OpenDalSnafu, Result},
-        storage::{make_slice_object_key, Cache, EngineConfig},
-        VFSError,
-    },
+use crate::vfs::{
+    err::{ErrLIBCSnafu, OpenDalSnafu, Result},
+    storage::{Cache, EngineConfig},
+    VFSError,
 };
 
 pub(crate) struct ReadBuffer {
@@ -335,12 +333,13 @@ impl WriteBuffer {
         let futures = datas
             .into_iter()
             .map(|(k, v)| {
-                // let sto = sto.clone(); // Clone sto within the closure
-                let cache = self.cache.clone();
+                let sto = self.object_storage.clone(); // Clone sto within the closure
+                // let cache = self.cache.clone();
                 async move {
                     debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
-                    // let _ = sto.write(&k, v).await;
-                    let _ = cache.stage(k, Arc::new(v), true).await;
+                    let path = k.gen_path_for_object_sto();
+                    let _ = sto.write(&path, v).await;
+                    // let _ = cache.stage(k, Arc::new(v), true).await;
                 }
             })
             .collect::<Vec<_>>();
@@ -363,14 +362,6 @@ impl WriteBuffer {
 
     pub(crate) fn flushed_length(&self) -> usize {
         self.flushed_length
-    }
-
-    pub(crate) fn block_size(&self) -> usize {
-        self.config.block_size
-    }
-
-    pub(crate) fn chunk_size(&self) -> usize {
-        self.config.chunk_size
     }
 }
 
@@ -446,7 +437,7 @@ mod tests {
         assert_eq!(n, data.len());
         assert_eq!(wb.length(), data.len());
 
-        let offset = wb.block_size() - 3;
+        let offset = config.block_size - 3;
         let n = wb.write_at(offset, data).unwrap();
         assert_eq!(n, data.len());
         let size = offset + data.len();

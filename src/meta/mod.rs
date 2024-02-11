@@ -30,11 +30,10 @@ mod util;
 pub mod internal_nodes {
     use std::{collections::HashMap, time::Duration};
 
+    use kiseki_types::ino::*;
+
     use crate::meta::{
-        types::{
-            Entry, Ino, InodeAttr, CONFIG_INODE, CONTROL_INODE, LOG_INODE, MAX_INTERNAL_INODE,
-            STATS_INODE,
-        },
+        types::{Entry, InodeAttr},
         util::UID_GID,
     };
 

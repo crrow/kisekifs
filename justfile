@@ -42,6 +42,9 @@ alias b := bench
 @build-fs:
     cargo build --bin kiseki
 
+@build-release:
+    cargo build --release --bin kiseki
+
 alias sh := show-help
 @show-help:
     cargo run --bin kiseki help
@@ -56,7 +59,12 @@ alias sh-m := help-mount
 @mount:
     just clean
     just prepare
-    cargo run --color=always --bin kiseki mount
+    cargo run --color=always --bin kiseki mount --level debug
+
+@release-mount:
+    just clean
+    just prepare
+    cargo run --release --color=always --bin kiseki mount --no-log
 
 # ==================================================== umount
 
@@ -81,6 +89,8 @@ alias sh-f := help-format
 @clean:
     - rm -r /tmp/kiseki
     echo "Done"
+    - rm -r /tmp/kiseki-meta/
+    echo "Done"
 
 @prepare:
     mkdir -p /tmp/kiseki /tmp/kiseki-meta/
@@ -88,8 +98,12 @@ alias sh-f := help-format
 
 alias sw := seq-write
 @seq-write:
-    fio --name=jfs-test --directory=/tmp/kiseki --ioengine=libaio --rw=write --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+    - rm -r /tmp/kiseki/fio
+    mkdir -p /tmp/kiseki/fio
+    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=write --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
 
 alias rw := random-write
 @random-write:
-    fio --name=jfs-test --directory=/tmp/kiseki --ioengine=libaio --rw=randwrite --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+    - rm -r /tmp/kiseki/fio
+    mkdir -p /tmp/kiseki/fio
+    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=randwrite --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting

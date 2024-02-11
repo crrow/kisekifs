@@ -14,6 +14,7 @@
 
 use std::sync::atomic::Ordering;
 
+use kiseki_types::ino::*;
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};
@@ -21,7 +22,7 @@ use tracing::{debug, instrument};
 use crate::meta::{
     engine::{Counter, MetaEngine},
     err::*,
-    types::{DirStat, EntryInfo, Ino, InodeAttr},
+    types::{DirStat, EntryInfo, InodeAttr},
     Format,
 };
 

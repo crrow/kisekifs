@@ -27,6 +27,11 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
+use kiseki_types::{
+    ino::*,
+    slice::{Slice, SliceID, Slices, SLICE_BYTES},
+    CHUNK_SIZE,
+};
 use lazy_static::lazy_static;
 use opendal::{ErrorKind, Operator};
 use scopeguard::defer;
@@ -41,14 +46,10 @@ use crate::{
         engine_sto::generate_sto_entry_key_str,
         err::*,
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
-        types::{
-            DirStat, Entry, EntryInfo, FSStates, Ino, InodeAttr, Slice, SliceID, Slices, ROOT_INO,
-            SLICE_BYTES, TRASH_INODE,
-        },
+        types::{DirStat, Entry, EntryInfo, FSStates, InodeAttr},
         util::*,
         MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },
-    vfs::storage::DEFAULT_CHUNK_SIZE,
 };
 
 pub(crate) const INODE_BATCH: u64 = 1 << 10;
@@ -452,6 +453,7 @@ impl MetaEngine {
     }
 
     async fn stat_root_fs(&self) -> (FSStates, bool) {
+        use clippy_utilities::OverflowArithmetic;
         // we don't use result here to make sure we always return a FSStates.
         #[warn(unused_assignments)]
         // Parallelize calls to get_counter()
@@ -495,10 +497,14 @@ impl MetaEngine {
         let total_space = if format.capacity_in_bytes > 0 {
             min(format.capacity_in_bytes, used_space as u64)
         } else {
-            let mut v = 1 << 50;
+            let mut v: u64 = 1 << 50;
             let us = used_space as u64;
             while v * 8 < us * 10 {
-                v *= 2;
+                let (new_v, overflow) = v.overflowing_mul(2);
+                if overflow {
+                    break;
+                }
+                v = new_v;
             }
             v
         };
@@ -513,7 +519,11 @@ impl MetaEngine {
         } else {
             let mut available_inodes: u64 = 10 << 20;
             while available_inodes * 10 > (iused + available_inodes) * 8 {
-                available_inodes *= 2;
+                let (new_v, overflow) = available_inodes.overflowing_mul(2);
+                if overflow {
+                    break;
+                }
+                available_inodes = new_v;
             }
             available_inodes
         };
@@ -1201,6 +1211,7 @@ impl MetaEngine {
     fn touch_atime(&self, _ctx: &MetaContext, _inode: Ino) {}
 
     // Write put a slice of data on top of the given chunk.
+    #[instrument(skip(self, mtime), fields(inode=?inode, chunk_idx=?chunk_idx, chunk_pos=?chunk_pos, slice=?slice))]
     pub async fn write_slice(
         &self,
         inode: Ino,
@@ -1213,20 +1224,10 @@ impl MetaEngine {
             matches!(slice, Slice::Owned { .. }),
             "slice should be owned for writing slice"
         );
-        trace!(
+        debug!(
             "write-slice: with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
-            inode,
-            chunk_idx,
-            chunk_pos,
-            slice,
-            mtime
+            inode, chunk_idx, chunk_pos, slice, mtime
         );
-
-        // TODO: juicefs lock the open file here, should we also lock it ?
-        if let Some(mut open_file) = self.open_files.files.get_mut(&inode) {
-            // invalidate the cache.
-            open_file.chunks.remove(&chunk_idx);
-        }
 
         let mut attr = self.sto_get_attr(inode).await?.unwrap_or(
             InodeAttr::default()
@@ -1253,12 +1254,15 @@ impl MetaEngine {
 
         let mut dir_stat_length: i64 = 0;
         let mut dir_stat_space: i64 = 0;
-        let new_len = chunk_idx as u64 * DEFAULT_CHUNK_SIZE as u64
-            + chunk_pos as u64
-            + slice.get_size() as u64;
+        let new_len =
+            chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
         if new_len > attr.length {
             dir_stat_length = new_len as i64 - attr.length as i64;
             dir_stat_space = align4k(new_len - attr.length);
+            debug!(
+                "update inode: {} old_length: {} new_length: {}",
+                inode, attr.length, new_len
+            );
             attr.length = new_len;
         }
         let now = SystemTime::now();
@@ -1284,6 +1288,12 @@ impl MetaEngine {
         }
         self.update_parent_stats(inode, attr.parent, dir_stat_length, dir_stat_space)
             .await?;
+
+        // TODO: update the cache
+        if let Some(mut open_file) = self.open_files.files.get_mut(&inode) {
+            // invalidate the cache.
+            open_file.chunks.remove(&chunk_idx);
+        }
 
         Ok(())
     }

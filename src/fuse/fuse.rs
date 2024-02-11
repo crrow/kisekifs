@@ -22,6 +22,7 @@ use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
+use kiseki_types::ino::Ino;
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
@@ -30,10 +31,7 @@ use tracing::{debug, error, field, info, instrument, Instrument};
 use crate::{
     common::err::ToErrno,
     fuse::config::FuseConfig,
-    meta::{
-        types::{Entry, Ino},
-        MetaContext, MAX_NAME_LENGTH,
-    },
+    meta::{types::Entry, MetaContext, MAX_NAME_LENGTH},
     vfs::KisekiVFS,
 };
 
@@ -68,7 +66,7 @@ impl KisekiFuse {
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(fuse_config.async_work_threads)
             .thread_name("kiseki-fuse-async-runtime")
-            .thread_stack_size(3 * 1024 * 1024)
+            .thread_stack_size(32 << 20)
             .enable_all()
             .build()
             .with_whatever_context(|e| format!("unable to built tokio runtime {e} "))?;
@@ -451,13 +449,24 @@ impl Filesystem for KisekiFuse {
                 bytes_read = data.len();
                 reply.data(&data);
             }
-            Err(e) => reply.error(e.to_errno()),
+            Err(e) => {
+                error!("read {:?} {:?}", Ino(ino), e);
+                reply.error(e.to_errno())
+            }
         }
 
-        debug!("read {:?} {:?} {:?} {:?}", ino, fh, offset, bytes_read);
+        debug!(
+            "read {:?} FH: {:?} offset: {:?} read_count: {:?}",
+            Ino(ino),
+            fh,
+            offset,
+            bytes_read
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
+    // #[instrument(fields(req=_req.unique(), ino=ino, fh=fh, offset=offset,
+    // length=data.len(), pid=_req.pid(), name=field::Empty))]
     fn write(
         &mut self,
         _req: &Request<'_>,
@@ -492,7 +501,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
+    #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
     fn flush(&mut self, req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
         let ctx = MetaContext::from(req);
         match self.runtime.block_on(
