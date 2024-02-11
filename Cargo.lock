@@ -1913,6 +1913,7 @@ dependencies = [
  "bytes",
  "criterion",
  "crossbeam-queue",
+ "dashmap",
  "fmmap",
  "futures",
  "kiseki-types",

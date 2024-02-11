@@ -1,21 +1,28 @@
 use std::{
     fmt::{Display, Formatter},
+    io::Cursor,
     mem,
     ops::{Deref, DerefMut},
     ptr,
     sync::Arc,
 };
 
+use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
+use dashmap::DashMap;
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
-use tokio::{sync::Notify, time::Instant};
+use snafu::ResultExt;
+use tokio::{io::AsyncReadExt, sync::Notify, time::Instant};
 use tracing::debug;
+
+use crate::error::{DiskPoolMmapSnafu, UnknownIOSnafu};
 
 pub struct MemoryPagePool {
     page_size: usize,
     capacity: usize,
-    queue: ArrayQueue<Vec<u8>>,
+    queue: ArrayQueue<u64>,
+    pages: DashMap<u64, Vec<u8>>,
     notify: Notify,
 }
 
@@ -37,11 +44,13 @@ impl MemoryPagePool {
             page_size,
             capacity,
             queue: ArrayQueue::new(page_cnt),
+            pages: DashMap::with_capacity(page_cnt),
             notify: Default::default(),
         });
 
-        (0..page_cnt).for_each(|_| {
-            pool.queue.push(vec![0; page_size]).unwrap();
+        (0..page_cnt as u64).for_each(|page_id| {
+            pool.queue.push(page_id).unwrap();
+            pool.pages.insert(page_id, vec![0; page_size]);
         });
 
         debug!(
@@ -53,9 +62,8 @@ impl MemoryPagePool {
     }
 
     pub fn try_acquire_page(self: &Arc<Self>) -> Option<Page> {
-        let r = self.queue.pop()?;
         Some(Page {
-            data: mem::ManuallyDrop::new(r),
+            page_id: self.queue.pop()?,
             _pool: self.clone(),
         })
     }
@@ -67,7 +75,7 @@ impl MemoryPagePool {
             r = self.queue.pop();
         }
         Page {
-            data: mem::ManuallyDrop::new(r.unwrap()),
+            page_id: r.unwrap(),
             _pool: self.clone(),
         }
     }
@@ -76,8 +84,13 @@ impl MemoryPagePool {
         self.notify.notify_one();
     }
 
-    fn recycle(self: &Arc<Self>, data: Vec<u8>) {
-        self.queue.push(data).unwrap();
+    fn recycle(self: &Arc<Self>, page_id: u64) {
+        let mut data = self.pages.get_mut(&page_id).unwrap();
+        data.clear();
+        unsafe {
+            data.set_len(self.page_size);
+        }
+        self.queue.push(page_id).unwrap();
         self.notify_page_ready();
     }
 
@@ -113,32 +126,56 @@ impl Display for MemoryPagePool {
 /// When it is dropped the memory gets returned into the pool, and is not
 /// zeroed. If that is a concern, you must clear the data yourself.
 pub struct Page {
-    data: mem::ManuallyDrop<Vec<u8>>,
+    page_id: u64,
     _pool: Arc<MemoryPagePool>,
+}
+
+impl Page {
+    pub(crate) async fn copy_to_writer<W>(
+        &self,
+        offset: usize,
+        length: usize,
+        writer: &mut W,
+    ) -> crate::error::Result<()>
+    where
+        W: tokio::io::AsyncWrite + Unpin + ?Sized,
+    {
+        let data = self._pool.pages.get(&self.page_id).unwrap();
+        let data = data.value();
+        let slice = &data.as_slice()[offset..offset + length];
+        let mut cursor = Cursor::new(slice);
+        tokio::io::copy(&mut cursor, writer)
+            .await
+            .context(UnknownIOSnafu)?;
+        Ok(())
+    }
+
+    pub(crate) async fn copy_from_reader<R>(
+        &self,
+        offset: usize,
+        length: usize,
+        reader: &mut R,
+    ) -> crate::error::Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin + ?Sized,
+    {
+        let mut data = self._pool.pages.get_mut(&self.page_id).unwrap();
+        let slice = &mut data.as_mut_slice()[offset..offset + length];
+        let mut cursor = Cursor::new(slice);
+        tokio::io::copy(reader, &mut cursor)
+            .await
+            .context(UnknownIOSnafu)?;
+        Ok(())
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self._pool.page_size
+    }
 }
 
 impl Drop for Page {
     fn drop(&mut self) {
-        let mut data = mem::ManuallyDrop::into_inner(unsafe { ptr::read(&self.data) });
-        data.clear();
-        unsafe { data.set_len(self._pool.page_size) };
-        self._pool.recycle(data);
-    }
-}
-
-impl Deref for Page {
-    type Target = Vec<u8>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.data.deref()
-    }
-}
-
-impl DerefMut for Page {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.data.deref_mut()
+        self._pool.recycle(self.page_id);
     }
 }
 
@@ -157,7 +194,7 @@ mod tests {
 
         let pool = MemoryPagePool::new(128 << 10, 300 << 20);
         let page = pool.acquire_page().await;
-        assert_eq!(page.len(), 128 << 10);
+        assert_eq!(page.size(), 128 << 10);
         assert_eq!(pool.remain_page_cnt(), pool.total_page_cnt() - 1);
         drop(page);
         assert_eq!(pool.remain_page_cnt(), pool.total_page_cnt());
@@ -173,11 +210,13 @@ mod tests {
         for _ in 0..pool.total_page_cnt() {
             let pool = pool.clone();
             let handle = tokio::spawn(async move {
-                let mut page = pool.acquire_page().await;
+                let page = pool.acquire_page().await;
                 tokio::time::sleep(Duration::from_millis(1)).await;
-                let mut buf = page.as_mut_slice();
-                let write_len = buf.write(b"hello").unwrap();
-                assert_eq!(write_len, 5);
+                let mut cursor = Cursor::new(b"hello");
+                page.copy_from_reader(0, 5, &mut cursor).await.unwrap();
+                // let mut buf = page.as_mut_slice();
+                // let write_len = buf.write(b"hello").unwrap();
+                // assert_eq!(write_len, 5);
             });
             handles.push(handle);
         }

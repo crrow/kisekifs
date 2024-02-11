@@ -20,7 +20,7 @@ use crate::{
     error::{
         InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
     },
-    pool::{memory_pool::Page, GLOBAL_MEMORY_PAGE_POOL},
+    pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
 };
 
 // read_slice_from_object_storage will allocate memory in place and then drop
@@ -189,7 +189,7 @@ impl SliceBuffer {
     }
 
     /// read_at only for debug.
-    pub fn read_at(&self, offset: usize, dst: &mut [u8]) -> Result<usize> {
+    pub async fn read_at(&self, offset: usize, dst: &mut [u8]) -> Result<usize> {
         if offset >= self.length {
             return Ok(0);
         }
@@ -237,12 +237,21 @@ impl SliceBuffer {
                     }
                     Block::Data(db) => {
                         if let Some(page) = unsafe { db.pages.get_unchecked(page_idx) } {
-                            let page_slice = page.as_slice();
-                            dst[total_read_len..(total_read_len + current_page_to_read_len)]
-                                .copy_from_slice(
-                                    &page_slice
-                                        [page_offset..(page_offset + current_page_to_read_len)],
-                                );
+                            let mut cursor = Cursor::new(
+                                &mut dst
+                                    [total_read_len..(total_read_len + current_page_to_read_len)],
+                            );
+                            page.copy_to_writer(page_offset, current_page_to_read_len, &mut cursor)
+                                .await?;
+
+                            // let page_slice = page.as_slice();
+                            // dst[total_read_len..(total_read_len +
+                            // current_page_to_read_len)]
+                            //     .copy_from_slice(
+                            //         &page_slice
+                            //             [page_offset..(page_offset +
+                            // current_page_to_read_len)],
+                            //     );
                         } else {
                             // it is a hole, we should pad zero to the dst.
                             for i in total_read_len..total_read_len + current_block_to_read_len {
@@ -315,13 +324,19 @@ impl SliceBuffer {
                 if new_one {
                     self.total_page_cnt += 1;
                 }
-                let page_slice = page.as_mut_slice();
                 let to_write_page_len = min(
                     to_write_block_len - total_page_write_len,
                     PAGE_SIZE - page_offset, // don't exceed the page boundary.
                 );
-                page_slice[page_offset..(page_offset + to_write_page_len)]
-                    .copy_from_slice(&data[total_write_len..(total_write_len + to_write_page_len)]);
+                let mut reader =
+                    Cursor::new(&data[total_write_len..(total_write_len + to_write_page_len)]);
+                page.copy_from_reader(page_offset, to_write_page_len, &mut reader)
+                    .await?;
+
+                // let page_slice = page.as_mut_slice();
+                // page_slice[page_offset..(page_offset + to_write_page_len)]
+                //     .copy_from_slice(&data[total_write_len..(total_write_len +
+                // to_write_page_len)]);
                 total_page_write_len += to_write_page_len;
                 total_write_len += to_write_page_len;
                 block.update_len(max(block.get_len(), block_offset + total_page_write_len));
@@ -440,7 +455,7 @@ impl SliceBuffer {
                 self.flushed_length += data_block.length;
                 let key = key_gen(idx, data_block.length);
                 let sto = object_storage.clone();
-                let page_cnt = total_released_page_cnt.clone();
+                let wait_relase_page_cnt = total_released_page_cnt.clone();
                 let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
                     let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
                     let total_flush_data = data_block.length;
@@ -459,14 +474,17 @@ impl SliceBuffer {
                                 }
                             }
                             Some(page) => {
-                                let page_slice = page.as_slice();
-                                writer
-                                    .write_all(
-                                        &page_slice[page_offset..(page_offset + to_flush_len)],
-                                    )
-                                    .await
-                                    .context(UnknownIOSnafu)?;
-                                page_cnt.fetch_add(1, Ordering::AcqRel);
+                                page.copy_to_writer(page_offset, to_flush_len, &mut writer)
+                                    .await?;
+
+                                // let page_slice = page.as_slice();
+                                // writer
+                                //     .write_all(
+                                //         &page_slice[page_offset..(page_offset + to_flush_len)],
+                                //     )
+                                //     .await
+                                //     .context(UnknownIOSnafu)?;
+                                wait_relase_page_cnt.fetch_add(1, Ordering::AcqRel);
                             }
                         }
                         current_flush_data += to_flush_len;
@@ -552,7 +570,7 @@ impl Block {
         if let Block::Data(db) = self {
             let mut new_one = false;
             if matches!(db.pages[page_idx], None) {
-                let page = GLOBAL_MEMORY_PAGE_POOL.acquire_page().await;
+                let page = GLOBAL_HYBRID_PAGE_POOL.acquire_page().await;
                 db.pages[page_idx] = Some(page);
                 new_one = true;
             };
@@ -636,7 +654,7 @@ mod tests {
         assert_eq!(slice_buffer.length, data.len());
 
         let mut dst = vec![0u8; 5];
-        let read_len = slice_buffer.read_at(0, dst.as_mut_slice()).unwrap();
+        let read_len = slice_buffer.read_at(0, dst.as_mut_slice()).await.unwrap();
         assert_eq!(read_len, 5);
         assert_eq!(dst, data);
 
@@ -646,13 +664,14 @@ mod tests {
         let mut dst = vec![0u8; 5];
         let read_len = slice_buffer
             .read_at(PAGE_SIZE - 3, dst.as_mut_slice())
+            .await
             .unwrap();
         assert_eq!(read_len, 5);
         assert_eq!(dst, data);
 
         // read a hole
         let mut dst = vec![0u8; 5];
-        let read_len = slice_buffer.read_at(5, dst.as_mut_slice()).unwrap();
+        let read_len = slice_buffer.read_at(5, dst.as_mut_slice()).await.unwrap();
         assert_eq!(read_len, 5);
         assert_eq!(dst, vec![0u8; 5]);
     }
@@ -706,7 +725,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-        // we should be able to write the next block
+                                                                               // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

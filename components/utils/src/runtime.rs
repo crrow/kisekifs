@@ -17,7 +17,7 @@ pub fn handle() -> tokio::runtime::Handle {
     GLOBAL_RUNTIME.handle().clone()
 }
 
-pub(crate) fn spawn<F>(future: F) -> JoinHandle<F::Output>
+pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
@@ -26,7 +26,7 @@ where
 }
 
 #[allow(dead_code)]
-pub(crate) fn spawn_blocking<F, R>(func: F) -> JoinHandle<R>
+pub fn spawn_blocking<F, R>(func: F) -> JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -35,6 +35,6 @@ where
 }
 
 #[allow(dead_code)]
-pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+pub fn block_on<F: Future>(future: F) -> F::Output {
     GLOBAL_RUNTIME.block_on(future)
 }

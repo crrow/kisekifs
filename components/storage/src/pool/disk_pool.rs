@@ -16,12 +16,9 @@ use tokio::{
 };
 use tracing::debug;
 
-use crate::{
-    error::{DiskPoolMmapSnafu, Result, UnknownIOSnafu},
-    pool::memory_pool::{MemoryPagePool, Page},
-};
+use crate::error::{DiskPoolMmapSnafu, Result, UnknownIOSnafu};
 
-struct DiskPagePool {
+pub(crate) struct DiskPagePool {
     // the file path of the pool.
     filepath: PathBuf,
     // the size of each page.
@@ -37,11 +34,11 @@ struct DiskPagePool {
 }
 
 impl DiskPagePool {
-    pub async fn new<P: AsRef<Path>>(
+    pub(crate) async fn new<P: AsRef<Path>>(
         path: P,
         page_size: usize,
         capacity: usize,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Arc<DiskPagePool>> {
         let start = Instant::now();
         debug_assert!(
             page_size > 0 && capacity > 0 && capacity % page_size == 0 && capacity > page_size,
@@ -77,31 +74,31 @@ impl DiskPagePool {
         }))
     }
 
-    pub fn try_acquire_page(self: &Arc<Self>) -> Option<FilePage> {
+    pub(crate) fn try_acquire_page(self: &Arc<Self>) -> Option<Page> {
         let page_id = self.queue.pop();
-        page_id.map(|page_id| FilePage {
+        page_id.map(|page_id| Page {
             page_id,
             pool: self.clone(),
         })
     }
 
-    pub async fn acquire_page(self: &Arc<Self>) -> FilePage {
+    pub(crate) async fn acquire_page(self: &Arc<Self>) -> Page {
         let mut page_id = self.queue.pop();
         while let None = page_id {
             self.notify.notified().await;
             page_id = self.queue.pop();
         }
-        FilePage {
+        Page {
             page_id: page_id.unwrap(),
             pool: self.clone(),
         }
     }
 
-    pub fn remain_page_cnt(&self) -> usize {
+    pub(crate) fn remain_page_cnt(&self) -> usize {
         self.queue.len()
     }
 
-    pub fn total_page_cnt(&self) -> usize {
+    pub(crate) fn total_page_cnt(&self) -> usize {
         self.capacity / self.page_size
     }
 }
@@ -119,13 +116,13 @@ impl Display for DiskPagePool {
     }
 }
 
-struct FilePage {
+pub(crate) struct Page {
     page_id: u64,
     pool: Arc<DiskPagePool>,
 }
 
-impl FilePage {
-    pub async fn copy_to_writer<W>(
+impl Page {
+    pub(crate) async fn copy_to_writer<W>(
         &self,
         offset: usize,
         length: usize,
@@ -144,7 +141,7 @@ impl FilePage {
         Ok(())
     }
 
-    pub async fn copy_from_reader<R>(
+    pub(crate) async fn copy_from_reader<R>(
         &self,
         offset: usize,
         length: usize,
@@ -168,7 +165,7 @@ impl FilePage {
     }
 }
 
-impl Drop for FilePage {
+impl Drop for Page {
     fn drop(&mut self) {
         self.pool.queue.push(self.page_id).unwrap();
         self.pool.notify.notify_one();
