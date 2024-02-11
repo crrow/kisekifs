@@ -128,15 +128,15 @@ impl HybridPagePool {
     }
     /// acquire_page will wait and  acquire a page from the page pool.
     pub async fn acquire_page(self: &Arc<Self>) -> Page {
-        if let Some(page) = self.try_acquire_page() {
-            return page;
+        if self.memory_pool.remain_page_cnt() > 0 {
+            if let Some(page) = self.try_acquire_page() {
+                return page;
+            }
         }
 
         if let Some(disk_pool) = &self.disk_pool {
-            return tokio::select! {
-                page = self.memory_pool.acquire_page() => Page::Memory(page),
-                page = disk_pool.acquire_page() =>  Page::Disk(page),
-            };
+            let page = disk_pool.acquire_page().await;
+            return Page::Disk(page);
         }
         let page = self.memory_pool.acquire_page().await;
         Page::Memory(page)
