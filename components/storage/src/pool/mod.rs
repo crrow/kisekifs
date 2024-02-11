@@ -22,7 +22,7 @@ lazy_static! {
             Arc::new(
                 PagePoolBuilder::default()
                     .with_page_size(PAGE_SIZE)
-                    .with_memory_capacity(300 << 20)
+                    .with_memory_capacity(1 << 30)
                     .with_disk_capacity(1 << 30)
                     .build()
                     .await

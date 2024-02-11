@@ -42,6 +42,9 @@ alias b := bench
 @build-fs:
     cargo build --bin kiseki
 
+@build-release:
+    cargo build --release --bin kiseki
+
 alias sh := show-help
 @show-help:
     cargo run --bin kiseki help

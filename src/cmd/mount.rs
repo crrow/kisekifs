@@ -214,7 +214,10 @@ impl MountArgs {
         Ok(mc)
     }
 
-    fn load_logging_opts(&self) -> LoggingOptions {
+    fn load_logging_opts(&self) -> Option<LoggingOptions> {
+        if self.no_log {
+            return None;
+        }
         let mut opts = LoggingOptions {
             dir: self.log_directory.clone(),
             level: self.level.clone(),
@@ -223,7 +226,7 @@ impl MountArgs {
             tracing_sample_ratio: self.tracing_sample_ratio,
             append_stdout: self.append_stdout,
         };
-        opts
+        Some(opts)
     }
 
     fn vfs_config(&self) -> VFSConfig {
@@ -232,9 +235,12 @@ impl MountArgs {
 
     pub fn run(self) -> Result<(), Whatever> {
         if self.foreground {
-            let opts = self.load_logging_opts();
-            let (_guard, _sentry_guard) =
-                kiseki_utils::logger::init_global_logging_without_runtime("kiseki-fuse", &opts);
+            let (_guard, _sentry_guard) = if let Some(opts) = self.load_logging_opts() {
+                kiseki_utils::logger::init_global_logging_without_runtime("kiseki-fuse", &opts)
+            } else {
+                (vec![], None)
+            };
+
             mount(self)?;
         }
         Ok(())
