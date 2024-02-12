@@ -228,6 +228,7 @@ impl FileWriter {
             self.notify_flush.notified().await;
         }
 
+        // TODO: refactor the flush logic
         while !self.chunk_writers.is_empty() {
             let handles = self
                 .chunk_writers

@@ -1,5 +1,5 @@
 [workspace]
-members = [ "components/types", "components/storage", "components/utils","tests"]
+members = [ "components/types", "components/storage", "components/utils","tests", "components/vfs"]
 [workspace.dependencies]
 snafu = "0.8.0"
 tracing = "0.1.40"
@@ -21,6 +21,8 @@ tokio-util = { version = "0.7.10", features = ["rt", "io"] }
 tokio-stream = "0.1.14"
 async-trait = "0.1.77"
 dashmap = "5.5.3"
+crossbeam-queue = "0.3.11"
+crossbeam = "0.8.4"
 
 [package]
 name = "kisekifs"

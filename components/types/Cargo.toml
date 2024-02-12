@@ -14,3 +14,4 @@ lazy_static.workspace = true
 snafu.workspace = true
 rangemap.workspace = true
 sonyflake.workspace = true
+tokio-util.workspace = true

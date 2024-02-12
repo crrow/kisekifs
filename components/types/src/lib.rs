@@ -30,3 +30,6 @@ pub fn new_mem_object_storage(root: &str) -> ObjectStorage {
 
 pub type BlockIndex = usize;
 pub type BlockSize = usize;
+
+pub type ChunkIndex = usize;
+pub type FileOffset = usize;

@@ -1,0 +1,22 @@
+[package]
+name = "kiseki-vfs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+kiseki-utils = {path = "../../components/utils"}
+kiseki-types = {path = "../../components/types"}
+kiseki-storage = {path = "../../components/storage"}
+
+tokio.workspace = true
+futures.workspace = true
+snafu.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+rangemap.workspace = true
+crossbeam-queue.workspace = true
+crossbeam.workspace = true
+sonyflake.workspace = true
+tokio-util.workspace = true
