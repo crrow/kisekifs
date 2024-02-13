@@ -1,22 +1,24 @@
 use std::{
     cmp::min,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt::{Display, Formatter},
     io::Cursor,
     ops::Range,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
         Arc,
     },
 };
 
-use dashmap::{mapref::one::Ref, DashMap};
+use dashmap::{
+    mapref::one::{Ref, RefMut},
+    DashMap,
+};
 use kiseki_storage::slice_buffer::SliceBuffer;
-use kiseki_types::slice::make_slice_object_key;
 use kiseki_types::{
     cal_chunk_idx, cal_chunk_offset,
     ino::Ino,
-    slice::{SliceID, EMPTY_SLICE_ID},
+    slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
     ChunkIndex, FileOffset, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE,
 };
 use kiseki_utils::readable_size::ReadableSize;
@@ -31,11 +33,45 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::err::{JoinErrSnafu, Result, StorageErrSnafu};
 
+type InternalSliceSeq = u64;
+
+#[derive(Debug, Default)]
+struct WriterPattern {
+    is_seq_count: AtomicIsize,
+    last_write_stop_offset: AtomicUsize,
+}
+
+impl WriterPattern {
+    const LIMIT: isize = 3;
+    fn monitor_write_at(&self, offset: usize, size: usize) {
+        let last_offset = self
+            .last_write_stop_offset
+            .swap(offset + size, Ordering::AcqRel);
+        let count = self.is_seq_count.load(Ordering::Acquire);
+        if last_offset == offset {
+            // seq
+            if count < Self::LIMIT {
+                // add weight on the seq side.
+                self.is_seq_count.fetch_add(1, Ordering::AcqRel);
+            }
+        } else {
+            if count + Self::LIMIT > 0 {
+                // add weight on the random side.
+                self.is_seq_count.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+    fn is_seq(&self) -> bool {
+        self.is_seq_count.load(Ordering::Acquire) >= 0
+    }
+}
+
 /// FileWriter is the entry point for writing data to a file.
 pub struct FileWriter {
     pub inode: Ino,
 
-    /*runtime*/
+    // runtime
+    pattern: WriterPattern,
     // the length of current file.
     length: AtomicUsize,
     // buffer writers.
@@ -48,7 +84,7 @@ pub struct FileWriter {
     // TODO: Optimization:
     // the new slice will overlap the old one, so when we flush,
     // we can only flush the necessary part.
-    slice_writers: DashMap<ChunkIndex, RangeMap<FileOffset, Arc<SliceWriter>>>,
+    slice_writers: DashMap<ChunkIndex, BTreeMap<InternalSliceSeq, Arc<SliceWriter>>>,
     // we may need to wait on the flush queue to flush the data to the remote storage.
     slice_flush_queue: mpsc::Sender<FlushReq>,
     // to tell the background don't send the buffer back to the map.
@@ -56,7 +92,7 @@ pub struct FileWriter {
     cancel_token: CancellationToken,
     seq_generate: sonyflake::Sonyflake,
 
-    /* dependencies */
+    // dependencies
     // the underlying object storage.
     object_storage: ObjectStorage,
 }
@@ -82,6 +118,7 @@ impl FileWriter {
         if expected_write_len == 0 {
             return Ok(0);
         }
+        self.pattern.monitor_write_at(offset, expected_write_len);
 
         let data_len = data.len();
         let data_ptr = data.as_ptr();
@@ -123,7 +160,7 @@ impl FileWriter {
 
         // 3. make flush request if we can
         for (sw, l) in slice_writers.into_iter() {
-            if let Some(req) = sw.make_background_flush_req().await {
+            if let Some(req) = sw.make_background_flush_req(false).await {
                 if let Err(e) = self.slice_flush_queue.send(req).await {
                     error!("failed to send flush request {e}");
                 }
@@ -164,48 +201,52 @@ impl FileWriter {
         expected_write_len: usize,
     ) -> Vec<(Arc<SliceWriter>, ChunkWriteCtx)> {
         let mut sws = Vec::with_capacity(2);
-        for l in locate_chunk(CHUNK_SIZE, offset, expected_write_len) {
-            let range = l.file_offset..l.file_offset + l.need_write_len;
-            let sw = match self.slice_writers.get_mut(&l.chunk_idx) {
-                None => {
-                    let mut cw = RangeMap::new();
-                    let sw = Arc::new(SliceWriter::new(
-                        self.seq_generate
-                            .next_id()
-                            .expect("should not fail when generate internal seq"),
-                        l.chunk_offset,
-                        self.object_storage.clone(),
-                    ));
-                    cw.insert(range, sw.clone());
-                    self.slice_writers.insert(l.chunk_idx, cw);
-                    sw
-                }
-                Some(mut chunk_writer) => {
-                    let off = if l.chunk_offset == 0 {
-                        0
-                    } else {
-                        l.chunk_offset - 1
-                    };
-                    // Attempt to retrieve an existing writer, handling both cases:
-                    match chunk_writer.get(&off) {
-                        Some(sw) if !sw.frozen.load(Ordering::Acquire) => sw.clone(), /* Use existing writer if not frozen */
-                        _ => {
-                            // Otherwise, create a new writer and insert it:
-                            let seq = self
-                                .seq_generate
-                                .next_id()
-                                .expect("should not fail when generate internal seq");
-                            let sw = Arc::new(SliceWriter::new(
-                                seq,
-                                l.chunk_offset,
-                                self.object_storage.clone(),
-                            ));
-                            chunk_writer.insert(range, sw.clone());
-                            sw
+        'cw_loop: for l in locate_chunk(CHUNK_SIZE, offset, expected_write_len) {
+            if self.pattern.is_seq() {
+                if let Some(cw) = self.slice_writers.get(&l.chunk_idx) {
+                    while let Some((_, sw)) = cw.iter().next_back() {
+                        let (flushed, length) =
+                            sw.get_flushed_length_and_total_write_length().await;
+                        if !sw.has_frozen() {
+                            if sw.offset_of_chunk + flushed <= l.chunk_offset
+                                && l.chunk_offset <= sw.offset_of_chunk + length
+                            {
+                                // we can write to this slice.
+                                sws.push((sw.clone(), l));
+                                continue 'cw_loop;
+                            }
                         }
                     }
                 }
-            };
+            }
+
+            // in random mode or we can't find a suitable slice writer.
+            // we need to create a new one.
+            let mut entry = self
+                .slice_writers
+                .entry(l.chunk_idx)
+                .or_insert(BTreeMap::new());
+
+            if !entry.is_empty() {
+                // we need to flush some for random write
+                for (_, sw) in entry.iter() {
+                    let sw = sw.clone();
+                    if let Some(req) = sw.make_background_flush_req(true).await {
+                        if let Err(e) = self.slice_flush_queue.send(req).await {
+                            error!("failed to send flush request {e}");
+                        }
+                    }
+                }
+            }
+
+            let sw = Arc::new(SliceWriter::new(
+                self.seq_generate
+                    .next_id()
+                    .expect("should not fail when generate internal seq"),
+                l.chunk_offset,
+                self.object_storage.clone(),
+            ));
+            entry.insert(sw._internal_seq, sw.clone());
             sws.push((sw, l));
         }
         sws
@@ -213,15 +254,16 @@ impl FileWriter {
 
     fn remove_done_slice_writer(self: &Arc<Self>) {
         let mut to_remove = Vec::new();
+
         for mut cw in self.slice_writers.iter_mut() {
             let chunk_idx = cw.key().clone();
             // show mut to make sure we get the right range as key.
             let mut cw = cw.value_mut();
             let keys = cw
                 .iter()
-                .filter_map(|(range, sw)| {
+                .filter_map(|(seq, sw)| {
                     if sw.has_done() {
-                        Some(range.clone())
+                        Some(seq.clone())
                     } else {
                         None
                     }
@@ -229,7 +271,7 @@ impl FileWriter {
                 .collect::<Vec<_>>();
 
             for k in keys {
-                cw.remove(k);
+                cw.remove(&k);
             }
             if cw.is_empty() {
                 to_remove.push(chunk_idx);
@@ -263,22 +305,23 @@ impl FileWriter {
 
         // win this contention, we are the one who flush.
         // mut the map, and move all slice writers to flush queue.
-        let chunk_writers = self
+        let chunk = self
             .slice_writers
             .iter_mut()
+            .filter(|e| !e.is_empty())
             .map(|mut e| {
                 // now no one can use the original chunk_idx every again.
                 // its ok we take the value out, since the background flusher won't put buffer
                 // back in we are in manually flushing.
                 let cw = e.value_mut();
-                std::mem::replace(cw, RangeMap::default())
+                std::mem::replace(cw, BTreeMap::default())
             })
             .collect::<Vec<_>>();
 
         // now new write requests will create new slice writer.
 
-        let mut sws = Vec::with_capacity(chunk_writers.len());
-        for cw in chunk_writers {
+        let mut sws = Vec::with_capacity(chunk.len());
+        for cw in chunk {
             // TODO: optimize, we can even do truncate on the slice buffer.
             for (_, sw) in cw {
                 if sw.can_flush() {
@@ -415,7 +458,7 @@ struct SliceWriter {
     // 2. Manual flush will set this to true.
     done: AtomicBool,
 
-    /* dependencies */
+    // dependencies
     // the underlying object storage.
     object_storage: ObjectStorage,
 }
@@ -463,7 +506,7 @@ impl SliceWriter {
     }
 
     // try_make_background_flush_req try to make flush req if we write enough data.
-    async fn make_background_flush_req(self: Arc<Self>) -> Option<FlushReq> {
+    async fn make_background_flush_req(self: Arc<Self>, early_flush: bool) -> Option<FlushReq> {
         if self.has_frozen() {
             return None;
         }
@@ -471,8 +514,8 @@ impl SliceWriter {
             return None;
         }
         let read_guard = self.slice_buffer.read().await;
-        let length = read_guard.len();
-        if length == CHUNK_SIZE {
+        let length = read_guard.length();
+        if length == CHUNK_SIZE || early_flush {
             if !self.freeze() {
                 // someone else has frozen it.
                 return None;
@@ -481,7 +524,7 @@ impl SliceWriter {
                 sw: self.clone(),
                 offset: length,
             });
-        } else if length - read_guard.flushed_len() > BLOCK_SIZE {
+        } else if length - read_guard.flushed_length() > BLOCK_SIZE {
             return Some(FlushReq::FlushFull(self.clone()));
         }
         None
@@ -530,6 +573,14 @@ impl SliceWriter {
     fn can_write(self: &Arc<Self>) -> bool {
         !self.frozen.load(Ordering::Acquire) && !self.done.load(Ordering::Acquire)
     }
+
+    // get the underlying write buffer's released length and total write length.
+    async fn get_flushed_length_and_total_write_length(self: &Arc<Self>) -> (usize, usize) {
+        let guard = self.slice_buffer.read().await;
+        let flushed_len = guard.flushed_length();
+        let write_len = guard.length();
+        (flushed_len, write_len)
+    }
 }
 
 impl Eq for SliceWriter {}
@@ -540,7 +591,7 @@ impl PartialEq for SliceWriter {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 struct ChunkWriteCtx {
     file_offset: usize,
     // write to which chunk

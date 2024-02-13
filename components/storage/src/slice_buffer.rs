@@ -347,11 +347,11 @@ impl SliceBuffer {
             .count()
     }
 
-    pub fn flushed_len(&self) -> usize {
+    pub fn flushed_length(&self) -> usize {
         self.flushed_length
     }
 
-    pub fn len(&self) -> usize {
+    pub fn length(&self) -> usize {
         self.length
     }
 
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-                                                                               // we should be able to write the next block
+        // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await
