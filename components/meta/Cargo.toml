@@ -26,6 +26,7 @@ byteorder.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
+kiseki-common = {path = "../../components/common"}
 
 rocksdb = { version = "0.22.0", features = ["lz4", "snappy"], optional = true }
 tikv-client = {version ="0.3.0", optional = true}

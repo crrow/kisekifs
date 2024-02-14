@@ -2119,6 +2119,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures",
+ "kiseki-common",
  "kiseki-types",
  "kiseki-utils",
  "opendal",

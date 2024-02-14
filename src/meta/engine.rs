@@ -34,6 +34,7 @@ use kiseki_types::{
     ino::*,
     internal_nodes::{InternalNode, TRASH_INODE_NAME},
     setting::Format,
+    slice,
     slice::{Slice, SliceID, Slices, SLICE_BYTES},
 };
 use lazy_static::lazy_static;
@@ -1344,7 +1345,9 @@ impl MetaEngine {
             }
         };
 
-        let slices = Arc::new(Slices::decode(&slice_info_buf)?);
+        // fixme
+        let slices: Slices = bincode::deserialize::<Slices>(&slice_info_buf).unwrap();
+        let slices = Arc::new(slices);
         // TODO: build cache.
         self.open_files
             .update_chunk_slices_info(inode, chunk_index, slices.clone());

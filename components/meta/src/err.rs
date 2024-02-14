@@ -24,25 +24,41 @@ pub enum Error {
         source: rocksdb::Error,
     },
 
-    /* Engine Error */
+    // Model Error
     ModelError {
+        #[snafu(implicit)]
         location: Location,
         source: model_err::Error,
     },
-}
 
-#[derive(Debug)]
-pub enum ModelKind {
-    Attr,
-    EntryInfo,
-    Symlink,
+    // Setting
+    #[snafu(display("FileSystem has not been initialized yet. Location: {}", location))]
+    UninitializedEngine {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    InvalidSetting {
+        #[snafu(implicit)]
+        location: Location,
+        key: Vec<u8>,
+    },
 }
 
 pub mod model_err {
-    use crate::err::ModelKind;
+    use std::string::FromUtf8Error;
+
     use kiseki_types::ino::Ino;
     use snafu::{location, Location, Snafu};
-    use std::string::FromUtf8Error;
+
+    #[derive(Debug)]
+    pub enum ModelKind {
+        Attr,
+        EntryInfo,
+        Symlink,
+        Setting,
+        Counter,
+        ChunkSlices,
+    }
 
     #[derive(Debug, Snafu)]
     #[snafu(visibility(pub))]

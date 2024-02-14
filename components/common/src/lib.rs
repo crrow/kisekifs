@@ -1,9 +1,9 @@
 pub const KISEKI: &str = "kiseki";
 
 pub const PAGE_BUFFER_SIZE: usize = 300 << 20; // 300MiB
-                                               // pub const PAGE_SIZE: usize = 64 << 10;
+// pub const PAGE_SIZE: usize = 64 << 10;
 pub const PAGE_SIZE: usize = 128 << 10; // 128 KiB
-                                        // The max block size is 4MB.
+// The max block size is 4MB.
 pub const BLOCK_SIZE: usize = 4 << 20; // 4 MiB
 
 pub const MIN_BLOCK_SIZE: usize = PAGE_SIZE; // 128 KiB

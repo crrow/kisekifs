@@ -9,8 +9,7 @@ use std::{
 
 use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
 use kiseki_types::slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID};
-use kiseki_utils::object_storage::ObjectStorage;
-use kiseki_utils::readable_size::ReadableSize;
+use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use snafu::ResultExt;
 use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
 use tracing::{debug, instrument, Instrument};
@@ -695,7 +694,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-                                                                               // we should be able to write the next block
+        // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

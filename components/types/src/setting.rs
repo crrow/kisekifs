@@ -1,6 +1,7 @@
+use std::fmt::Display;
+
 use kiseki_common::{BLOCK_SIZE, KISEKI};
 use serde::{Deserialize, Serialize};
-use std::fmt::Display;
 
 /// FsSetting is the setting of the filesystem.
 #[derive(Debug, Deserialize, Serialize, Clone)]

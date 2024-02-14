@@ -14,8 +14,7 @@
 
 use std::sync::atomic::Ordering;
 
-use kiseki_types::setting::Format;
-use kiseki_types::{attr::InodeAttr, entry::EntryInfo, ino::*};
+use kiseki_types::{attr::InodeAttr, entry::EntryInfo, ino::*, setting::Format};
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};
@@ -242,7 +241,8 @@ impl MetaEngine {
         // let format_key_str = Format::format_key_str();
         // match self.operator.blocking().read(&format_key_str) {
         //     Ok(buf) => {
-        //         let format = Format::parse_from(buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        //         let format =
+        // Format::parse_from(buf).context(ErrBincodeDeserializeFailedSnafu)?;
         //         Ok(Some(format))
         //     }
         //     Err(e) => {
