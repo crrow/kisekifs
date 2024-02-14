@@ -18,7 +18,7 @@ use fuser::FileType;
 use kiseki_types::ino::Ino;
 use serde::{Deserialize, Serialize};
 
-use crate::meta::types::InodeAttr;
+use kiseki_types::attr::InodeAttr;
 
 // Entry is an entry inside a directory.
 #[derive(Debug, Serialize, Deserialize, Clone)]

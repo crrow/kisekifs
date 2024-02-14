@@ -23,6 +23,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_types::{
+    attr::InodeAttr,
     ino::{Ino, CONTROL_INODE, ROOT_INO},
     MAX_FILE_SIZE,
 };

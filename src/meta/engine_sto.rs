@@ -19,10 +19,12 @@ use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};
 
+use kiseki_types::attr::InodeAttr;
+
 use crate::meta::{
     engine::{Counter, MetaEngine},
     err::*,
-    types::{DirStat, EntryInfo, InodeAttr},
+    types::{DirStat, EntryInfo},
     Format,
 };
 

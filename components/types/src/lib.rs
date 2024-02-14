@@ -1,8 +1,9 @@
+pub mod attr;
 pub mod ino;
 pub mod slice;
 
 pub const PAGE_BUFFER_SIZE: usize = 300 << 20; // 300MiB
-// pub const PAGE_SIZE: usize = 64 << 10;
+                                               // pub const PAGE_SIZE: usize = 64 << 10;
 pub const PAGE_SIZE: usize = 128 << 10;
 // The max block size is 4MB.
 pub const BLOCK_SIZE: usize = 4 << 20;

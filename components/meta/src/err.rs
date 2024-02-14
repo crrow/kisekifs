@@ -17,7 +17,7 @@ pub enum Error {
         source: tokio::task::JoinError,
     },
 
-    #[cfg(feature = "kv-rocksdb")]
+    #[cfg(feature = "meta-rocksdb")]
     RocksdbError {
         #[snafu(implicit)]
         location: Location,

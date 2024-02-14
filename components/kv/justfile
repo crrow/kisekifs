@@ -1,3 +1,0 @@
-test:
-    @echo "Running tests"
-    @cargo test --features kv-rocksdb   -- --nocapture

@@ -1,7 +1,5 @@
-mod attr;
 mod entry;
 
-pub use attr::*;
 pub use entry::*;
 use serde::{Deserialize, Serialize};
 

@@ -39,6 +39,8 @@ use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
+use kiseki_types::attr::InodeAttr;
+
 use crate::{
     common::err::ToErrno,
     meta::{
@@ -46,7 +48,7 @@ use crate::{
         engine_sto::generate_sto_entry_key_str,
         err::*,
         internal_nodes::{InternalNode, TRASH_INODE_NAME},
-        types::{DirStat, Entry, EntryInfo, FSStates, InodeAttr},
+        types::{DirStat, Entry, EntryInfo, FSStates},
         util::*,
         MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },
@@ -820,7 +822,7 @@ impl MetaEngine {
         }
 
         let parent = self.check_root(parent);
-        let (space, inodes) = (align4k(0), 1i64);
+        let (space, inodes) = (kiseki_utils::align4k(0), 1i64);
         self.check_quota(ctx, space, inodes, parent)?;
         let r = self
             .do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
@@ -1254,7 +1256,7 @@ impl MetaEngine {
             chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
         if new_len > attr.length {
             dir_stat_length = new_len as i64 - attr.length as i64;
-            dir_stat_space = align4k(new_len - attr.length);
+            dir_stat_space = kiseki_utils::align4k(new_len - attr.length);
             debug!(
                 "update inode: {} old_length: {} new_length: {}",
                 inode, attr.length, new_len

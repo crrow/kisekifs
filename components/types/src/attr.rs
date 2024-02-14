@@ -14,12 +14,10 @@
 
 use std::time::SystemTime;
 
+use crate::ino::{Ino, ROOT_INO};
 use fuser::{FileAttr, FileType};
-use kiseki_types::ino::{Ino, ROOT_INO};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-
-use crate::meta::util::UID_GID;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InodeAttr {
@@ -150,7 +148,7 @@ impl InodeAttr {
     // Enforces different access levels for owner, group, and others.
     // Grants full access to the root user.
     // Determines access based on user and group IDs.
-    pub(crate) fn access_perm(&self, uid: u32, gids: &Vec<u32>) -> u8 {
+    pub fn access_perm(&self, uid: u32, gids: &Vec<u32>) -> u8 {
         if uid == 0 {
             // If uid is 0 (root user), returns 0x7 (full access) unconditionally.
             return 0x7;
@@ -227,8 +225,8 @@ impl Default for InodeAttr {
             nlink: 1,
             length: 0,
             parent: Default::default(),
-            uid: UID_GID.0,
-            gid: UID_GID.1,
+            uid: kiseki_utils::uid(),
+            gid: kiseki_utils::gid(),
             rdev: 0,
             flags: 0,
             full: false,

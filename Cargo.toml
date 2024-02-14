@@ -7,7 +7,6 @@ members = [
     "tests",
     "components/vfs",
     "components/meta",
-    "components/kv"
 ]
 [workspace.dependencies]
 snafu = "0.8.0"
@@ -33,6 +32,8 @@ async-trait = "0.1.77"
 dashmap = "5.5.3"
 crossbeam-queue = "0.3.11"
 crossbeam = "0.8.4"
+fuser = { version = "0.14.0", features = ["libfuse","serializable"] }
+
 
 [package]
 name = "kisekifs"
@@ -64,7 +65,7 @@ path = "benches/bench_main.rs"
 
 
 [dependencies]
-fuser = { version = "0.14.0", features = ["libfuse","serializable"] }
+fuser.workspace = true
 snafu.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

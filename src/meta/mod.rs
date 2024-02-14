@@ -30,12 +30,10 @@ mod util;
 pub mod internal_nodes {
     use std::{collections::HashMap, time::Duration};
 
+    use kiseki_types::attr::InodeAttr;
     use kiseki_types::ino::*;
 
-    use crate::meta::{
-        types::{Entry, InodeAttr},
-        util::UID_GID,
-    };
+    use crate::meta::types::Entry;
 
     pub const LOG_INODE_NAME: &str = ".accesslog";
     pub const CONTROL_INODE_NAME: &str = ".control";
@@ -85,8 +83,8 @@ pub mod internal_nodes {
                     .set_perm(0o555)
                     .set_kind(fuser::FileType::Directory)
                     .set_nlink(2)
-                    .set_uid(UID_GID.0)
-                    .set_gid(UID_GID.1)
+                    .set_uid(kiseki_utils::uid())
+                    .set_gid(kiseki_utils::gid())
                     .set_full()
                     .to_owned(),
                 ttl: Some(entry_timeout.1),
