@@ -1,11 +1,14 @@
 use kiseki_common::ChunkIndex;
 use kiseki_types::{attr::InodeAttr, entry::EntryInfo, ino::Ino, setting::Format, slice::Slices};
+use std::sync::Arc;
 
 use crate::{backend::key::Counter, err::Result};
 
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
+
+pub type BackendRef = Arc<dyn Backend>;
 
 pub trait Backend {
     fn change_format(&self, format: &Format) -> Result<()>;

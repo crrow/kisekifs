@@ -23,6 +23,7 @@ dashmap.workspace = true
 serde.workspace = true
 bincode.workspace = true
 byteorder.workspace = true
+crossbeam.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}

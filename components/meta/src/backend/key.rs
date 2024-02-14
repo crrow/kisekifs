@@ -45,6 +45,17 @@ impl AsRef<[u8]> for Counter {
     }
 }
 
+impl Counter {
+    pub fn get_step(&self) -> usize {
+        match self {
+            Counter::NextTrash => 1,
+            Counter::NextInode => 1 << 10,
+            Counter::NextSlice => 4 << 10,
+            _ => panic!("Counter {:?} does not have a step", self),
+        }
+    }
+}
+
 pub fn attr(inode: Ino) -> Vec<u8> {
     format!("A{:0>8}I", inode.0).into_bytes()
 }
