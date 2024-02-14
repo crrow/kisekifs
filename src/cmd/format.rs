@@ -7,10 +7,10 @@ use tokio::runtime;
 use tracing::{debug, info, level_filters::LevelFilter, warn, Instrument};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
-use crate::{
-    meta,
-    meta::{Compression, MetaConfig},
-};
+use crate::{meta, meta::MetaConfig};
+use kiseki_types::setting::Format;
+use kiseki_utils::align::align_to_block;
+use kiseki_utils::readable_size::ReadableSize;
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
 const MANAGEMENT_OPTIONS_HEADER: &str = "MANAGEMENT";
@@ -52,17 +52,16 @@ pub struct FormatArgs {
     #[arg(long, short, help = "overwrite existing format", help_heading = FORMAT_OPTIONS_HEADER)]
     pub force: bool,
 
-    #[arg(long, help = "compression algorithm", help_heading = FORMAT_OPTIONS_HEADER)]
-    pub compression: Option<Compression>,
-
+    // #[arg(long, help = "compression algorithm", help_heading = FORMAT_OPTIONS_HEADER)]
+    // pub compression: Option<Compression>,
     #[arg(
         long,
         help = "size of block in KiB",
         help_heading = FORMAT_OPTIONS_HEADER,
-        default_value = "4096",
+        default_value = "4M",
         value_parser = validate_block_size,
     )]
-    pub block_size: u64,
+    pub block_size: String,
 
     #[arg(
         long,
@@ -88,7 +87,7 @@ pub struct FormatArgs {
         default_value = "1",
         value_parser = validate_trash_day,
     )]
-    pub trash_days: u64,
+    pub trash_days: usize,
 }
 impl FormatArgs {
     fn meta_config(&self) -> Result<MetaConfig, Whatever> {
@@ -101,17 +100,18 @@ impl FormatArgs {
         };
         Ok(mc)
     }
-    fn generate_format(&self) -> meta::Format {
-        let mut format = meta::Format::default();
+    fn generate_format(&self) -> Format {
+        let mut format = Format::default();
         if let Some(cap) = self.capacity {
-            format.capacity_in_bytes = (cap << 30) as u64;
+            format.max_capacity = Some(cap << 30);
         }
         if let Some(inodes) = self.inodes {
-            format.inodes = inodes as u64;
+            format.max_inodes = Some(inodes);
         }
         format.trash_days = self.trash_days;
-        format.block_size = fix_block_size(self.block_size);
-        format.compression = self.compression;
+        let block_size = ReadableSize::from_str(&self.block_size)
+            .expect("block size should be validated in the argument parser");
+        format.block_size = align_to_block(block_size.as_bytes() as usize);
         format.name = self.name.clone();
         format
     }
@@ -189,35 +189,11 @@ fn validate_name(name: &str) -> Result<String, String> {
 fn validate_trash_day(s: &str) -> Result<u64, String> {
     clap_num::number_range(s, 1, u64::MAX)
 }
+
 fn validate_block_size(s: &str) -> Result<u64, String> {
-    clap_num::number_range(s, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE)
-}
-
-const MIN_BLOCK_SIZE: u64 = 64;
-const MAX_BLOCK_SIZE: u64 = 16 << 10; // 16 KiB
-fn fix_block_size(s: u64) -> u64 {
-    let mut s = s;
-    let mut bits = 0;
-    while s > 1 {
-        bits += 1;
-        s >>= 1;
-    }
-
-    let adjusted_size = s << bits;
-
-    if adjusted_size < MIN_BLOCK_SIZE {
-        warn!(
-            "Block size is too small: {}, using {} instead",
-            adjusted_size, MIN_BLOCK_SIZE
-        );
-        MIN_BLOCK_SIZE
-    } else if adjusted_size > MAX_BLOCK_SIZE {
-        warn!(
-            "Block size is too large: {}, using {} instead",
-            adjusted_size, MAX_BLOCK_SIZE
-        );
-        MAX_BLOCK_SIZE
-    } else {
-        adjusted_size
-    }
+    clap_num::number_range(
+        s,
+        kiseki_common::MIN_BLOCK_SIZE as u64,
+        kiseki_common::MAX_BLOCK_SIZE as u64,
+    )
 }

@@ -14,10 +14,11 @@
 
 use std::time::SystemTime;
 
-use crate::ino::{Ino, ROOT_INO};
 use fuser::{FileAttr, FileType};
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+use crate::ino::{Ino, ROOT_INO};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InodeAttr {

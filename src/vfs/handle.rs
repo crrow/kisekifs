@@ -19,7 +19,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use kiseki_types::ino::Ino;
+use kiseki_types::{entry::Entry, ino::Ino};
 use libc::EPERM;
 use tokio::{
     sync::{Notify, RwLock},
@@ -27,12 +27,9 @@ use tokio::{
 };
 use tracing::instrument;
 
-use crate::{
-    meta::types::Entry,
-    vfs::{
-        err::{ErrLIBCSnafu, Result},
-        KisekiVFS,
-    },
+use crate::vfs::{
+    err::{ErrLIBCSnafu, Result},
+    KisekiVFS,
 };
 
 impl KisekiVFS {

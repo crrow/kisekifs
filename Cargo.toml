@@ -7,6 +7,7 @@ members = [
     "tests",
     "components/vfs",
     "components/meta",
+    "components/common",
 ]
 [workspace.dependencies]
 snafu = "0.8.0"
@@ -89,6 +90,7 @@ dashmap.workspace = true
 kiseki-utils = {path = "components/utils"}
 kiseki-types = {path = "components/types"}
 kiseki-storage = {path = "components/storage"}
+kiseki-common = {path = "components/common"}
 
 
 clap = { version = "4.4.16", features = ["derive"]}

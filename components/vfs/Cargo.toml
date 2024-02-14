@@ -9,6 +9,7 @@ edition = "2021"
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
 kiseki-storage = {path = "../../components/storage"}
+kiseki-common = {path = "../../components/common"}
 
 tokio.workspace = true
 futures.workspace = true

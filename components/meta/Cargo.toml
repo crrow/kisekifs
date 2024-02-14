@@ -20,6 +20,9 @@ bytes.workspace =true
 snafu.workspace = true
 sonyflake.workspace = true
 dashmap.workspace = true
+serde.workspace = true
+bincode.workspace = true
+byteorder.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}

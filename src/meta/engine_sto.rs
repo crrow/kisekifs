@@ -14,18 +14,16 @@
 
 use std::sync::atomic::Ordering;
 
-use kiseki_types::ino::*;
+use kiseki_types::setting::Format;
+use kiseki_types::{attr::InodeAttr, entry::EntryInfo, ino::*};
 use opendal::ErrorKind::NotFound;
 use snafu::ResultExt;
 use tracing::{debug, instrument};
 
-use kiseki_types::attr::InodeAttr;
-
 use crate::meta::{
     engine::{Counter, MetaEngine},
     err::*,
-    types::{DirStat, EntryInfo},
-    Format,
+    types::DirStat,
 };
 
 // TODO: create a new type for maintain the persistent logic.
@@ -224,48 +222,51 @@ impl MetaEngine {
 
     /// Load loads the existing setting of a formatted volume from meta service.
     pub async fn load_format(&self, check_version: bool) -> Result<Format> {
+        todo!();
         debug!("load_format");
-        let format = self.sto_get_format().await?;
-        let format = if let Some(format) = format {
-            if check_version {
-                format.check_version()?;
-            }
-            format
-        } else {
-            return Err(MetaError::ErrMetaHasNotBeenInitializedYet {});
-        };
-        let mut guard = self.format.write().await;
-        *guard = format.clone();
-        Ok(format)
+        // let format = self.sto_get_format().await?;
+        // let format = if let Some(format) = format {
+        //     if check_version {
+        //         format.check_version()?;
+        //     }
+        //     format
+        // } else {
+        //     return Err(MetaError::ErrMetaHasNotBeenInitializedYet {});
+        // };
+        // let mut guard = self.format.write().await;
+        // *guard = format.clone();
+        // Ok(format)
     }
     pub(crate) async fn sto_get_format(&self) -> Result<Option<Format>> {
-        let format_key_str = Format::format_key_str();
-        match self.operator.blocking().read(&format_key_str) {
-            Ok(buf) => {
-                let format = Format::parse_from(buf).context(ErrBincodeDeserializeFailedSnafu)?;
-                Ok(Some(format))
-            }
-            Err(e) => {
-                if e.kind() == NotFound {
-                    Ok(None)
-                } else {
-                    Err(e).context(ErrFailedToReadFromStoSnafu {
-                        key: format_key_str,
-                    })
-                }
-            }
-        }
+        todo!()
+        // let format_key_str = Format::format_key_str();
+        // match self.operator.blocking().read(&format_key_str) {
+        //     Ok(buf) => {
+        //         let format = Format::parse_from(buf).context(ErrBincodeDeserializeFailedSnafu)?;
+        //         Ok(Some(format))
+        //     }
+        //     Err(e) => {
+        //         if e.kind() == NotFound {
+        //             Ok(None)
+        //         } else {
+        //             Err(e).context(ErrFailedToReadFromStoSnafu {
+        //                 key: format_key_str,
+        //             })
+        //         }
+        //     }
+        // }
     }
     pub(crate) async fn sto_set_format(&self, format: &Format) -> Result<()> {
-        let format_key_str = Format::format_key_str();
-        let format_buf = format.encode();
-        self.operator
-            .write(&format_key_str, format_buf)
-            .await
-            .context(ErrFailedToWriteToStoSnafu {
-                key: format_key_str,
-            })?;
-        Ok(())
+        todo!()
+        // let format_key_str = Format::format_key_str();
+        // let format_buf = format.encode();
+        // self.operator
+        //     .write(&format_key_str, format_buf)
+        //     .await
+        //     .context(ErrFailedToWriteToStoSnafu {
+        //         key: format_key_str,
+        //     })?;
+        // Ok(())
     }
 
     pub(crate) async fn sto_increment_counter(&self, c: Counter, step: u64) -> Result<u64> {

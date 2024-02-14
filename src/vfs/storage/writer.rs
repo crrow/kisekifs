@@ -11,9 +11,9 @@ use std::{
 };
 
 use dashmap::DashMap;
+use kiseki_common::{cal_chunk_idx, cal_chunk_offset};
 use kiseki_storage::slice_buffer::SliceBufferWrapper;
 use kiseki_types::{
-    cal_chunk_idx, cal_chunk_offset,
     ino::Ino,
     slice::{Slice, EMPTY_SLICE_ID},
 };

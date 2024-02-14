@@ -27,10 +27,14 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use dashmap::DashMap;
 use fuser::FileType;
+use kiseki_common::CHUNK_SIZE;
 use kiseki_types::{
+    attr::InodeAttr,
+    entry::{Entry, EntryInfo},
     ino::*,
+    internal_nodes::{InternalNode, TRASH_INODE_NAME},
+    setting::Format,
     slice::{Slice, SliceID, Slices, SLICE_BYTES},
-    CHUNK_SIZE,
 };
 use lazy_static::lazy_static;
 use opendal::{ErrorKind, Operator};
@@ -39,16 +43,13 @@ use snafu::ResultExt;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use kiseki_types::attr::InodeAttr;
-
 use crate::{
     common::err::ToErrno,
     meta::{
-        config::{Format, MetaConfig},
+        config::MetaConfig,
         engine_sto::generate_sto_entry_key_str,
         err::*,
-        internal_nodes::{InternalNode, TRASH_INODE_NAME},
-        types::{DirStat, Entry, EntryInfo, FSStates},
+        types::{DirStat, FSStates},
         util::*,
         MetaContext, SetAttrFlags, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
     },
@@ -496,29 +497,23 @@ impl MetaEngine {
 
         let format = self.format.read().await;
 
-        let total_space = if format.capacity_in_bytes > 0 {
-            min(format.capacity_in_bytes, used_space as u64)
+        let total_space = if let Some(max_cap) = format.max_capacity {
+            min(max_cap as u64, used_space as u64)
         } else {
-            let mut v: u64 = 1 << 50;
-            let us = used_space as u64;
-            while v * 8 < us * 10 {
-                let (new_v, overflow) = v.overflowing_mul(2);
-                if overflow {
-                    break;
-                }
-                v = new_v;
-            }
-            v
+            // means we have unlimited space
+            10_000_000_000
         };
+
         let avail_space = total_space - used_space as u64;
 
-        let available_inodes = if format.inodes > 0 {
-            if iused > format.inodes {
+        let available_inodes = if let Some(max_inodes) = format.max_inodes {
+            if iused > max_inodes as u64 {
                 0
             } else {
-                format.inodes - iused
+                max_inodes as u64 - iused
             }
         } else {
+            // means we have unlimited inodes
             if iused > 10_000_000_000 {
                 0
             } else {
@@ -822,7 +817,7 @@ impl MetaEngine {
         }
 
         let parent = self.check_root(parent);
-        let (space, inodes) = (kiseki_utils::align4k(0), 1i64);
+        let (space, inodes) = (kiseki_utils::align::align4k(0), 1i64);
         self.check_quota(ctx, space, inodes, parent)?;
         let r = self
             .do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
@@ -1256,7 +1251,7 @@ impl MetaEngine {
             chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
         if new_len > attr.length {
             dir_stat_length = new_len as i64 - attr.length as i64;
-            dir_stat_space = kiseki_utils::align4k(new_len - attr.length);
+            dir_stat_space = kiseki_utils::align::align4k(new_len - attr.length);
             debug!(
                 "update inode: {} old_length: {} new_length: {}",
                 inode, attr.length, new_len
@@ -1472,12 +1467,5 @@ mod tests {
 
         let entry_infos = meta_engine.sto_list_entry_info(Ino(1)).await.unwrap();
         assert_eq!(entry_infos.len(), 2);
-    }
-
-    #[test]
-    fn find_possible_available_inode_cnt() {
-        let iused = 1000;
-        let available_inodes = find_available_inodes(iused);
-        println!("Available inodes: {}", available_inodes);
     }
 }

@@ -22,7 +22,7 @@ use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
-use kiseki_types::ino::Ino;
+use kiseki_types::{entry::Entry, ino::Ino};
 use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
@@ -31,7 +31,7 @@ use tracing::{debug, error, field, info, instrument, Instrument};
 use crate::{
     common::err::ToErrno,
     fuse::config::FuseConfig,
-    meta::{types::Entry, MetaContext, MAX_NAME_LENGTH},
+    meta::{MetaContext, MAX_NAME_LENGTH},
     vfs::KisekiVFS,
 };
 

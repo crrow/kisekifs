@@ -1,8 +1,9 @@
 use std::{fmt::Debug, sync::Arc, time::SystemTime};
 
 use dashmap::DashMap;
+use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
 use kiseki_storage::slice_buffer::SliceBufferWrapper;
-use kiseki_types::{ino::Ino, slice::SliceID, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
+use kiseki_types::{ino::Ino, slice::SliceID};
 use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};

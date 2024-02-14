@@ -22,10 +22,12 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
+use kiseki_common::MAX_FILE_SIZE;
 use kiseki_types::{
     attr::InodeAttr,
+    entry::Entry,
     ino::{Ino, CONTROL_INODE, ROOT_INO},
-    MAX_FILE_SIZE,
+    internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
 };
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{location, Location, ResultExt};
@@ -36,7 +38,6 @@ use crate::{
     common::{err::ToErrno, new_fs_sto, new_memory_sto},
     meta::{
         engine::{access, MetaEngine},
-        internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
         types::*,
         MetaContext, SetAttrFlags, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W,
     },

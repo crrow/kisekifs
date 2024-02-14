@@ -7,7 +7,7 @@ use std::{
     thread,
 };
 
-use kiseki_types::{PAGE_BUFFER_SIZE, PAGE_SIZE};
+use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
 

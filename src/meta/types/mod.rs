@@ -1,6 +1,3 @@
-mod entry;
-
-pub use entry::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]

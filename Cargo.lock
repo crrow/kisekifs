@@ -2106,10 +2106,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiseki-common"
+version = "0.1.0"
+
+[[package]]
 name = "kiseki-meta"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
+ "byteorder",
  "bytes",
  "dashmap",
  "futures",
@@ -2117,6 +2123,7 @@ dependencies = [
  "kiseki-utils",
  "opendal",
  "rocksdb",
+ "serde",
  "snafu 0.8.0",
  "sonyflake",
  "tempfile",
@@ -2137,6 +2144,7 @@ dependencies = [
  "dashmap",
  "fmmap",
  "futures",
+ "kiseki-common",
  "kiseki-types",
  "kiseki-utils",
  "lazy_static",
@@ -2159,6 +2167,7 @@ dependencies = [
  "bincode",
  "byteorder",
  "fuser",
+ "kiseki-common",
  "kiseki-utils",
  "lazy_static",
  "opendal",
@@ -2175,9 +2184,11 @@ name = "kiseki-utils"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "kiseki-common",
  "lazy_static",
  "num_cpus",
  "once_cell",
+ "opendal",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
@@ -2210,6 +2221,7 @@ dependencies = [
  "crossbeam-queue",
  "dashmap",
  "futures",
+ "kiseki-common",
  "kiseki-storage",
  "kiseki-types",
  "kiseki-utils",
@@ -2251,6 +2263,7 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "itertools 0.12.1",
+ "kiseki-common",
  "kiseki-storage",
  "kiseki-types",
  "kiseki-utils",

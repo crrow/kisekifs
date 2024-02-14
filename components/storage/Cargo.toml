@@ -22,6 +22,7 @@ dashmap.workspace = true
 crossbeam-queue.workspace = true
 crossbeam.workspace = true
 
+kiseki-common = {path = "../../components/common"}
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
 

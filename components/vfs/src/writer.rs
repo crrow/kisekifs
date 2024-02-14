@@ -14,14 +14,16 @@ use dashmap::{
     mapref::one::{Ref, RefMut},
     DashMap,
 };
+
+use kiseki_common::{
+    cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE,
+};
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
-    cal_chunk_idx, cal_chunk_offset,
     ino::Ino,
     slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
-    ChunkIndex, FileOffset, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE,
 };
-use kiseki_utils::readable_size::ReadableSize;
+use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use rangemap::RangeMap;
 use snafu::ResultExt;
 use tokio::{

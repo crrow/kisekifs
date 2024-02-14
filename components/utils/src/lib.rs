@@ -1,9 +1,9 @@
 use lazy_static::lazy_static;
 use users::{Groups, Users};
-mod align;
-pub use align::*;
+pub mod align;
 pub mod env;
 pub mod logger;
+pub mod object_storage;
 pub mod pyroscope_init;
 pub mod readable_size;
 pub mod runtime;
@@ -12,8 +12,6 @@ pub mod sentry_init;
 lazy_static::lazy_static! {
     pub static ref RANDOM_ID_GENERATOR: sonyflake::Sonyflake =
         sonyflake::Sonyflake::new().expect("failed to create id generator");
-
-    /* SOME GLOBAL STATIC VALUES*/
 
     /// the user ID for the user running the process.
     static ref UID: u32 = users::get_current_uid();
@@ -34,18 +32,20 @@ pub fn random_id() -> u64 {
 }
 
 #[inline(always)]
-pub fn uid() -> u32 {
-    *UID
-}
-#[inline(always)]
-pub fn gid() -> u32 {
-    *GID
-}
-#[inline(always)]
 pub fn num_cpus() -> usize {
     *NUM_CPUS
 }
 #[inline(always)]
 pub fn num_physical_cpus() -> usize {
     *NUM_PHYSICAL_CPUS
+}
+
+#[inline(always)]
+pub fn uid() -> u32 {
+    *UID
+}
+
+#[inline(always)]
+pub fn gid() -> u32 {
+    *GID
 }
