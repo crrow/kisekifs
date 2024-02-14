@@ -15,3 +15,8 @@ pub fn random_id() -> u64 {
         .next_id()
         .expect("failed to generate id")
 }
+
+pub mod num_cpus {
+    pub use num_cpus::get;
+    pub use num_cpus::get_physical;
+}

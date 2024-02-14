@@ -23,7 +23,7 @@
 
 alias c := check
 @check:
-    cargo check --all
+    cargo check --all --all-features
 
 alias t := test
 @test:

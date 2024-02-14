@@ -71,7 +71,6 @@ pub struct FileWriter {
     pub inode: Ino,
 
     // runtime
-    pattern: WriterPattern,
     // the length of current file.
     length: AtomicUsize,
     // buffer writers.
@@ -91,6 +90,11 @@ pub struct FileWriter {
     manually_flush: Arc<AtomicBool>,
     cancel_token: CancellationToken,
     seq_generate: sonyflake::Sonyflake,
+
+    // random write early flush
+    // when we reach the threshold, we should flush some flush to the remote storage.
+    pattern: WriterPattern,
+    early_flush_threshold: f64,
 
     // dependencies
     // the underlying object storage.
@@ -160,7 +164,7 @@ impl FileWriter {
 
         // 3. make flush request if we can
         for (sw, l) in slice_writers.into_iter() {
-            if let Some(req) = sw.make_background_flush_req(false).await {
+            if let Some(req) = sw.make_background_flush_req().await {
                 if let Err(e) = self.slice_flush_queue.send(req).await {
                     error!("failed to send flush request {e}");
                 }
@@ -229,14 +233,7 @@ impl FileWriter {
 
             if !entry.is_empty() {
                 // we need to flush some for random write
-                for (_, sw) in entry.iter() {
-                    let sw = sw.clone();
-                    if let Some(req) = sw.make_background_flush_req(true).await {
-                        if let Err(e) = self.slice_flush_queue.send(req).await {
-                            error!("failed to send flush request {e}");
-                        }
-                    }
-                }
+                // TODO: optimize the random write
             }
 
             let sw = Arc::new(SliceWriter::new(
@@ -506,7 +503,7 @@ impl SliceWriter {
     }
 
     // try_make_background_flush_req try to make flush req if we write enough data.
-    async fn make_background_flush_req(self: Arc<Self>, early_flush: bool) -> Option<FlushReq> {
+    async fn make_background_flush_req(self: Arc<Self>) -> Option<FlushReq> {
         if self.has_frozen() {
             return None;
         }
@@ -515,17 +512,17 @@ impl SliceWriter {
         }
         let read_guard = self.slice_buffer.read().await;
         let length = read_guard.length();
-        if length == CHUNK_SIZE || early_flush {
+        if length == CHUNK_SIZE {
             if !self.freeze() {
                 // someone else has frozen it.
                 return None;
             }
+            return Some(FlushReq::FlushFull(self.clone()));
+        } else if length - read_guard.flushed_length() > BLOCK_SIZE {
             return Some(FlushReq::FlushBulk {
                 sw: self.clone(),
                 offset: length,
             });
-        } else if length - read_guard.flushed_length() > BLOCK_SIZE {
-            return Some(FlushReq::FlushFull(self.clone()));
         }
         None
     }

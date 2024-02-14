@@ -161,6 +161,10 @@ impl HybridPagePool {
     pub fn capacity(&self) -> usize {
         self.memory_capacity + self.disk_capacity
     }
+
+    pub fn free_ratio(&self) -> f64 {
+        self.remain() as f64 / self.total_page_cnt as f64
+    }
 }
 
 pub enum Page {
