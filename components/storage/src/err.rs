@@ -49,7 +49,7 @@ pub enum Error {
     MetaError {
         #[snafu(implicit)]
         location: Location,
-        source: kiseki_meta::err::Error,
+        source: kiseki_meta::Error,
     },
 }
 

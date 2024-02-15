@@ -53,7 +53,7 @@ impl DataManager {
     }
 
     /// Checks whether the file handle is writable.
-    pub(crate) fn check_file_writer(&self, ino: Ino) -> bool {
+    pub(crate) fn file_writer_exists(&self, ino: Ino) -> bool {
         self.file_writers.contains_key(&ino)
     }
 

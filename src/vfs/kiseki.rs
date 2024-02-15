@@ -27,9 +27,9 @@ use kiseki_meta::context::FuseContext;
 use kiseki_meta::MetaEngineRef;
 use kiseki_types::{
     attr::InodeAttr,
-    entry::Entry,
+    entry::FullEntry,
     ino::{Ino, CONTROL_INODE, ROOT_INO},
-    internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
 };
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{location, Location, ResultExt};
@@ -51,7 +51,7 @@ use crate::{
 pub struct KisekiVFS {
     config: VFSConfig,
     meta: MetaEngineRef,
-    internal_nodes: PreInternalNodes,
+    internal_nodes: InternalNodeTable,
     pub(crate) data_engine: Arc<Engine>,
     modified_at: DashMap<Ino, time::Instant>,
     pub(crate) _next_fh: AtomicU64,
@@ -67,7 +67,7 @@ impl Debug for KisekiVFS {
 impl KisekiVFS {
     pub fn new(vfs_config: VFSConfig, meta: MetaEngineRef) -> Result<Self> {
         let mut internal_nodes =
-            PreInternalNodes::new((vfs_config.entry_timeout, vfs_config.dir_entry_timeout));
+            InternalNodeTable::new((vfs_config.entry_timeout, vfs_config.dir_entry_timeout));
         let config_inode = internal_nodes
             .get_mut_internal_node_by_name(CONFIG_INODE_NAME)
             .unwrap();
@@ -126,7 +126,7 @@ impl KisekiVFS {
         Ok(r)
     }
 
-    pub async fn lookup(&self, ctx: &MetaContext, parent: Ino, name: &str) -> Result<Entry> {
+    pub async fn lookup(&self, ctx: &MetaContext, parent: Ino, name: &str) -> Result<FullEntry> {
         trace!("fs:lookup with parent {:?} name {:?}", parent, name);
         // TODO: handle the special case
         if parent == ROOT_INO || name.eq(CONTROL_INODE_NAME) {
@@ -141,7 +141,7 @@ impl KisekiVFS {
         }
         let (inode, attr) = self.meta.lookup(ctx, parent, name, true).await?;
         let ttl = self.get_entry_ttl(&attr);
-        let e = Entry::new_with_attr(inode, name, attr)
+        let e = FullEntry::new_with_attr(inode, name, attr)
             .set_ttl(ttl)
             .set_generation(1);
         Ok(e)
@@ -155,7 +155,7 @@ impl KisekiVFS {
         }
     }
 
-    pub fn update_length(&self, entry: &mut Entry) {
+    pub fn update_length(&self, entry: &mut FullEntry) {
         if entry.attr.full && entry.is_file() {
             let len = self.data_engine.get_length(entry.inode);
             if len > entry.attr.length {
@@ -231,7 +231,7 @@ impl KisekiVFS {
         inode: I,
         fh: u64,
         offset: i64,
-    ) -> Result<Vec<Entry>> {
+    ) -> Result<Vec<FullEntry>> {
         let inode = inode.into();
         debug!(
             "fs:readdir with ino {:?} fh {:?} offset {:?}",
@@ -273,7 +273,7 @@ impl KisekiVFS {
         mode: mode_t,
         cumask: u16,
         rdev: u32,
-    ) -> Result<Entry> {
+    ) -> Result<FullEntry> {
         if parent.is_root() && self.internal_nodes.contains_name(&name) {
             return ErrLIBCSnafu { kind: libc::EEXIST }.fail()?;
         }
@@ -300,7 +300,7 @@ impl KisekiVFS {
             )
             .await?;
         let ttl = self.get_entry_ttl(&attr);
-        Ok(Entry::new_with_attr(ino, &name, attr)
+        Ok(FullEntry::new_with_attr(ino, &name, attr)
             .with_generation(1)
             .with_ttl(ttl)
             .to_owned())
@@ -314,7 +314,7 @@ impl KisekiVFS {
         mode: u16,
         cumask: u16,
         flags: libc::c_int,
-    ) -> Result<(Entry, u64)> {
+    ) -> Result<(FullEntry, u64)> {
         debug!("fs:create with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
             return ErrLIBCSnafu { kind: libc::EEXIST }.fail()?;
@@ -332,7 +332,7 @@ impl KisekiVFS {
             .await?;
 
         let ttl = self.get_entry_ttl(&attr);
-        let mut e = Entry::new_with_attr(inode, name, attr)
+        let mut e = FullEntry::new_with_attr(inode, name, attr)
             .with_generation(1)
             .with_ttl(ttl)
             .to_owned();
@@ -354,7 +354,7 @@ impl KisekiVFS {
         gid: Option<u32>,
         size: Option<u64>,
         fh: Option<u64>,
-    ) -> Result<Entry> {
+    ) -> Result<FullEntry> {
         info!(
             "fs:setattr with ino {:?} flags {:?} atime {:?} mtime {:?}",
             ino, flags, atime, mtime
@@ -468,7 +468,7 @@ impl KisekiVFS {
         name: &str,
         mode: u16,
         umask: u16,
-    ) -> Result<Entry> {
+    ) -> Result<FullEntry> {
         debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
             return ErrLIBCSnafu { kind: libc::EEXIST }.fail()?;
@@ -481,7 +481,7 @@ impl KisekiVFS {
         };
         let (ino, attr) = self.meta.mkdir(ctx, parent, name, mode, umask).await?;
         let ttl = self.get_entry_ttl(&attr);
-        Ok(Entry::new_with_attr(ino, name, attr)
+        Ok(FullEntry::new_with_attr(ino, name, attr)
             .with_generation(1)
             .with_ttl(ttl)
             .to_owned())
@@ -504,7 +504,7 @@ impl KisekiVFS {
         self.update_length_by_attr(inode, &mut attr);
         let opened_fh = self.new_file_handle(inode, attr.length, flags)?;
         let ttl = self.get_ttl(attr.kind);
-        let entry = Entry::new_with_attr(inode, "", attr)
+        let entry = FullEntry::new_with_attr(inode, "", attr)
             .with_generation(1)
             .with_ttl(ttl)
             .to_owned();
@@ -675,7 +675,7 @@ impl KisekiVFS {
 pub struct Opened {
     pub fh: u64,
     pub flags: u32,
-    pub entry: Entry,
+    pub entry: FullEntry,
 }
 
 // TODO: review me, use a better way.

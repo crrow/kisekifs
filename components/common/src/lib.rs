@@ -1,3 +1,11 @@
+pub const MAX_NAME_LENGTH: usize = 255;
+pub const DOT: &str = ".";
+pub const DOT_DOT: &str = "..";
+
+pub const MODE_MASK_R: u8 = 0b100;
+pub const MODE_MASK_W: u8 = 0b010;
+pub const MODE_MASK_X: u8 = 0b001;
+
 pub const KISEKI: &str = "kiseki";
 
 pub const PAGE_BUFFER_SIZE: usize = 300 << 20; // 300MiB
@@ -30,13 +38,5 @@ pub type ChunkIndex = usize;
 pub type ChunkOffset = usize;
 pub type ChunkSize = usize;
 pub type FileOffset = usize;
-
-pub const MAX_NAME_LENGTH: usize = 255;
-pub const DOT: &str = ".";
-pub const DOT_DOT: &str = "..";
-
-pub const MODE_MASK_R: u8 = 0b100;
-pub const MODE_MASK_W: u8 = 0b010;
-pub const MODE_MASK_X: u8 = 0b001;
 
 pub type FH = u64;

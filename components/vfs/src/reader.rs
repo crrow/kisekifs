@@ -104,9 +104,12 @@ impl FileReader {
         );
 
         // get the slice inside the chunk.
-        let engine = self.vfs.upgrade().expect("engine should not be dropped");
-        let meta_engine = engine.meta.clone();
-        let chunk_size = engine.config.chunk_size;
+        let engine = self
+            .data_engine
+            .upgrade()
+            .expect("engine should not be dropped");
+        let meta_engine = engine.meta_engine.clone();
+        let chunk_size = engine.chunk_size;
         let start_chunk_idx = offset / chunk_size;
         let end_chunk_idx = (offset + expected_read_len - 1) / chunk_size;
 
@@ -273,7 +276,7 @@ mod tests {
 
         let sto_engine = new_mem_object_storage("");
         let engine = Arc::new(
-            Engine::new(
+            DataManager::new(
                 Arc::new(EngineConfig::default()),
                 sto_engine,
                 Arc::new(meta_engine),

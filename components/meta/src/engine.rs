@@ -10,7 +10,7 @@ use crossbeam::channel::at;
 use futures::AsyncReadExt;
 use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::attr::{InodeAttr, SetAttrFlags};
-use kiseki_types::entry::{DEntry, Entry};
+use kiseki_types::entry::{DEntry, Entry, FullEntry};
 use kiseki_types::ino::{Ino, ROOT_INO, TRASH_INODE};
 use kiseki_types::internal_nodes::{InternalNode, TRASH_INODE_NAME};
 use kiseki_types::stat::{DirStat, FSStat};
@@ -28,7 +28,7 @@ use crate::backend::key::Counter;
 use crate::backend::{open_backend, BackendRef};
 use crate::config::MetaConfig;
 use crate::err::Error::LibcError;
-use crate::err::{Error, LibcSnafu, Result};
+use crate::err::{Error, LibcSnafu, Result, TokioJoinSnafu};
 use crate::id_table::IdTable;
 use crate::open_files::OpenFiles;
 use kiseki_types::setting::Format;
@@ -62,7 +62,7 @@ impl Display for MetaEngine {
 
 impl MetaEngine {
     // update_format is used to change the file system's setting.
-    pub fn update_format(dsn: bool, format: Format, force: bool) -> Result<()> {
+    pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
         let backend = open_backend(dsn)?;
 
         let mut need_init_root = false;
@@ -219,26 +219,8 @@ impl MetaEngine {
             return Ok(attr);
         }
 
-        let mut attr = if inode.is_trash() || inode.is_root() {
-            // call do_get_attr with timeout
-            //
-            // In the timeout case, we give the root and trash inodes a default hard code
-            // value.
-            //
-            // Availability: The Root and Trash inodes are critical for filesystem
-            // operations. Providing default values guarantees that they're
-            // always accessible, even under slow or unreliable conditions.
-            // Consistency: Ensuring consistent behavior for these inodes, even with
-            // timeouts, helps maintain filesystem integrity.
-            timeout(
-                Duration::from_millis(300),
-                tokio::task::spawn_blocking(self.backend.get_attr(inode)),
-            )
-            .await
-            .unwrap_or(Ok(InodeAttr::hard_code_inode_attr(inode.is_trash())))?
-        } else {
-            self.backend.get_attr(inode)?
-        };
+        // TODO: add timeout here
+        let mut attr = self.backend.get_attr(inode)?;
 
         // update cache
         self.open_files.update(inode, &mut attr);
@@ -255,9 +237,9 @@ impl MetaEngine {
         let inode = self.check_root(inode);
         let mut attr = self.get_attr(inode).await?;
         let mmask = if plus {
-            kiseki_common::MODE_MASK_R | kiseki_common::MODE_MASK_X
+            MODE_MASK_R | MODE_MASK_X
         } else {
-            kiseki_common::MODE_MASK_X
+            MODE_MASK_X
         };
 
         ctx.check(inode, &attr, mmask)?;
@@ -266,10 +248,7 @@ impl MetaEngine {
             attr.parent = self.root;
         }
 
-        let mut basic_entries = vec![
-            Entry::new(inode, DOT.to_string(), FileType::Directory),
-            Entry::new(attr.parent, DOT_DOT.to_string(), FileType::Directory),
-        ];
+        let mut basic_entries = Entry::new_basic_entry_pair(inode, attr.parent);
 
         if let Err(e) = self.do_read_dir(inode, plus, &mut basic_entries, -1).await {
             return if e.is_not_found() && inode.is_trash() {
@@ -292,9 +271,13 @@ impl MetaEngine {
         for de in entries {
             let entry = if plus {
                 let attr = self.backend.get_attr(de.inode)?;
-                Entry::new_with_attr(&de, attr)
+                Entry::Full(FullEntry {
+                    inode,
+                    name: de.name.clone(),
+                    attr,
+                })
             } else {
-                Entry::from(&de)
+                Entry::DEntry(de)
             };
             basic_entries.push(entry);
         }
@@ -302,35 +285,35 @@ impl MetaEngine {
     }
 
     // Change root to a directory specified by sub_dir.
-    pub async fn chroot<P: AsRef<Path>>(&self, ctx: &FuseContext, sub_dir: P) -> Result<()> {
-        let sub_dir = sub_dir.as_ref();
-        for c in sub_dir.components() {
-            let name = match c {
-                Component::Normal(name) => {
-                    name.to_str().expect("invalid path component { sub_dir}")
-                }
-                _ => unreachable!("invalid path component: {:?}", c),
-            };
-            let (inode, attr) = match self.lookup(ctx, self.root, name, true).await {
-                Ok(r) => r,
-                Err(e) => {
-                    if e.to_errno() == libc::ENOENT {
-                        let (inode, attr) = self.mkdir(ctx, self.root, name, 0o777, 0).await?;
-                        (inode, attr)
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            ensure!(
-                attr.get_filetype() == FileType::Directory,
-                LibcSnafu {
-                    errno: libc::ENOTDIR,
-                }
-            );
-        }
-        Ok(())
-    }
+    // pub async fn chroot<P: AsRef<Path>>(&self, ctx: &FuseContext, sub_dir: P) -> Result<()> {
+    //     let sub_dir = sub_dir.as_ref();
+    //     for c in sub_dir.components() {
+    //         let name = match c {
+    //             Component::Normal(name) => {
+    //                 name.to_str().expect("invalid path component { sub_dir}")
+    //             }
+    //             _ => unreachable!("invalid path component: {:?}", c),
+    //         };
+    //         let (inode, attr) = match self.lookup(ctx, self.root, name, true).await {
+    //             Ok(r) => r,
+    //             Err(e) => {
+    //                 if e.to_errno() == libc::ENOENT {
+    //                     let (inode, attr) = self.mkdir(ctx, self.root, name, 0o777, 0).await?;
+    //                     (inode, attr)
+    //                 } else {
+    //                     return Err(e);
+    //                 }
+    //             }
+    //         };
+    //         ensure!(
+    //             attr.get_filetype() == FileType::Directory,
+    //             LibcSnafu {
+    //                 errno: libc::ENOTDIR,
+    //             }
+    //         );
+    //     }
+    //     Ok(())
+    // }
 
     // Mkdir creates a sub-directory with given name and mode.
     pub async fn mkdir(
@@ -386,7 +369,7 @@ impl MetaEngine {
 
         let parent = self.check_root(parent);
         let (space, inodes) = (kiseki_utils::align::align4k(0), 1i64);
-        self.check_quota(ctx, space, inodes, parent)?;
+        // self.check_quota(ctx, space, inodes, parent)?;
         let r = self.do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)?;
 
         self.update_mem_dir_stat(parent, 0, space, inodes)?;
@@ -420,7 +403,6 @@ impl MetaEngine {
             .set_uid(ctx.uid)
             .set_parent(parent)
             // .set_flags(flags) // TODO, maybe we don't have to
-            .set_full()
             .to_owned();
         if typ == FileType::Directory {
             attr.set_nlink(2).set_length(4 << 10);
@@ -550,14 +532,12 @@ impl MetaEngine {
             .await
         {
             Ok(r) => r,
-            Err(e) => {
+            Err(e) if matches!(e, LibcError{errno, ..} if errno == libc::EEXIST) => {
                 warn!("create failed: {:?}", e);
-                if e.to_errno() == libc::EEXIST {
-                    self.do_lookup(parent, name).await?
-                } else {
-                    return Err(e);
-                }
+                let r = self.do_lookup(parent, name)?;
+                r
             }
+            Err(e) => return Err(e),
         };
 
         self.open_files.open(x.0, &mut x.1);
@@ -584,7 +564,7 @@ impl MetaEngine {
         flags: SetAttrFlags,
         ino: Ino,
         new_attr: &mut InodeAttr,
-    ) -> Result<Entry> {
+    ) -> Result<()> {
         let inode = self.check_root(ino);
 
         let cur_attr = self.backend.get_attr(inode)?;
@@ -595,9 +575,8 @@ impl MetaEngine {
         let now = SystemTime::now();
         let mut dirty_attr = self.merge_attr(ctx, flags, ino, &cur_attr, new_attr, now)?;
         dirty_attr.ctime = now;
-        self.backend.set_attr(inode, &dirty_attr).await?;
-        Ok(Entry::new_from_attr(inode, name, ))
-        Ok(Entry::new_with_attr(inode, "", dirty_attr))
+        self.backend.set_attr(inode, &dirty_attr)?;
+        Ok(())
     }
     fn merge_attr(
         &self,
@@ -753,7 +732,7 @@ impl MetaEngine {
             }
         }
 
-        let mut attr = self.sto_must_get_attr(inode).await?;
+        let mut attr = self.backend.get_attr(inode)?;
         let mask = match flags & (libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR) {
             libc::O_RDONLY => MODE_MASK_R,
             libc::O_WRONLY => MODE_MASK_W,
@@ -805,11 +784,8 @@ impl MetaEngine {
             inode, chunk_idx, chunk_pos, slice, mtime
         );
 
-        let mut attr = self.sto_get_attr(inode).await?.unwrap_or(
-            InodeAttr::default()
-                .set_kind(FileType::RegularFile)
-                .to_owned(),
-        );
+        // check if the inode is a file
+        let mut attr = self.backend.get_attr(inode)?;
         ensure!(attr.is_file(), LibcSnafu { errno: libc::EPERM });
 
         let mut slices_buf = self
@@ -842,17 +818,16 @@ impl MetaEngine {
             return Ok(());
         }
         slices_buf.extend_from_slice(&val);
-        self.sto_set_attr(inode, &attr).await?;
+        self.backend.set_attr(inode, &attr)?;
         let slice_cnt = slices_buf.len() / SLICE_BYTES; // number of slices
-        self.sto_set_chunk_info(inode, chunk_idx, slices_buf)
-            .await?;
+        self.backend
+            .set_raw_chunk_slices(inode, chunk_idx, slices_buf)?;
 
         if slice_cnt > 350 || slice_cnt % 100 == 99 {
             // start a background task to compact these slices
             // TODO: we need to do compaction
         }
-        self.update_parent_stats(inode, attr.parent, dir_stat_length, dir_stat_space)
-            .await?;
+        self.update_parent_stats(inode, attr.parent, dir_stat_length, dir_stat_space)?;
 
         // TODO: update the cache
         if let Some(mut open_file) = self.open_files.files.get_mut(&inode) {
@@ -873,7 +848,7 @@ impl MetaEngine {
             return Ok(());
         }
         if parent.0 > 0 {
-            self.update_mem_dir_stat(parent, length, space, 0).await?;
+            self.update_mem_dir_stat(parent, length, space, 0)?;
         }
 
         // WTF

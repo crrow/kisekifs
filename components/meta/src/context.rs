@@ -1,8 +1,20 @@
 use crate::err::{LibcSnafu, Result};
 use kiseki_types::attr::InodeAttr;
 use kiseki_types::ino::Ino;
+use lazy_static::lazy_static;
 use snafu::ensure;
 use std::time::Instant;
+
+lazy_static! {
+    pub static ref EMPTY_CONTEXT: FuseContext = FuseContext {
+        gid: 0,
+        gid_list: vec![],
+        uid: 0,
+        pid: 0,
+        check_permission: false,
+        start_at: Instant::now(),
+    };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuseContext {

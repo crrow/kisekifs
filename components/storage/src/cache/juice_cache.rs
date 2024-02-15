@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::{Path, PathBuf};
 use std::{
     fmt::{Debug, Formatter},
     fs,
@@ -73,15 +74,10 @@ pub struct JuiceFileCacheBuilder {
     pub write_back_uploader: Option<mpsc::Sender<(SliceKey, String)>>,
 }
 
-impl Default for JuiceFileCacheBuilder {
-    fn default() -> Self {
-        let tempdir = tempfile::tempdir().expect("should fail when creating temp dir");
-        let dir = tempdir
-            .as_ref()
-            .to_str()
-            .expect("should fail when converting to str");
+impl JuiceFileCacheBuilder {
+    pub fn new<P: AsRef<str>>(path: P) -> Self {
         JuiceFileCacheBuilder {
-            cache_dir: dir.to_string(),
+            cache_dir: path.as_ref().to_string(),
             capacity: ReadableSize::gb(1),
             free_ratio: 0.1, // 10 %
             add_checksum: false,
@@ -91,16 +87,13 @@ impl Default for JuiceFileCacheBuilder {
             write_back_uploader: None,
         }
     }
-}
-
-impl JuiceFileCacheBuilder {
     pub fn build(self) -> Result<Arc<dyn Cache>> {
         let jc = self.inner_build()?;
         Ok(Arc::new(jc))
     }
 
     pub(crate) fn inner_build(self) -> Result<JuiceFileCache> {
-        debug!("create juice file cache at {}", &self.cache_dir);
+        debug!("create juice file cache at {:?}", &self.cache_dir);
         let local_store =
             kiseki_utils::object_storage::new_fs_store(&self.cache_dir).context(OpenDalSnafu)?;
         let (sender, receiver) = mpsc::channel(self.max_pending_cnt);
@@ -162,11 +155,6 @@ impl JuiceFileCacheBuilder {
 
     pub fn with_free_ratio(mut self, free_ratio: f32) -> Self {
         self.free_ratio = free_ratio;
-        self
-    }
-
-    pub fn with_root_cache_dir(mut self, dir: &str) -> Self {
-        self.cache_dir = dir.to_string();
         self
     }
 }
@@ -701,7 +689,7 @@ impl JuiceFileCacheInner {
                 .accessed()
                 .context(UnknownIOSnafu)?
                 .duration_since(UNIX_EPOCH)
-                .expect("failed to handle system time")?
+                .expect("failed to handle system time")
                 .as_secs();
             total_size += block_size;
             total_cnt += 1;

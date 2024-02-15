@@ -20,7 +20,7 @@ pub fn open_backend<P: AsRef<Path>>(path: P) -> Result<BackendRef> {
 
 pub type BackendRef = Arc<dyn Backend>;
 
-pub trait Backend {
+pub trait Backend: Send + Sync + 'static {
     fn set_format(&self, format: &Format) -> Result<()>;
     fn load_format(&self) -> Result<Format>;
 
@@ -38,6 +38,8 @@ pub trait Backend {
     fn get_symlink(&self, inode: Ino) -> Result<String>;
 
     fn set_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, slices: Slices) -> Result<()>;
+    fn set_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, buf: Vec<u8>)
+        -> Result<()>;
     fn get_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Option<Vec<u8>>>;
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices>;
 

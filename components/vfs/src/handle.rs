@@ -21,7 +21,7 @@ use std::{
 use crate::err::LibcSnafu;
 use crate::{err::Result, KisekiVFS};
 use dashmap::DashMap;
-use kiseki_types::{entry::Entry, ino::Ino};
+use kiseki_types::{entry::FullEntry, ino::Ino};
 use tokio::{
     sync::{Notify, RwLock},
     time::Instant,
@@ -56,11 +56,13 @@ impl KisekiVFS {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
             libc::O_RDONLY => Handle::new_with(fh, inode, |_h| {
-                self.new_file_reader(inode, fh, length as usize);
+                self.data_manager
+                    .new_file_reader(inode, fh, length as usize);
             }),
             libc::O_WRONLY | libc::O_RDWR => Handle::new_with(fh, inode, |_h| {
-                self.new_file_reader(inode, fh, length as usize);
-                self.new_file_writer(inode, length);
+                self.data_manager
+                    .new_file_reader(inode, fh, length as usize);
+                self.data_manager.new_file_writer(inode, length);
             }),
             _ => LibcSnafu { errno: libc::EPERM }.fail()?,
         };
@@ -146,7 +148,7 @@ impl Handle {
 
 #[derive(Debug)]
 pub(crate) struct HandleInner {
-    pub(crate) children: Vec<Entry>,
+    pub(crate) children: Vec<FullEntry>,
     pub(crate) read_at: Option<Instant>,
     pub(crate) ofd_owner: u64, // OFD lock
 }

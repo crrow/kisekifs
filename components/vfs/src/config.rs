@@ -4,12 +4,16 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub attr_timeout: Duration,
-    pub dir_entry_timeout: Duration,
-    pub entry_timeout: Duration,
     pub backup_meta_interval: Duration,
     pub prefix_internal: bool,
     pub hide_internal: bool,
+
+    // attributes cache timeout in seconds
+    pub attr_timeout: Duration,
+    // dir entry cache timeout in seconds
+    pub dir_entry_timeout: Duration,
+    // file entry cache timeout in seconds
+    pub file_entry_timeout: Duration,
 
     // ========Object Storage Configs ===>
     pub object_storage_dsn: String,
@@ -40,12 +44,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            attr_timeout: Default::default(),
-            dir_entry_timeout: Default::default(),
-            entry_timeout: Default::default(),
             backup_meta_interval: Default::default(),
             prefix_internal: false,
             hide_internal: false,
+            attr_timeout: Duration::from_secs(1),
+            dir_entry_timeout: Duration::from_secs(1),
+            file_entry_timeout: Duration::from_secs(1),
             object_storage_dsn: "/tmp/kiseki.object_storage".to_string(),
             capacity: 100 << 10,
             total_buffer_capacity: PAGE_BUFFER_SIZE, // 300MB

@@ -62,6 +62,7 @@ impl DataManager {
     }
 
     /// Use the [FileWriter] to write data to the file.
+    /// Return the number of bytes written and current file length.
     pub(crate) async fn write(
         self: &Arc<Self>,
         ino: Ino,
@@ -76,13 +77,12 @@ impl DataManager {
         debug!("get file write success");
         let write_len = fw.write(offset, data).await?;
         self.truncate_reader(ino, fw.get_length() as u64);
-
         Ok(write_len)
     }
 
     pub(crate) async fn flush_if_exists(&self, ino: Ino) -> Result<()> {
         if let Some(fw) = self.file_writers.get(&ino) {
-            fw.do_flush().await?;
+            fw.flush().await?;
         }
         Ok(())
     }

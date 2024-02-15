@@ -19,7 +19,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use kiseki_types::{entry::Entry, ino::Ino};
+use kiseki_types::{entry::FullEntry, ino::Ino};
 use libc::EPERM;
 use tokio::{
     sync::{Notify, RwLock},
@@ -150,7 +150,7 @@ impl Handle {
 
 #[derive(Debug)]
 pub(crate) struct HandleInner {
-    pub(crate) children: Vec<Entry>,
+    pub(crate) children: Vec<FullEntry>,
     pub(crate) read_at: Option<Instant>,
     pub(crate) ofd_owner: u64, // OFD lock
 }

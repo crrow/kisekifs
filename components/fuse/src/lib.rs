@@ -1,7 +1,3 @@
-mod config;
-mod err;
-mod null;
-
 // JuiceFS, Copyright 2020 Juicedata, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +12,10 @@ mod null;
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod config;
+mod err;
+mod null;
+
 use std::time::Duration;
 use std::{
     cmp::max,
@@ -25,15 +25,15 @@ use std::{
 
 use config::FuseConfig;
 use fuser::{
-    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+    FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
 use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
-use kiseki_meta::context::FuseContext;
+use kiseki_meta::context::{FuseContext, EMPTY_CONTEXT};
 use kiseki_types::attr::InodeAttr;
-use kiseki_types::entry::EntryV2;
+use kiseki_types::entry::Entry;
 use kiseki_types::ToErrno;
-use kiseki_types::{entry::Entry, ino::Ino};
+use kiseki_types::{entry::FullEntry, ino::Ino};
 use kiseki_vfs::KisekiVFS;
 use libc::{__u64, c_int};
 use snafu::{ResultExt, Snafu, Whatever};
@@ -84,12 +84,12 @@ impl KisekiFuse {
         })
     }
 
-    // Mkdir
-    // Mknod
-    // Lookup
-    fn reply_entry(&self, ctx: &FuseContext, reply: ReplyEntry, mut entry: EntryV2) {
-        let inode = entry.get_inode();
-        if !inode.is_special() && entry.is_file() && self.vfs.modified_since(inode, ctx.start_at) {
+    fn reply_entry(&self, ctx: &FuseContext, reply: ReplyEntry, mut entry: FullEntry) {
+        let inode = entry.inode;
+        if !inode.is_special()
+            && entry.attr.is_file()
+            && self.vfs.modified_since(inode, ctx.start_at)
+        {
             debug!("refresh attr for {:?}", inode);
             match self
                 .runtime
@@ -105,16 +105,29 @@ impl KisekiFuse {
             }
         }
 
-        self.vfs.update_length(&mut entry);
+        self.vfs.update_file_length(&mut entry);
+        let attr = &entry.attr;
         reply.entry(
-            &entry.ttl.unwrap(),
-            &entry.to_fuse_attr(),
-            entry.generation.unwrap(),
+            self.get_entry_ttl(entry.is_file()),
+            attr.to_fuse_attr(entry.inode),
+            1,
         );
     }
 
-    fn reply_attr(&self, ctx: &FuseContext, reply: ReplyAttr, inode: Ino, mut attr: InodeAttr) {
-        if !inode.is_special() && attr.is_file() && self.vfs.modified_since(inode, ctx.start_at) {
+    fn reply_attr(
+        &self,
+        ctx: &FuseContext,
+        reply: ReplyAttr,
+        inode: Ino,
+        mut attr: InodeAttr,
+        // we reply the attr directly without refresh check.
+        directly: bool,
+    ) {
+        if !directly
+            && !inode.is_special()
+            && attr.is_file()
+            && self.vfs.modified_since(inode, ctx.start_at)
+        {
             debug!("refresh attr for {:?}", inode);
             match self
                 .runtime
@@ -128,12 +141,10 @@ impl KisekiFuse {
                     debug!("failed to refresh attr for {:?} {:?}", inode, e);
                 }
             }
+            self.vfs.update_length_by_attr(inode, &mut attr);
         }
-        self.vfs.update_length_by_attr(inode, &mut attr);
-        reply.attr(
-            &self.vfs.get_entry_ttl(&attr.kind),
-            &attr.to_fuse_attr(inode),
-        )
+
+        reply.attr(self.vfs.get_entry_ttl(attr.kind), &attr.to_fuse_attr(inode))
     }
 }
 
@@ -205,7 +216,7 @@ impl Filesystem for KisekiFuse {
             .block_on(self.vfs.get_attr(Ino::from(ino)).in_current_span())
         // .block_on(self.vfs.get_attr(Ino::from(ino)))
         {
-            Ok(attr) => reply.attr(&self.vfs.get_entry_ttl(&attr.kind), &attr.to_fuse_attr(ino)),
+            Ok(attr) => self.reply_attr(&EMPTY_CONTEXT, reply, Ino(ino), attr, true),
             Err(e) => {
                 error!("getattr {:?} {:?}", ino, e);
                 reply.error(e.to_errno())
@@ -373,9 +384,9 @@ impl Filesystem for KisekiFuse {
                 .in_current_span(),
         ) {
             Ok((entry, fh)) => reply.created(
-                &entry.ttl.unwrap(),
-                &entry.to_fuse_attr(),
-                entry.generation.unwrap(),
+                self.vfs.get_entry_ttl(entry.attr.kind),
+                &entry.attr.to_fuse_attr(entry.inode),
+                1,
                 fh,
                 flags as u32,
             ),
@@ -419,7 +430,7 @@ impl Filesystem for KisekiFuse {
                 )
                 .in_current_span(),
         ) {
-            Ok(new_attr) => self.reply_attr(&ctx, reply, Ino(ino), new_attr),
+            Ok(new_attr) => self.reply_attr(&ctx, reply, Ino(ino), new_attr, false),
             Err(e) => reply.error(e.to_errno()),
         }
     }

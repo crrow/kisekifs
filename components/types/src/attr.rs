@@ -20,6 +20,8 @@ use tracing::info;
 
 use crate::ino::{Ino, ROOT_INO};
 use bitflags::bitflags;
+use kiseki_common::BlockSize;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetAttrFlags(pub u32);
 
@@ -74,8 +76,6 @@ pub struct InodeAttr {
     pub length: u64,
     /// inode of parent; 0 means tracked by parentKey (for hardlinks)
     pub parent: Ino,
-    // the attributes are completed or not
-    pub full: bool,
     // whether to keep the cached page or not
     pub keep_cache: bool,
 }
@@ -111,7 +111,6 @@ impl InodeAttr {
             nlink: 2,
             length: 4 << 10,
             parent: ROOT_INO,
-            full: true,
             keep_cache: false,
         }
     }
@@ -145,10 +144,6 @@ impl InodeAttr {
     }
     pub fn set_uid(&mut self, uid: u32) -> &mut Self {
         self.uid = uid;
-        self
-    }
-    pub fn set_full(&mut self) -> &mut Self {
-        self.full = true;
         self
     }
     pub fn set_parent(&mut self, parent: Ino) -> &mut Self {
@@ -225,7 +220,7 @@ impl InodeAttr {
         match fa.kind {
             FileType::Directory | FileType::Symlink | FileType::RegularFile => {
                 fa.size = self.length;
-                fa.blocks = (fa.size + 511) / 512;
+                fa.blocks = (fa.size + 512 - 1) / 512;
             }
             FileType::BlockDevice | FileType::CharDevice => {
                 fa.rdev = self.rdev;
@@ -256,7 +251,6 @@ impl Default for InodeAttr {
             gid: kiseki_utils::gid(),
             rdev: 0,
             flags: 0,
-            full: false,
             keep_cache: false,
         }
     }
@@ -281,6 +275,5 @@ mod tests {
         assert_eq!(attr.gid, 11);
         assert_eq!(attr.uid, 22);
         assert_eq!(attr.parent, Ino::from(1));
-        assert!(attr.full);
     }
 }

@@ -10,7 +10,11 @@ pub enum Error {
         location: Location,
         source: tokio::task::JoinError,
     },
-
+    OpenDalError {
+        #[snafu(implicit)]
+        location: Location,
+        source: opendal::Error,
+    },
     StorageErr {
         source: kiseki_storage::err::Error,
         #[snafu(implicit)]

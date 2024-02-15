@@ -1,4 +1,5 @@
 use opendal::Operator;
+use std::path::Path;
 
 pub type ObjectStorage = Operator;
 pub type LocalStorage = Operator;
@@ -17,11 +18,12 @@ pub fn new_fs_sto() -> Operator {
     Operator::new(builder).unwrap().finish()
 }
 
-pub fn new_fs_store(path: &str) -> Result<ObjectStorage, opendal::Error> {
-    let temp_dir = format!("{}-temp", path);
+pub fn new_fs_store<P: AsRef<Path>>(path: P) -> Result<ObjectStorage, opendal::Error> {
+    let path = path.as_ref();
+    let temp_dir = path.to_path_buf().join("temp");
     let mut builder = opendal::services::Fs::default();
-    builder.root(path);
-    builder.atomic_write_dir(&temp_dir); // TODO: review me
+    builder.root(path.to_string_lossy().as_ref());
+    builder.atomic_write_dir(&temp_dir.to_str().unwrap()); // TODO: review me
     let obj = Operator::new(builder)?.finish();
     Ok(obj)
 }

@@ -28,3 +28,4 @@ bincode.workspace = true
 fuser.workspace = true
 serde.workspace = true
 scopeguard.workspace = true
+opendal.workspace = true

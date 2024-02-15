@@ -234,6 +234,18 @@ impl Backend for RocksdbBackend {
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
         Ok(())
     }
+
+    fn set_raw_chunk_slices(
+        &self,
+        inode: Ino,
+        chunk_index: ChunkIndex,
+        buf: Vec<u8>,
+    ) -> Result<()> {
+        let key = key::chunk_slices(inode, chunk_index);
+        self.db.put(&key, &buf).context(RocksdbSnafu)?;
+        Ok(())
+    }
+
     fn get_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Option<Vec<u8>>> {
         let key = key::chunk_slices(inode, chunk_index);
         let buf = self.db.get(&key).context(RocksdbSnafu)?;

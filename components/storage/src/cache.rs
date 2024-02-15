@@ -11,7 +11,7 @@ use kiseki_types::slice::SliceKey;
 use opendal::Reader;
 
 pub fn new_juice_builder() -> juice_cache::JuiceFileCacheBuilder {
-    juice_cache::JuiceFileCacheBuilder::default()
+    juice_cache::JuiceFileCacheBuilder::new("/tmp/kiseki.cache")
 }
 
 pub type CacheRef = Arc<dyn Cache>;

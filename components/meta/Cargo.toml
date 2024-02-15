@@ -28,6 +28,7 @@ crossbeam.workspace = true
 tracing.workspace = true
 libc.workspace = true
 scopeguard.workspace = true
+lazy_static.workspace = true
 
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
