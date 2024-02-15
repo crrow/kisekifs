@@ -12,23 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    collections::HashMap,
-    fmt::{Display, Formatter},
-    path::PathBuf,
-    str::FromStr,
-    time::Duration,
-};
+use std::{fmt::Display, path::PathBuf, str::FromStr, time::Duration};
 
-use clap::ValueEnum;
-use opendal::Scheme;
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
-use tracing::info;
-
-use crate::meta::{
-    engine::MetaEngine,
-    err::{MetaError, Result},
-};
 
 /// Atime (Access Time):
 /// Every file has three timestamps:
@@ -63,11 +49,8 @@ impl Default for AccessTimeMode {
 }
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct MetaConfig {
-    // connect info
-    #[serde(serialize_with = "serialize_scheme")]
-    #[serde(deserialize_with = "deserialize_scheme")]
-    pub scheme: Scheme,
-    pub scheme_config: HashMap<String, String>,
+    pub dsn: String,
+
     // update ctime
     pub strict: bool,
     pub retries: usize,
@@ -82,37 +65,18 @@ pub struct MetaConfig {
     pub open_cache_limit: usize,
     pub heartbeat: Duration,
     pub mount_point: PathBuf,
-    pub sub_dir: Option<PathBuf>,
+    // mount a sub-directory as root
+    // pub sub_dir: Option<PathBuf>,
     pub atime_mode: AccessTimeMode,
     pub dir_stat_flush_period: Duration,
     pub skip_dir_mtime: Duration,
 }
 
-fn serialize_scheme<S>(s: &Scheme, serializer: S) -> std::result::Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_str(&s.to_string())
-}
-
-fn deserialize_scheme<'de, D>(deserializer: D) -> std::result::Result<Scheme, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    Scheme::from_str(&s)
-        .map_err(|e| D::Error::custom(format!("failed to parse scheme: {}: {}", s, e)))
-}
-
 impl Default for MetaConfig {
     fn default() -> Self {
         Self {
-            scheme: Scheme::Sled,
-            scheme_config: {
-                let mut map = HashMap::new();
-                map.insert("datadir".to_string(), "/tmp/kiseki-meta".to_string());
-                map
-            },
+            // dsn: "rocksdb://:tmp/kiseki.meta".to_string(),
+            dsn: "/tmp/kiseki.meta".to_string(),
             strict: true,
             retries: 10,
             max_deletes: 2,
@@ -124,43 +88,6 @@ impl Default for MetaConfig {
             open_cache_limit: 0,
             heartbeat: Duration::from_secs(12),
             mount_point: PathBuf::new(),
-            sub_dir: None,
-            atime_mode: Default::default(),
-            dir_stat_flush_period: Duration::from_secs(1),
-            skip_dir_mtime: Default::default(),
-        }
-    }
-}
-
-impl MetaConfig {
-    pub(crate) fn verify(&mut self) -> Result<()> {
-        todo!()
-    }
-    pub fn open(self) -> Result<MetaEngine> {
-        info!(
-            "try to open meta on {:?}, {:?}",
-            self.scheme, &self.scheme_config
-        );
-        let m = MetaEngine::open(self)?;
-        info!("open {} successfully.", &m.info());
-        Ok(m)
-    }
-    pub(crate) fn test_config() -> Self {
-        Self {
-            scheme: Scheme::Memory,
-            scheme_config: HashMap::new(),
-            strict: true,
-            retries: 10,
-            max_deletes: 2,
-            skip_dir_nlink: 0,
-            case_insensitive: false,
-            read_only: false,
-            no_bg_job: false,
-            open_cache: Duration::default(),
-            open_cache_limit: 0,
-            heartbeat: Duration::from_secs(12),
-            mount_point: PathBuf::new(),
-            sub_dir: None,
             atime_mode: Default::default(),
             dir_stat_flush_period: Duration::from_secs(1),
             skip_dir_mtime: Default::default(),
@@ -170,16 +97,3 @@ impl MetaConfig {
 
 const MIN_CLIENT_VERSION: &str = "1";
 const MAX_META_VERSION: usize = 1;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn codec_config() {
-        let c = MetaConfig::default();
-        let json_str = serde_json::to_string(&c).unwrap();
-        let c2: MetaConfig = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(c, c2)
-    }
-}

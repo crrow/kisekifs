@@ -1550,6 +1550,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuse"
+version = "0.1.0"
+dependencies = [
+ "fuser",
+ "kiseki-common",
+ "kiseki-meta",
+ "kiseki-storage",
+ "kiseki-types",
+ "kiseki-utils",
+ "kiseki-vfs",
+ "libc",
+ "snafu 0.8.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fuser"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2123,14 +2140,18 @@ dependencies = [
  "kiseki-common",
  "kiseki-types",
  "kiseki-utils",
+ "libc",
  "opendal",
  "rocksdb",
+ "scopeguard",
  "serde",
+ "serde_json",
  "snafu 0.8.0",
  "sonyflake",
  "tempfile",
  "tikv-client",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2140,6 +2161,7 @@ dependencies = [
  "async-trait",
  "byte-pool",
  "bytes",
+ "crc32fast",
  "criterion",
  "crossbeam",
  "crossbeam-queue",
@@ -2147,13 +2169,18 @@ dependencies = [
  "fmmap",
  "futures",
  "kiseki-common",
+ "kiseki-meta",
  "kiseki-types",
  "kiseki-utils",
  "lazy_static",
  "log",
  "opendal",
  "rand 0.8.5",
+ "rustix 0.38.30",
+ "scopeguard",
+ "serde",
  "snafu 0.8.0",
+ "sonyflake",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -2167,11 +2194,13 @@ name = "kiseki-types"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bitflags 2.4.2",
  "byteorder",
  "fuser",
  "kiseki-common",
  "kiseki-utils",
  "lazy_static",
+ "libc",
  "opendal",
  "rangemap",
  "serde",
@@ -2207,6 +2236,7 @@ dependencies = [
  "supports-color",
  "syn 1.0.109",
  "syn 2.0.48",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -2219,15 +2249,22 @@ dependencies = [
 name = "kiseki-vfs"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "bytes",
  "crossbeam",
  "crossbeam-queue",
  "dashmap",
+ "fuser",
  "futures",
  "kiseki-common",
+ "kiseki-meta",
  "kiseki-storage",
  "kiseki-types",
  "kiseki-utils",
+ "libc",
  "rangemap",
+ "scopeguard",
+ "serde",
  "snafu 0.8.0",
  "sonyflake",
  "tokio",
@@ -2253,7 +2290,6 @@ dependencies = [
  "clap-num",
  "clippy-utilities",
  "const_format",
- "crc32fast",
  "criterion",
  "crossbeam-channel",
  "ctrlc",
@@ -2266,6 +2302,7 @@ dependencies = [
  "hdrhistogram",
  "itertools 0.12.1",
  "kiseki-common",
+ "kiseki-meta",
  "kiseki-storage",
  "kiseki-types",
  "kiseki-utils",

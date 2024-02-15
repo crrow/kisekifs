@@ -16,7 +16,7 @@ use tokio::{
 };
 use tracing::debug;
 
-use crate::error::{DiskPoolMmapSnafu, Result, UnknownIOSnafu};
+use crate::err::{DiskPoolMmapSnafu, Result, UnknownIOSnafu};
 
 pub(crate) struct DiskPagePool {
     // the file path of the pool.

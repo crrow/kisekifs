@@ -22,10 +22,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::cache::Cache;
+use crate::err::{ErrStageNoMoreSpaceSnafu, OpenDalSnafu, Result, UnknownIOSnafu};
 use async_trait::async_trait;
 use crc32fast::Hasher;
 use dashmap::{DashMap, DashSet};
-use datafusion_common::ExprSchema;
 use futures::{FutureExt, TryStreamExt};
 use kiseki_types::slice::{SliceID, SliceKey, EMPTY_SLICE_KEY};
 use kiseki_utils::{readable_size::ReadableSize, runtime};
@@ -41,14 +42,13 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
-
-use crate::vfs::{
-    err::{
-        CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu, OpenDalSnafu, Result,
-    },
-    storage::cache::Cache,
-    VFSError,
-};
+// use crate::vfs::{
+//     err::{
+//         CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu, OpenDalSnafu, Result,
+//     },
+//     storage::cache::Cache,
+//     VFSError,
+// };
 
 const CACHE_SIZE_PADDING: usize = 4096;
 const MAX_EXPIRE_CNT: usize = 1000;
@@ -101,7 +101,8 @@ impl JuiceFileCacheBuilder {
 
     pub(crate) fn inner_build(self) -> Result<JuiceFileCache> {
         debug!("create juice file cache at {}", &self.cache_dir);
-        let local_store = new_fs_store(&self.cache_dir)?;
+        let local_store =
+            kiseki_utils::object_storage::new_fs_store(&self.cache_dir).context(OpenDalSnafu)?;
         let (sender, receiver) = mpsc::channel(self.max_pending_cnt);
         let cancel_token = CancellationToken::new();
         let tracker = TaskTracker::new();
@@ -168,16 +169,6 @@ impl JuiceFileCacheBuilder {
         self.cache_dir = dir.to_string();
         self
     }
-}
-fn new_fs_store(path: &str) -> Result<ObjectStorage> {
-    let temp_dir = format!("{}-temp", path);
-    let mut builder = opendal::services::Fs::default();
-    builder.root(path);
-    builder.atomic_write_dir(&temp_dir); // TODO: review me
-    let obj = opendal::Operator::new(builder)
-        .context(OpenDalSnafu)?
-        .finish();
-    Ok(obj)
 }
 
 fn cache_file_path(cache_file_dir: &str, slice_id: SliceID) -> String {
@@ -308,9 +299,8 @@ impl JuiceFileCacheInner {
                 return Some(reader);
             }
             Err(e) => {
-                if !matches!(&e, VFSError::OpenDal { error, .. } if error.kind() == opendal::ErrorKind::NotFound)
-                {
-                    warn!("{:?}, Failed to get file for key {:?}", e, file_path);
+                if !e.is_not_found() {
+                    warn!("Failed to get file for key {:?}", file_path);
                 };
             }
             Ok(None) => {}
@@ -492,7 +482,7 @@ impl JuiceFileCacheInner {
         });
         if keep_in_cache {
             let cache_path = self.cache_path(key);
-            std::os::unix::fs::symlink(&stage_path, &cache_path).context(CacheIOSnafu)?;
+            std::os::unix::fs::symlink(&stage_path, &cache_path).context(UnknownIOSnafu)?;
             self.add_memory_index(key, block_size, idx.access_time, true)
                 .await;
         }
@@ -699,7 +689,7 @@ impl JuiceFileCacheInner {
                 }
             };
 
-            let metadata = fs::metadata(entry.path()).context(CacheIOSnafu)?;
+            let metadata = fs::metadata(entry.path()).context(UnknownIOSnafu)?;
             let block_size = slice_key.block_size;
             assert_eq!(
                 block_size as u64,
@@ -709,9 +699,9 @@ impl JuiceFileCacheInner {
             );
             let atime = metadata
                 .accessed()
-                .context(CacheIOSnafu)?
+                .context(UnknownIOSnafu)?
                 .duration_since(UNIX_EPOCH)
-                .context(FailedToHandleSystimeSnafu)?
+                .expect("failed to handle system time")?
                 .as_secs();
             total_size += block_size;
             total_cnt += 1;
@@ -859,7 +849,7 @@ async fn persistent_block(
     writer
         .write_all(block.as_slice())
         .await
-        .context(CacheIOSnafu)?;
+        .context(UnknownIOSnafu)?;
 
     if add_checksum {
         let mut hasher = Hasher::new();
@@ -867,7 +857,7 @@ async fn persistent_block(
         writer
             .write_u32(hasher.finalize())
             .await
-            .context(CacheIOSnafu)?;
+            .context(UnknownIOSnafu)?;
     }
     writer.close().await.context(OpenDalSnafu)?;
 
@@ -1174,7 +1164,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use super::*;
-    use crate::common::install_fmt_log;
+    use kiseki_utils::logger::install_fmt_log;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_full() {
         install_fmt_log();

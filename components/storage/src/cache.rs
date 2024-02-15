@@ -5,15 +5,16 @@ mod write_cache;
 
 use std::{fmt::Debug, hash::Hash, sync::Arc};
 
+use crate::err::Result;
 use async_trait::async_trait;
 use kiseki_types::slice::SliceKey;
 use opendal::Reader;
 
-use crate::vfs::err::Result;
-
 pub fn new_juice_builder() -> juice_cache::JuiceFileCacheBuilder {
     juice_cache::JuiceFileCacheBuilder::default()
 }
+
+pub type CacheRef = Arc<dyn Cache>;
 
 /// The exposed cache trait.
 #[async_trait]

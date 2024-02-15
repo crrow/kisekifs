@@ -10,6 +10,7 @@ kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
 kiseki-storage = {path = "../../components/storage"}
 kiseki-common = {path = "../../components/common"}
+kiseki-meta = {path = "../../components/meta"}
 
 tokio.workspace = true
 futures.workspace = true
@@ -21,3 +22,9 @@ crossbeam-queue.workspace = true
 crossbeam.workspace = true
 sonyflake.workspace = true
 tokio-util.workspace = true
+libc.workspace = true
+bytes.workspace = true
+bincode.workspace = true
+fuser.workspace = true
+serde.workspace = true
+scopeguard.workspace = true

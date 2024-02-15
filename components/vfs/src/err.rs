@@ -1,3 +1,5 @@
+use kiseki_common::FH;
+use kiseki_types::ino::Ino;
 use snafu::{Location, Snafu};
 
 #[derive(Snafu, Debug)]
@@ -10,7 +12,27 @@ pub enum Error {
     },
 
     StorageErr {
-        source: kiseki_storage::error::Error,
+        source: kiseki_storage::err::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    // ====VFS====
+    #[snafu(display("invalid file handle {}", ino))]
+    InvalidIno {
+        ino: Ino,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("this file reader is invalid {ino}, {fh}"))]
+    ThisFileReaderIsClosing {
+        ino: Ino,
+        fh: FH,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    LibcError {
+        errno: libc::c_int,
         #[snafu(implicit)]
         location: Location,
     },

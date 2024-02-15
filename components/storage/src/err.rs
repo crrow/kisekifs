@@ -38,6 +38,25 @@ pub enum Error {
         location: Location,
         source: fmmap::error::Error,
     },
+
+    #[snafu(display("no more space in cache dir {}", cache_dir))]
+    ErrStageNoMoreSpace {
+        cache_dir: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    MetaError {
+        #[snafu(implicit)]
+        location: Location,
+        source: kiseki_meta::err::Error,
+    },
+}
+
+impl Error {
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Error::OpenDal { error, .. } if error.kind() == opendal::ErrorKind::NotFound)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

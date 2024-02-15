@@ -60,10 +60,10 @@ pub fn attr(inode: Ino) -> Vec<u8> {
     format!("A{:0>8}I", inode.0).into_bytes()
 }
 
-pub fn entry_info(parent: Ino, name: &str) -> Vec<u8> {
+pub fn dentry(parent: Ino, name: &str) -> Vec<u8> {
     format!("A{:0>8}D/{}", parent.0, name).into_bytes()
 }
-pub fn entry_info_prefix(parent: Ino) -> Vec<u8> {
+pub fn dentry_prefix(parent: Ino) -> Vec<u8> {
     format!("A{:0>8}D/", parent.0).into_bytes()
 }
 
@@ -73,4 +73,7 @@ pub fn symlink(inode: Ino) -> Vec<u8> {
 
 pub fn chunk_slices(inode: Ino, chunk_idx: kiseki_common::ChunkIndex) -> Vec<u8> {
     format!("A{:0>8}C/{}", inode, chunk_idx).into_bytes()
+}
+pub fn dir_stat(inode: Ino) -> Vec<u8> {
+    format!("U{:0>8}I", inode.0).into_bytes()
 }

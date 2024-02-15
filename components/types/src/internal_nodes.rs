@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use fuser::FileType;
 use std::{collections::HashMap, time::Duration};
 
+use crate::entry::FullEntry;
 use crate::{
     attr::InodeAttr,
     entry::Entry,
@@ -27,51 +29,58 @@ pub const CONFIG_INODE_NAME: &str = ".config";
 pub const TRASH_INODE_NAME: &str = ".trash";
 #[derive(Debug)]
 pub struct PreInternalNodes {
-    nodes: HashMap<&'static str, InternalNode>,
+    nodes: HashMap<&'static str, FullEntry>,
 }
 
 impl PreInternalNodes {
     pub fn new(entry_timeout: (Duration, Duration)) -> Self {
         let mut map = HashMap::new();
-        let control_inode: InternalNode = InternalNode(Entry {
+        let control_inode: InternalNode = InternalNode(FullEntry {
             inode: CONTROL_INODE,
             name: CONTROL_INODE_NAME.to_string(),
+            typ: FileType::RegularFile,
             attr: InodeAttr::default().set_perm(0o666).set_full().to_owned(),
-            ttl: Some(entry_timeout.0),
-            generation: Some(1),
+            ttl: entry_timeout.0,
+            generation: 1,
         });
         let log_inode: InternalNode = InternalNode(Entry {
             inode: LOG_INODE,
             name: LOG_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).set_full().to_owned(),
+            typ: FileType::RegularFile,
+            attr: Some(InodeAttr::default().set_perm(0o400).set_full().to_owned()),
             ttl: Some(entry_timeout.0),
             generation: Some(1),
         });
         let stats_inode: InternalNode = InternalNode(Entry {
             inode: STATS_INODE,
             name: STATS_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).set_full().to_owned(),
+            typ: FileType::RegularFile,
+            attr: Some(InodeAttr::default().set_perm(0o400).set_full().to_owned()),
             ttl: Some(entry_timeout.0),
             generation: Some(1),
         });
         let config_inode: InternalNode = InternalNode(Entry {
             inode: CONFIG_INODE,
             name: CONFIG_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).set_full().to_owned(),
+            typ: FileType::RegularFile,
+            attr: Some(InodeAttr::default().set_perm(0o400).set_full().to_owned()),
             ttl: Some(entry_timeout.0),
             generation: Some(1),
         });
         let trash_inode: InternalNode = InternalNode(Entry {
             inode: MAX_INTERNAL_INODE,
             name: TRASH_INODE_NAME.to_string(),
-            attr: InodeAttr::default()
-                .set_perm(0o555)
-                .set_kind(fuser::FileType::Directory)
-                .set_nlink(2)
-                .set_uid(kiseki_utils::uid())
-                .set_gid(kiseki_utils::gid())
-                .set_full()
-                .to_owned(),
+            typ: FileType::Directory,
+            attr: Some(
+                InodeAttr::default()
+                    .set_perm(0o555)
+                    .set_kind(fuser::FileType::Directory)
+                    .set_nlink(2)
+                    .set_uid(kiseki_utils::uid())
+                    .set_gid(kiseki_utils::gid())
+                    .set_full()
+                    .to_owned(),
+            ),
             ttl: Some(entry_timeout.1),
             generation: Some(1),
         });
@@ -108,22 +117,22 @@ impl PreInternalNodes {
 }
 
 #[derive(Debug)]
-pub struct InternalNode(pub Entry);
+pub struct InternalNode(pub FullEntry);
 
-impl From<InternalNode> for Entry {
-    fn from(val: InternalNode) -> Self {
-        val.0
-    }
-}
-
-impl From<&'_ InternalNode> for Entry {
-    fn from(val: &'_ InternalNode) -> Self {
-        val.0.clone()
-    }
-}
+// impl From<InternalNode> for Entry {
+//     fn from(val: InternalNode) -> Self {
+//         val.0
+//     }
+// }
+//
+// impl From<&'_ InternalNode> for Entry {
+//     fn from(val: &'_ InternalNode) -> Self {
+//         val.0.clone()
+//     }
+// }
 
 impl InternalNode {
     pub fn get_attr(&self) -> InodeAttr {
-        self.0.attr.clone()
+        self.0.attr.unwrap().clone()
     }
 }

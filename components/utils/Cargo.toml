@@ -44,3 +44,6 @@ syn2 = { version = "2.0", package = "syn", features = [
 pyroscope = "0.5.7"
 pyroscope_pprofrs = "0.2.7"
 users = "0.11.0"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,9 +1,8 @@
 use std::path::Path;
 
 use fuser::{spawn_mount2, Filesystem, MountOption};
+use kiseki_common::KISEKI;
 use snafu::{ResultExt, Whatever};
-
-use super::KISEKI;
 
 /// An empty FUSE file system. It can be used in a mounting test aimed to
 /// determine whether or not the real file system can be mounted as well. If the

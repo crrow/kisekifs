@@ -1,3 +1,4 @@
+use std::sync::Weak;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
@@ -10,21 +11,24 @@ use std::{
     },
 };
 
+use crate::data_manager::DataManager;
 use dashmap::{
     mapref::one::{Ref, RefMut},
     DashMap,
 };
 use kiseki_common::{
-    cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE,
+    cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE, FH,
 };
-use kiseki_storage::slice_buffer::SliceBuffer;
+use kiseki_meta::MetaEngineRef;
+use kiseki_storage::cache::CacheRef;
+use kiseki_storage::slice_buffer::{SliceBuffer, SliceBufferWrapper};
 use kiseki_types::{
     ino::Ino,
     slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
 };
 use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use rangemap::RangeMap;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::{
     sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock},
     task::JoinHandle,
@@ -32,7 +36,57 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::err::{JoinErrSnafu, Result, StorageErrSnafu};
+use crate::err::{InvalidInoSnafu, JoinErrSnafu, Result, StorageErrSnafu};
+use crate::reader::FileReader;
+use crate::KisekiVFS;
+
+impl DataManager {
+    /// Creates a new [FileWriter] for the file handle.
+    pub(crate) fn new_file_writer(self: &Arc<Self>, ino: Ino, len: u64) {
+        let (tx, mut rx) = mpsc::channel(10);
+        let fw = FileWriter {
+            inode: ino,
+            length: AtomicUsize::new(len as usize),
+            slice_writers: Default::default(),
+            slice_flush_queue: tx,
+            manually_flush: Arc::new(Default::default()),
+            cancel_token: CancellationToken::new(),
+            seq_generate: self.id_generator.clone(),
+            pattern: Default::default(),
+            early_flush_threshold: 0.0,
+            // background_task_handle: (),
+            data_manager: Arc::downgrade(self),
+        };
+
+        self.file_writers.insert(ino, Arc::new(fw));
+    }
+
+    /// Use the [FileWriter] to write data to the file.
+    pub(crate) async fn write(
+        self: &Arc<Self>,
+        ino: Ino,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<usize> {
+        debug!("write {} bytes to ino {}", data.len(), ino);
+        let fw = self
+            .file_writers
+            .get(&ino)
+            .context(InvalidInoSnafu { ino })?;
+        debug!("get file write success");
+        let write_len = fw.write(offset, data).await?;
+        self.truncate_reader(ino, fw.get_length() as u64);
+
+        Ok(write_len)
+    }
+
+    pub(crate) async fn flush_if_exists(&self, ino: Ino) -> Result<()> {
+        if let Some(fw) = self.file_writers.get(&ino) {
+            fw.do_flush().await?;
+        }
+        Ok(())
+    }
+}
 
 type InternalSliceSeq = u64;
 
@@ -67,6 +121,8 @@ impl WriterPattern {
     }
 }
 
+pub(crate) type FileWritersRef = Arc<DashMap<Ino, Arc<FileWriter>>>;
+
 /// FileWriter is the entry point for writing data to a file.
 pub struct FileWriter {
     pub inode: Ino,
@@ -90,19 +146,23 @@ pub struct FileWriter {
     // to tell the background don't send the buffer back to the map.
     manually_flush: Arc<AtomicBool>,
     cancel_token: CancellationToken,
-    seq_generate: sonyflake::Sonyflake,
+    seq_generate: Arc<sonyflake::Sonyflake>,
 
     // random write early flush
     // when we reach the threshold, we should flush some flush to the remote storage.
     pattern: WriterPattern,
+    // TODO: implement me
     early_flush_threshold: f64,
 
     // dependencies
     // the underlying object storage.
-    object_storage: ObjectStorage,
+    data_manager: Weak<DataManager>,
 }
 
 impl FileWriter {
+    pub fn get_length(self: &Arc<Self>) -> usize {
+        self.length.load(Ordering::Acquire)
+    }
     /// Write data to the file.
     ///
     /// 1. calculate the location
@@ -242,7 +302,7 @@ impl FileWriter {
                     .next_id()
                     .expect("should not fail when generate internal seq"),
                 l.chunk_offset,
-                self.object_storage.clone(),
+                self.data_manager.clone(),
             ));
             entry.insert(sw._internal_seq, sw.clone());
             sws.push((sw, l));
@@ -458,7 +518,7 @@ struct SliceWriter {
 
     // dependencies
     // the underlying object storage.
-    object_storage: ObjectStorage,
+    data_manager: Weak<DataManager>,
 }
 
 impl Display for SliceWriter {
@@ -468,7 +528,7 @@ impl Display for SliceWriter {
 }
 
 impl SliceWriter {
-    fn new(seq: u64, offset_of_chunk: usize, object_storage: ObjectStorage) -> SliceWriter {
+    fn new(seq: u64, offset_of_chunk: usize, data_manager: Weak<DataManager>) -> SliceWriter {
         Self {
             _internal_seq: seq,
             slice_id: OnceCell::const_new_with(EMPTY_SLICE_ID),
@@ -477,7 +537,7 @@ impl SliceWriter {
             frozen: AtomicBool::new(false),
             freeze_notify: Default::default(),
             done: AtomicBool::new(false),
-            object_storage,
+            data_manager,
         }
     }
 

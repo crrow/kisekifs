@@ -1,0 +1,20 @@
+[package]
+name = "fuse"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fuser.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+libc.workspace = true
+snafu.workspace = true
+
+kiseki-utils = {path = "../../components/utils"}
+kiseki-types = {path = "../../components/types"}
+kiseki-storage = {path = "../../components/storage"}
+kiseki-common = {path = "../../components/common"}
+kiseki-meta = {path = "../../components/meta"}
+kiseki-vfs = { path = "../../components/vfs" }

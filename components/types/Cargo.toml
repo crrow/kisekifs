@@ -17,6 +17,8 @@ snafu.workspace = true
 rangemap.workspace = true
 sonyflake.workspace = true
 tokio-util.workspace = true
+bitflags.workspace = true
+libc.workspace = true
 
 kiseki-common = {path = "../../components/common"}
 kiseki-utils = {path = "../../components/utils"}

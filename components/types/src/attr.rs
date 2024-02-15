@@ -19,6 +19,32 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::ino::{Ino, ROOT_INO};
+use bitflags::bitflags;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetAttrFlags(pub u32);
+
+bitflags! {
+    impl SetAttrFlags: u32 {
+        const MODE = 1 << 0;
+        const UID = 1 << 1;
+        const GID = 1 << 2;
+        const SIZE = 1 << 3;
+        const ATIME = 1 << 4;
+        const MTIME = 1 << 5;
+        const CTIME = 1 << 6;
+        const ATIME_NOW = 1 << 7;
+        const MTIME_NOW = 1 << 8;
+        const FLAG = 1 << 15;
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    pub struct Flags: u8 {
+        const IMMUTABLE = 0x01;
+        const APPEND = 0x02;
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InodeAttr {

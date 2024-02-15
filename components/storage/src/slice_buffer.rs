@@ -15,9 +15,7 @@ use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
 use tracing::{debug, instrument, Instrument};
 
 use crate::{
-    error::{
-        InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
-    },
+    err::{InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu},
     pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
 };
 
@@ -694,7 +692,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-        // we should be able to write the next block
+                                                                               // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

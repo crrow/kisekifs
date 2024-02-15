@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use kiseki_storage::error::Error;
+use kiseki_storage::err::Error;
 use kiseki_types::ino::Ino;
 use libc::c_int;
 use snafu::{Location, Snafu};
@@ -92,7 +92,7 @@ pub enum VFSError {
         timeout: Duration,
     },
     ErrStorage {
-        source: kiseki_storage::error::Error,
+        source: kiseki_storage::err::Error,
     },
 }
 
@@ -111,7 +111,7 @@ impl From<MetaError> for VFSError {
     }
 }
 
-impl From<kiseki_storage::error::Error> for VFSError {
+impl From<kiseki_storage::err::Error> for VFSError {
     fn from(value: Error) -> Self {
         Self::ErrStorage { source: value }
     }

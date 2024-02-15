@@ -1,4 +1,4 @@
-use snafu::{Location, Snafu};
+use snafu::{location, Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -42,6 +42,18 @@ pub enum Error {
         location: Location,
         key: Vec<u8>,
     },
+
+    LibcError {
+        #[snafu(implicit)]
+        location: Location,
+        errno: libc::c_int,
+    },
+}
+
+impl Error {
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Error::ModelError { source, .. } if source.is_not_found())
+    }
 }
 
 pub mod model_err {
@@ -53,11 +65,12 @@ pub mod model_err {
     #[derive(Debug)]
     pub enum ModelKind {
         Attr,
-        EntryInfo,
+        DEntry,
         Symlink,
         Setting,
         Counter,
         ChunkSlices,
+        DirStat,
     }
 
     #[derive(Debug, Snafu)]
@@ -75,7 +88,7 @@ pub mod model_err {
         CorruptionString {
             kind: ModelKind,
             key: Vec<u8>,
-            source: FromUtf8Error,
+            reason: String,
         },
     }
 

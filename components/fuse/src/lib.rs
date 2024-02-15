@@ -1,3 +1,7 @@
+mod config;
+mod err;
+mod null;
+
 // JuiceFS, Copyright 2020 Juicedata, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,30 +16,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
     time::SystemTime,
 };
 
+use config::FuseConfig;
 use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
+use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
+use kiseki_meta::context::FuseContext;
+use kiseki_types::attr::InodeAttr;
+use kiseki_types::entry::EntryV2;
+use kiseki_types::ToErrno;
 use kiseki_types::{entry::Entry, ino::Ino};
-use libc::c_int;
+use kiseki_vfs::KisekiVFS;
+use libc::{__u64, c_int};
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
 use tracing::{debug, error, field, info, instrument, Instrument};
-
-use crate::{
-    common::err::ToErrno,
-    fuse::config::FuseConfig,
-    meta::{MetaContext, MAX_NAME_LENGTH},
-    vfs::KisekiVFS,
-};
-
-const BLOCK_SIZE: u32 = 4096;
 
 #[derive(Debug, Snafu)]
 pub enum FuseError {
@@ -81,22 +84,23 @@ impl KisekiFuse {
         })
     }
 
-    fn reply_entry(&self, ctx: &MetaContext, reply: ReplyEntry, mut entry: Entry) {
-        if !entry.is_special_inode()
-            && entry.is_file()
-            && self.vfs.modified_since(entry.inode, ctx.start_at)
-        {
-            debug!("refresh attr for {:?}", entry.inode);
+    // Mkdir
+    // Mknod
+    // Lookup
+    fn reply_entry(&self, ctx: &FuseContext, reply: ReplyEntry, mut entry: EntryV2) {
+        let inode = entry.get_inode();
+        if !inode.is_special() && entry.is_file() && self.vfs.modified_since(inode, ctx.start_at) {
+            debug!("refresh attr for {:?}", inode);
             match self
                 .runtime
-                .block_on(self.vfs.get_attr(entry.inode).in_current_span())
+                .block_on(self.vfs.get_attr(inode).in_current_span())
             {
                 Ok(new_attr) => {
-                    debug!("refresh attr for {:?} to {:?}", entry.inode, new_attr);
+                    debug!("refresh attr for {:?} to {:?}", inode, new_attr);
                     entry.attr = new_attr;
                 }
                 Err(e) => {
-                    debug!("failed to refresh attr for {:?} {:?}", entry.inode, e);
+                    debug!("failed to refresh attr for {:?} {:?}", inode, e);
                 }
             }
         }
@@ -108,27 +112,28 @@ impl KisekiFuse {
             entry.generation.unwrap(),
         );
     }
-    fn reply_attr(&self, ctx: &MetaContext, reply: ReplyAttr, mut entry: Entry) {
-        if !entry.inode.is_special()
-            && entry.is_file()
-            && self.vfs.modified_since(entry.inode, ctx.start_at)
-        {
-            debug!("refresh attr for {:?}", entry.inode);
+
+    fn reply_attr(&self, ctx: &FuseContext, reply: ReplyAttr, inode: Ino, mut attr: InodeAttr) {
+        if !inode.is_special() && attr.is_file() && self.vfs.modified_since(inode, ctx.start_at) {
+            debug!("refresh attr for {:?}", inode);
             match self
                 .runtime
-                .block_on(self.vfs.get_attr(entry.inode).in_current_span())
+                .block_on(self.vfs.get_attr(inode).in_current_span())
             {
                 Ok(new_attr) => {
-                    debug!("refresh attr for {:?} to {:?}", entry.inode, new_attr);
-                    entry.attr = new_attr;
+                    debug!("refresh attr for {:?} to {:?}", inode, new_attr);
+                    attr = new_attr;
                 }
                 Err(e) => {
-                    debug!("failed to refresh attr for {:?} {:?}", entry.inode, e);
+                    debug!("failed to refresh attr for {:?} {:?}", inode, e);
                 }
             }
         }
-        self.vfs.update_length(&mut entry);
-        reply.attr(&entry.ttl.unwrap(), &entry.attr.to_fuse_attr(entry.inode))
+        self.vfs.update_length_by_attr(inode, &mut attr);
+        reply.attr(
+            &self.vfs.get_entry_ttl(&attr.kind),
+            &attr.to_fuse_attr(inode),
+        )
     }
 }
 
@@ -139,7 +144,7 @@ impl Filesystem for KisekiFuse {
     /// object
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
         debug!("init kiseki...");
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         match self.runtime.block_on(self.vfs.init(&ctx).in_current_span()) {
             Ok(_) => {
                 // TODO
@@ -152,7 +157,7 @@ impl Filesystem for KisekiFuse {
     }
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
             name: name.to_owned(),
         }) {
@@ -198,9 +203,9 @@ impl Filesystem for KisekiFuse {
         match self
             .runtime
             .block_on(self.vfs.get_attr(Ino::from(ino)).in_current_span())
-            // .block_on(self.vfs.get_attr(Ino::from(ino)))
+        // .block_on(self.vfs.get_attr(Ino::from(ino)))
         {
-            Ok(attr) => reply.attr(&self.vfs.get_ttl(attr.kind), &attr.to_fuse_attr(ino)),
+            Ok(attr) => reply.attr(&self.vfs.get_entry_ttl(&attr.kind), &attr.to_fuse_attr(ino)),
             Err(e) => {
                 error!("getattr {:?} {:?}", ino, e);
                 reply.error(e.to_errno())
@@ -210,31 +215,58 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        let ctx = MetaContext::from(_req);
+        // 	http://man.he.net/man2/statfs
+        /*
+               struct statfs {
+                   __fsword_t f_type;    // Type of filesystem (see below)
+                   __fsword_t f_bsize;   // Optimal transfer block size
+                   fsblkcnt_t f_blocks;  // Total data blocks in filesystem
+                   fsblkcnt_t f_bfree;   // Free blocks in filesystem
+                   fsblkcnt_t f_bavail;  // Free blocks available to
+                                            unprivileged user
+                   fsfilcnt_t f_files;   // Total file nodes in filesystem
+                   fsfilcnt_t f_ffree;   // Free file nodes in filesystem
+                   fsid_t     f_fsid;    // Filesystem ID
+                   __fsword_t f_namelen; // Maximum length of filenames
+                   __fsword_t f_frsize;  // Fragment size (since Linux 2.6)
+                   __fsword_t f_flags;   // Mount flags of filesystem
+                                            (since Linux 2.6.36)
+                   __fsword_t f_spare[xxx];
+                                   // Padding bytes reserved for future use
+               };
+        */
+
+        let ctx = FuseContext::from(_req);
         // FIXME: use a better way
         let state = self
             .runtime
             .block_on(self.vfs.stat_fs(&ctx, _ino).in_current_span())
             .unwrap();
 
+        // Compute the total number of available blocks
+        let total_blocks = max(state.total_size / BLOCK_SIZE as u64, 1);
+        // Compute the total number of used blocks
+        let used_blocks = state.used_size / BLOCK_SIZE as u64;
+        // Compute the total number of remaining blocks
+        let remain_blocks = max(total_blocks as i64 - used_blocks as i64, 0) as u64;
+
         reply.statfs(
-            // BLOCKS: Number of free blocks available for use.
-            // blocks:
-            max(state.total_space / BLOCK_SIZE as u64, 1),
+            // blocks the total number of available blocks
+            total_blocks,
             // bfree: Number of free blocks available for use.
-            state.avail_space / BLOCK_SIZE as u64,
+            remain_blocks,
             // bavail: Number of blocks available to unprivileged users.
-            state.avail_space / BLOCK_SIZE as u64,
+            remain_blocks,
             // files: Total number of inodes (file system objects) in the file system.
-            state.used_inodes + state.available_inodes,
+            u64::MAX,
             // ffree: Number of free inodes available for creating new files.
-            state.available_inodes,
+            u64::MAX - state.file_count,
             // bsize: Fundamental block size of the file system (in bytes).
-            BLOCK_SIZE,
+            BLOCK_SIZE as u32,
             // namelen: Maximum length of a filename.
             MAX_NAME_LENGTH as u32,
             // frsize: Fragment size (if file system supports fragmentation).
-            BLOCK_SIZE,
+            BLOCK_SIZE as u32,
         );
     }
 
@@ -246,7 +278,7 @@ impl Filesystem for KisekiFuse {
     // fsyncdir.
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         match self
             .runtime
             .block_on(self.vfs.open_dir(&ctx, _ino, _flags).in_current_span())
@@ -265,7 +297,7 @@ impl Filesystem for KisekiFuse {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         let entries = match self
             .runtime
             .block_on(self.vfs.read_dir(&ctx, ino, fh, offset).in_current_span())
@@ -301,7 +333,7 @@ impl Filesystem for KisekiFuse {
         reply: ReplyEntry,
     ) {
         // mode_t is u32 on Linux but u16 on macOS, so cast it here
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         let name = name.to_string_lossy().to_string();
 
         match self.runtime.block_on(
@@ -332,7 +364,7 @@ impl Filesystem for KisekiFuse {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         let name = name.to_string_lossy().to_string();
 
         match self.runtime.block_on(
@@ -370,7 +402,7 @@ impl Filesystem for KisekiFuse {
         flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         match self.runtime.block_on(
             self.vfs
                 .set_attr(
@@ -387,7 +419,7 @@ impl Filesystem for KisekiFuse {
                 )
                 .in_current_span(),
         ) {
-            Ok(entry) => self.reply_attr(&ctx, reply, entry),
+            Ok(new_attr) => self.reply_attr(&ctx, reply, Ino(ino), new_attr),
             Err(e) => reply.error(e.to_errno()),
         }
     }
@@ -402,7 +434,7 @@ impl Filesystem for KisekiFuse {
         umask: u32,
         reply: ReplyEntry,
     ) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         let name = name.to_string_lossy().to_string();
         match self.runtime.block_on(
             self.vfs
@@ -416,7 +448,7 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=_ino, pid=_req.pid(), name=field::Empty))]
     fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         match self
             .runtime
             .block_on(self.vfs.open(&ctx, Ino(_ino), _flags).in_current_span())
@@ -438,7 +470,7 @@ impl Filesystem for KisekiFuse {
         lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         let mut bytes_read = 0;
         match self.runtime.block_on(
             self.vfs
@@ -479,7 +511,7 @@ impl Filesystem for KisekiFuse {
         lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let ctx = MetaContext::from(_req);
+        let ctx = FuseContext::from(_req);
         match self.runtime.block_on(
             self.vfs
                 .write(
@@ -503,7 +535,7 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
     fn flush(&mut self, req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
-        let ctx = MetaContext::from(req);
+        let ctx = FuseContext::from(req);
         match self.runtime.block_on(
             self.vfs
                 .flush(&ctx, Ino(ino), fh, lock_owner)

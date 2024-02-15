@@ -15,47 +15,54 @@
 use std::{
     fmt::{Debug, Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
-    time,
+    time::Duration,
     time::SystemTime,
 };
 
+use crate::config::Config;
+use crate::data_manager::{DataManager, DataManagerRef};
+use crate::err::{JoinErrSnafu, Result, StorageErrSnafu};
+use crate::handle::Handle;
+use crate::reader::FileReadersRef;
+use crate::writer::{FileWriter, FileWritersRef};
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use kiseki_common::MAX_FILE_SIZE;
+use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::context::FuseContext;
 use kiseki_meta::MetaEngineRef;
+use kiseki_storage::{
+    cache::CacheRef,
+    raw_buffer::ReadBuffer,
+    slice_buffer::{SliceBuffer, SliceBufferWrapper},
+};
+use kiseki_types::entry::{EntryV2, FullEntry};
+use kiseki_types::slice::SliceID;
 use kiseki_types::{
     attr::InodeAttr,
     entry::Entry,
     ino::{Ino, CONTROL_INODE, ROOT_INO},
     internal_nodes::{PreInternalNodes, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+    ToErrno,
 };
+use kiseki_utils::object_storage::ObjectStorage;
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{location, Location, ResultExt};
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace};
 
-use crate::{
-    common::{err::ToErrno, new_fs_sto, new_memory_sto},
-    vfs::{
-        config::VFSConfig,
-        err::{ErrLIBCSnafu, JoinSnafu, Result},
-        handle::Handle,
-        storage::Engine,
-        VFSError::ErrLIBC,
-        FH,
-    },
-};
-
 pub struct KisekiVFS {
-    config: VFSConfig,
-    meta: MetaEngineRef,
+    pub(crate) config: Config,
+
+    /* Runtime status */
     internal_nodes: PreInternalNodes,
-    pub(crate) data_engine: Arc<Engine>,
-    modified_at: DashMap<Ino, time::Instant>,
+    modified_at: DashMap<Ino, std::time::Instant>,
     pub(crate) _next_fh: AtomicU64,
     pub(crate) handles: DashMap<Ino, DashMap<FH, Arc<Handle>>>,
+    pub(crate) data_manager: DataManagerRef,
+
+    /* Dependencies */
+    pub(crate) meta: MetaEngineRef,
 }
 
 impl Debug for KisekiVFS {
@@ -65,7 +72,7 @@ impl Debug for KisekiVFS {
 }
 
 impl KisekiVFS {
-    pub fn new(vfs_config: VFSConfig, meta: MetaEngineRef) -> Result<Self> {
+    pub fn new(vfs_config: Config, meta: MetaEngineRef) -> Result<Self> {
         let mut internal_nodes =
             PreInternalNodes::new((vfs_config.entry_timeout, vfs_config.dir_entry_timeout));
         let config_inode = internal_nodes
@@ -81,22 +88,26 @@ impl KisekiVFS {
             internal_nodes.add_prefix();
         }
 
-        let meta = Arc::new(meta);
-        let object_storage = new_fs_sto();
-        let storage_engine = Arc::new(Engine::new(
-            Arc::new(vfs_config.engine_config.clone()),
-            object_storage,
+        let object_storage =
+            kiseki_utils::object_storage::new_fs_store(&vfs_config.object_storage_dsn)
+                .context(StorageErrSnafu)?;
+        let data_manager = Arc::new(DataManager::new(
+            vfs_config.page_size,
+            vfs_config.block_size,
+            vfs_config.chunk_size,
             meta.clone(),
-        )?);
+            object_storage,
+            kiseki_storage::cache::new_juice_builder().build()?,
+        ));
 
         let vfs = Self {
             config: vfs_config,
             internal_nodes,
-            data_engine: storage_engine,
-            meta: meta.clone(),
             modified_at: DashMap::new(),
             _next_fh: AtomicU64::new(1),
             handles: DashMap::new(),
+            data_manager,
+            meta,
         };
 
         // TODO: spawn a background task to clean up modified time.
@@ -115,18 +126,21 @@ impl KisekiVFS {
         Ok(())
     }
 
-    pub(crate) async fn stat_fs<I: Into<Ino>>(
+    pub async fn stat_fs<I: Into<Ino>>(
         &self,
-        ctx: &MetaContext,
+        ctx: &FuseContext,
         ino: I,
     ) -> Result<kiseki_types::stat::FSStat> {
         let ino = ino.into();
         trace!("fs:stat_fs with ino {:?}", ino);
-        let r = self.meta.stat_fs(ctx, ino).await?;
-        Ok(r)
+        let h = tokio::task::spawn_blocking(|| self.meta.stat_fs(ctx, ino))
+            .await
+            .context(JoinErrSnafu)??;
+
+        Ok(h)
     }
 
-    pub async fn lookup(&self, ctx: &MetaContext, parent: Ino, name: &str) -> Result<Entry> {
+    pub async fn lookup(&self, ctx: &FuseContext, parent: Ino, name: &str) -> Result<EntryV2> {
         trace!("fs:lookup with parent {:?} name {:?}", parent, name);
         // TODO: handle the special case
         if parent == ROOT_INO || name.eq(CONTROL_INODE_NAME) {
@@ -134,21 +148,24 @@ impl KisekiVFS {
                 return Ok(n.into());
             }
         }
-        if parent.is_special() && name == "." {
+        if parent.is_special() && name == DOT {
             if let Some(n) = self.internal_nodes.get_internal_node(parent) {
                 return Ok(n.into());
             }
         }
         let (inode, attr) = self.meta.lookup(ctx, parent, name, true).await?;
-        let ttl = self.get_entry_ttl(&attr);
-        let e = Entry::new_with_attr(inode, name, attr)
-            .set_ttl(ttl)
-            .set_generation(1);
-        Ok(e)
+        let ttl = self.get_entry_ttl(&attr.kind);
+        Ok(EntryV2::Full(FullEntry {
+            inode,
+            name: name.to_string(),
+            attr,
+            ttl,
+            generation: 1,
+        }))
     }
 
-    pub fn get_entry_ttl(&self, attr: &InodeAttr) -> time::Duration {
-        if attr.is_dir() {
+    pub fn get_entry_ttl(&self, kind: &FileType) -> Duration {
+        if kind == FileType::Directory {
             self.config.dir_entry_timeout
         } else {
             self.config.entry_timeout
@@ -176,7 +193,7 @@ impl KisekiVFS {
         }
     }
 
-    pub fn modified_since(&self, inode: Ino, start_at: time::Instant) -> bool {
+    pub fn modified_since(&self, inode: Ino, start_at: std::time::Instant) -> bool {
         match self.modified_at.get(&inode) {
             Some(v) => v.value() > &start_at,
             None => false,
@@ -195,17 +212,9 @@ impl KisekiVFS {
         Ok(attr)
     }
 
-    pub fn get_ttl(&self, kind: FileType) -> time::Duration {
-        if kind == FileType::Directory {
-            self.config.dir_entry_timeout
-        } else {
-            self.config.entry_timeout
-        }
-    }
-
     pub async fn open_dir<I: Into<Ino>>(
         &self,
-        ctx: &MetaContext,
+        ctx: &FuseContext,
         inode: I,
         flags: i32,
     ) -> Result<u64> {
@@ -220,7 +229,7 @@ impl KisekiVFS {
                     _ => 0, // do nothing, // Handle unexpected flags
                 };
             let attr = self.meta.get_attr(inode).await?;
-            access(ctx, inode, &attr, mmask)?;
+            ctx.check(inode, &attr, mmask)?;
         }
         Ok(self.new_handle(inode))
     }
@@ -344,7 +353,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn set_attr(
         &self,
-        ctx: &MetaContext,
+        ctx: &FuseContext,
         ino: Ino,
         flags: u32,
         atime: Option<TimeOrNow>,
@@ -354,7 +363,7 @@ impl KisekiVFS {
         gid: Option<u32>,
         size: Option<u64>,
         fh: Option<u64>,
-    ) -> Result<Entry> {
+    ) -> Result<InodeAttr> {
         info!(
             "fs:setattr with ino {:?} flags {:?} atime {:?} mtime {:?}",
             ino, flags, atime, mtime
@@ -503,7 +512,7 @@ impl KisekiVFS {
         let mut attr = self.meta.open_inode(ctx, inode, flags).await?;
         self.update_length_by_attr(inode, &mut attr);
         let opened_fh = self.new_file_handle(inode, attr.length, flags)?;
-        let ttl = self.get_ttl(attr.kind);
+        let ttl = self.get_entry_ttl(attr.kind);
         let entry = Entry::new_with_attr(inode, "", attr)
             .with_generation(1)
             .with_ttl(ttl)
@@ -573,7 +582,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn write(
         &self,
-        _ctx: &MetaContext,
+        _ctx: &FuseContext,
         ino: Ino,
         fh: u64,
         offset: i64,

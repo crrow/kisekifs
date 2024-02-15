@@ -11,7 +11,7 @@ use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
 
-use crate::error::Result;
+use crate::err::Result;
 
 lazy_static! {
     pub static ref GLOBAL_MEMORY_PAGE_POOL: Arc<memory_pool::MemoryPagePool> =

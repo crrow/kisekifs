@@ -16,7 +16,7 @@ use snafu::ResultExt;
 use tokio::{io::AsyncReadExt, sync::Notify, time::Instant};
 use tracing::debug;
 
-use crate::error::{DiskPoolMmapSnafu, UnknownIOSnafu};
+use crate::err::{DiskPoolMmapSnafu, UnknownIOSnafu};
 
 pub struct MemoryPagePool {
     page_size: usize,
@@ -136,7 +136,7 @@ impl Page {
         offset: usize,
         length: usize,
         writer: &mut W,
-    ) -> crate::error::Result<()>
+    ) -> crate::err::Result<()>
     where
         W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
@@ -154,7 +154,7 @@ impl Page {
         offset: usize,
         length: usize,
         reader: &mut R,
-    ) -> crate::error::Result<()>
+    ) -> crate::err::Result<()>
     where
         R: tokio::io::AsyncRead + Unpin + ?Sized,
     {
