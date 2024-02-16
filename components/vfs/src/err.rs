@@ -1,4 +1,5 @@
 use snafu::{Location, Snafu};
+use tracing::error;
 
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
@@ -44,8 +45,15 @@ impl From<kiseki_storage::err::Error> for Error {
 impl kiseki_types::ToErrno for Error {
     fn to_errno(&self) -> kiseki_types::Errno {
         match self {
-            Self::LibcError { errno, .. } => *errno,
-            _ => libc::EINTR,
+            Self::LibcError { errno, .. } => {
+                error!("libc error: {}", errno);
+                *errno
+            }
+            Self::MetaError { source } => {
+                error!("meta error: {}", source);
+                source.to_errno()
+            }
+            _ => panic!("unhandled error type in to_errno {}", self),
         }
     }
 }

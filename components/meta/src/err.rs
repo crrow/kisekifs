@@ -1,3 +1,5 @@
+use kiseki_types::ToErrno;
+use libc::c_int;
 use snafu::{location, Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -81,8 +83,10 @@ pub mod model_err {
     #[derive(Debug, Snafu)]
     #[snafu(visibility(pub))]
     pub enum Error {
-        #[snafu(display("Not found: {:?}", String::from_utf8_lossy(key.as_slice()).to_string()))]
-        NotFound { kind: ModelKind, key: Vec<u8> },
+        NotFound {
+            kind: ModelKind,
+            key: String,
+        },
         Corruption {
             kind: ModelKind,
             key: String,
@@ -98,6 +102,27 @@ pub mod model_err {
     impl Error {
         pub fn is_not_found(&self) -> bool {
             matches!(self, Error::NotFound { .. })
+        }
+    }
+}
+
+impl ToErrno for Error {
+    fn to_errno(&self) -> libc::c_int {
+        match self {
+            Error::Unknown { .. } => libc::EINTR,
+            Error::UnsupportedMetaDSN { .. } => libc::EINTR,
+            Error::TokioJoinError { .. } => libc::EINTR,
+            Error::RocksdbError { .. } => libc::EINTR,
+            Error::ModelError { source, .. } => {
+                if source.is_not_found() {
+                    libc::ENOENT
+                } else {
+                    libc::EINTR
+                }
+            }
+            Error::UninitializedEngine { .. } => libc::EINTR,
+            Error::InvalidSetting { .. } => libc::EINTR,
+            Error::LibcError { errno, .. } => *errno,
         }
     }
 }

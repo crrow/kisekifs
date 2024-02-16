@@ -24,6 +24,7 @@ use kiseki_types::{
     stat::{DirStat, FSStat},
     FileType,
 };
+
 use scopeguard::defer;
 use snafu::{ensure, ResultExt};
 use tokio::time::{timeout, Instant};
@@ -403,12 +404,19 @@ impl MetaEngine {
             }
         );
 
+        debug!("mknod with parent {:?}, name {:?}, typ {:?}, mode {:?}, cumask {:?}, rdev {:?}, path {:?}",
+            parent, name, typ, mode, cumask, rdev, path);
+
         let parent = self.check_root(parent);
         let (space, inodes) = (kiseki_utils::align::align4k(0), 1i64);
         // self.check_quota(ctx, space, inodes, parent)?;
+        debug!("do mknod");
         let r = self.do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)?;
+        debug!("do mknod finished");
 
+        debug!("update mem dir stat");
         self.update_mem_dir_stat(parent, 0, space, inodes)?;
+        debug!("update mem dir stat finished");
 
         Ok(r)
     }
@@ -452,7 +460,9 @@ impl MetaEngine {
         };
 
         // FIXME: we need transaction here
+        debug!("get attr {} from backend", parent);
         let mut parent_attr = self.backend.get_attr(parent)?;
+        debug!("get attr {} from backend succeed", parent);
         ensure!(
             parent_attr.is_dir(),
             LibcSnafu {

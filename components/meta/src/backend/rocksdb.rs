@@ -98,6 +98,8 @@ impl Backend for RocksdbBackend {
             })
             .transpose()?
             .unwrap_or(0u64);
+        debug!("current count: {}", current);
+
         let new = current + step as u64;
         let new_buf = bincode::serialize(&new)
             .context(model_err::CorruptionSnafu {
@@ -107,6 +109,7 @@ impl Backend for RocksdbBackend {
             .context(ModelSnafu)?;
         transaction.put(&key, new_buf).context(RocksdbSnafu)?;
         transaction.commit().context(RocksdbSnafu)?;
+        debug!("new count: {}", new);
         Ok(new)
     }
     fn load_count(&self, counter: Counter) -> Result<u64> {
