@@ -51,7 +51,7 @@ impl Default for Config {
             attr_timeout: Duration::from_secs(1),
             dir_entry_timeout: Duration::from_secs(1),
             file_entry_timeout: Duration::from_secs(1),
-            object_storage_dsn: "/tmp/kiseki.object_storage".to_string(),
+            object_storage_dsn: kiseki_common::KISEKI_DEBUG_OBJECT_STORAGE.to_string(),
             capacity: 100 << 10,
             total_buffer_capacity: PAGE_BUFFER_SIZE, // 300MB
             chunk_size: CHUNK_SIZE,                  // 64MB

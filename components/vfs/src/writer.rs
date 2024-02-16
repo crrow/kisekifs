@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
@@ -61,8 +62,11 @@ impl DataManager {
             // background_task_handle: (),
             data_manager: Arc::downgrade(self),
         };
+        let fw = Arc::new(fw);
+        self.file_writers.insert(ino, fw.clone());
 
-        self.file_writers.insert(ino, Arc::new(fw));
+        let ff = FileWriterFlusher { fw, rx };
+        tokio::spawn(async move { ff.run().await });
     }
 
     /// Use the [FileWriter] to write data to the file.
@@ -231,7 +235,7 @@ impl FileWriter {
         for (sw, l) in slice_writers.into_iter() {
             if let Some(req) = sw.make_background_flush_req().await {
                 if let Err(e) = self.slice_flush_queue.send(req).await {
-                    error!("failed to send flush request {e}");
+                    panic!("failed to send flush request {e}");
                 }
             }
         }
@@ -430,6 +434,7 @@ struct FileWriterFlusher {
 
 impl FileWriterFlusher {
     async fn run(mut self) {
+        debug!("{} flush task started", self.fw.inode);
         let cancel_token = self.fw.cancel_token.clone();
         let ino = self.fw.inode.clone();
 
@@ -443,6 +448,7 @@ impl FileWriterFlusher {
                     if let Some(req) = req {
                         match req {
                             FlushReq::FlushBulk {sw, offset} => {
+                                debug!("{ino} flush bulk to {offset}");
                                 tokio::spawn(async move {
                                     let r = sw.flush_bulk(offset).await;
                                     if let Err(e) = r {
@@ -451,6 +457,8 @@ impl FileWriterFlusher {
                                 });
                             },
                             FlushReq::FlushFull(sw) => {
+                                let (fl, wl ) = sw.get_flushed_length_and_total_write_length().await;
+                                debug!("{ino} flush full flushed_length {fl}, length: {wl}");
                                 tokio::spawn(async move {
                                     let r = sw.flush().await;
                                     if let Err(e) = r {
@@ -460,6 +468,7 @@ impl FileWriterFlusher {
                                 });
                             },
                             FlushReq::ManualFlush{sws, finished} => {
+                                debug!("{ino} manually flush started, slice write count {}", sws.len());
                                 let handles  = sws.into_iter().map(|sw | {
                                     tokio::spawn(async move {
                                         let r = sw.flush().await;
@@ -505,7 +514,7 @@ struct SliceWriter {
     // really do the flush.
     _internal_seq: u64,
     // the slice id of the slice, assigned by meta engine.
-    slice_id: OnceCell<SliceID>,
+    slice_id: AtomicU64,
     // where the slice start at of the chunk
     offset_of_chunk: usize,
     // the buffer to serve the write request.
@@ -535,7 +544,7 @@ impl SliceWriter {
     fn new(seq: u64, offset_of_chunk: usize, data_manager: Weak<DataManager>) -> SliceWriter {
         Self {
             _internal_seq: seq,
-            slice_id: OnceCell::const_new_with(EMPTY_SLICE_ID),
+            slice_id: AtomicU64::new(EMPTY_SLICE_ID),
             offset_of_chunk,
             slice_buffer: RwLock::new(SliceBuffer::new()),
             frozen: AtomicBool::new(false),
@@ -552,16 +561,51 @@ impl SliceWriter {
     }
 
     async fn flush_bulk(self: &Arc<Self>, offset: usize) -> Result<()> {
+        self.prepare_slice_id().await?;
+
         let mut write_guard = self.slice_buffer.write().await;
-        // TODO: implement it
-        // write_guard.flush_bulk_to(offset, | bi, bs | -> String {
-        //     make_slice_object_key(self.slice_id.get_or_init(), bi, bs)
-        // }, self.object_storage.clone()).await?;
+        write_guard
+            .flush_bulk_to(
+                offset,
+                |bi, bs| -> String {
+                    make_slice_object_key(self.slice_id.load(Ordering::Acquire), bi, bs)
+                },
+                self.data_manager.upgrade().unwrap().object_storage.clone(),
+            )
+            .await?;
         Ok(())
     }
 
     async fn flush(self: &Arc<Self>) -> Result<()> {
-        todo!()
+        self.prepare_slice_id().await?;
+        let mut write_guard = self.slice_buffer.write().await;
+        write_guard
+            .flush(
+                |bi, bs| -> String {
+                    make_slice_object_key(self.slice_id.load(Ordering::Acquire), bi, bs)
+                },
+                self.data_manager.upgrade().unwrap().object_storage.clone(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn prepare_slice_id(self: &Arc<Self>) -> Result<()> {
+        let old = self.slice_id.load(Ordering::Acquire);
+        if old != EMPTY_SLICE_ID {
+            return Ok(());
+        }
+
+        let data_manager = self
+            .data_manager
+            .upgrade()
+            .expect("data manager should not be dropped");
+        let slice_id = data_manager.meta_engine.next_slice_id().await?;
+        // don't care about the result, since we only care about the first time.
+        let _ = self
+            .slice_id
+            .compare_exchange(0, slice_id, Ordering::AcqRel, Ordering::Acquire);
+        Ok(())
     }
 
     // try_make_background_flush_req try to make flush req if we write enough data.

@@ -1,6 +1,4 @@
-use crossbeam::atomic::AtomicCell;
 use tokio::sync::RwLock;
-use tracing::debug;
 
 use crate::{
     backend::{key::Counter, BackendRef},
