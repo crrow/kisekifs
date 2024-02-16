@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::err::Result;
 use std::{fmt::Display, path::PathBuf, str::FromStr, time::Duration};
 
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
@@ -51,25 +52,12 @@ impl Default for AccessTimeMode {
 pub struct MetaConfig {
     pub dsn: String,
 
-    // update ctime
-    pub strict: bool,
-    pub retries: usize,
-    pub max_deletes: usize,
     pub skip_dir_nlink: usize,
-    pub case_insensitive: bool,
     pub read_only: bool,
-    // disable background jobs
-    pub no_bg_job: bool,
+    /// The duration to reuse open file without checking update (0 means disable this feature)
     pub open_cache: Duration,
-    // max number of files to cache (soft limit)
+    /// max number of open files to cache (soft limit, 0 means unlimited)
     pub open_cache_limit: usize,
-    pub heartbeat: Duration,
-    pub mount_point: PathBuf,
-    // mount a sub-directory as root
-    // pub sub_dir: Option<PathBuf>,
-    pub atime_mode: AccessTimeMode,
-    pub dir_stat_flush_period: Duration,
-    pub skip_dir_mtime: Duration,
 }
 
 impl MetaConfig {
@@ -82,25 +70,11 @@ impl MetaConfig {
 impl Default for MetaConfig {
     fn default() -> Self {
         Self {
-            // dsn: "rocksdb://:tmp/kiseki.meta".to_string(),
-            dsn: "/tmp/kiseki.meta".to_string(),
-            strict: true,
-            retries: 10,
-            max_deletes: 2,
+            dsn: kiseki_common::KISEKI_DEBUG_META_ADDR.to_string(),
             skip_dir_nlink: 0,
-            case_insensitive: false,
             read_only: false,
-            no_bg_job: false,
             open_cache: Duration::default(),
-            open_cache_limit: 0,
-            heartbeat: Duration::from_secs(12),
-            mount_point: PathBuf::new(),
-            atime_mode: Default::default(),
-            dir_stat_flush_period: Duration::from_secs(1),
-            skip_dir_mtime: Default::default(),
+            open_cache_limit: 10_000,
         }
     }
 }
-
-const MIN_CLIENT_VERSION: &str = "1";
-const MAX_META_VERSION: usize = 1;

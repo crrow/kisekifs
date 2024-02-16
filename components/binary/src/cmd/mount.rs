@@ -25,6 +25,7 @@ use tracing::info;
 
 use crate::build_info;
 use kiseki_common::KISEKI;
+use kiseki_common::KISEKI_DEBUG_META_ADDR;
 use kiseki_fuse::{null, FuseConfig};
 use kiseki_meta::MetaConfig;
 use kiseki_vfs::{Config as VFSConfig, KisekiVFS};
@@ -155,27 +156,13 @@ pub struct MountArgs {
     )]
     pub foreground: bool,
 
-    #[clap(flatten)]
-    pub meta_args: MetaArgs,
-}
-
-#[derive(Debug, Clone, Parser)]
-pub struct MetaArgs {
-    #[arg(
-    long,
-    help = "Specify the dsn of the meta store",
-    help_heading = META_OPTIONS_HEADER,
-    default_value = "rocksdb",
-    )]
-    pub dsn: String, // FIXME
-
     #[arg(
     long,
     help = "Specify the address of the meta store",
     help_heading = META_OPTIONS_HEADER,
-    default_value = "/tmp/kiseki-meta",
+    default_value = kiseki_common::KISEKI_DEBUG_META_ADDR,
     )]
-    pub meta_address: String,
+    pub meta_dsn: String,
 }
 
 impl MountArgs {
@@ -205,12 +192,7 @@ impl MountArgs {
     }
     fn meta_config(&self) -> Result<MetaConfig, Whatever> {
         let mut mc = MetaConfig::default();
-        // TODO: fix me
-        mc.with_dsn("rockdb://localhost:1234/kiseki-meta");
-        // mc.scheme = opendal::Scheme::from_str(&self.meta_args.scheme)
-        //     .with_whatever_context(|_| format!("invalid scheme {}", &self.meta_args.scheme))?;
-        // mc.scheme_config
-        //     .insert("datadir".to_string(), self.meta_args.meta_address.clone());
+        mc.with_dsn(&self.meta_dsn);
         Ok(mc)
     }
 

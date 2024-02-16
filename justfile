@@ -65,12 +65,12 @@ alias sh-m := help-mount
 @release-mount:
     just clean
     just prepare
-    cargo run --release --color=always --bin kiseki mount --no-log
+    cargo run --release --color=always --package kiseki-binary mount --no-log
 
 @profile-mount:
     just clean
     just prepare
-    cargo flamegraph --bin kiseki -- mount --no-log
+    cargo flamegraph --package kiseki-binary -- mount --no-log
 
 # ==================================================== umount
 
@@ -94,12 +94,16 @@ alias sh-f := help-format
 
 @clean:
     - rm -r /tmp/kiseki
-    echo "Done"
-    - rm -r /tmp/kiseki-meta/
-    echo "Done"
+    echo "Done: remove mount point"
+    - rm -r /tmp/kiseki.meta/
+    echo "Done: remove meta dir"
+    - rm -r /tmp/kiseki.cache/
+    echo "Done: remove cache dir"
+    - rm -r /tmp/kiseki.data/
+    echo "Done: remove data dir"
 
 @prepare:
-    mkdir -p /tmp/kiseki /tmp/kiseki-meta/
+    mkdir -p /tmp/kiseki /tmp/kiseki.meta/
     just format
 
 alias sw := seq-write

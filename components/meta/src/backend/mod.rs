@@ -17,7 +17,7 @@ mod rocksdb;
 use crate::err::UnsupportedMetaDSNSnafu;
 
 // TODO: optimize me
-pub fn open_backend(dsn: String) -> Result<BackendRef> {
+pub fn open_backend(dsn: &str) -> Result<BackendRef> {
     let x = dsn.splitn(2, "://:").collect::<Vec<_>>();
     ensure!(x.len() == 2, UnsupportedMetaDSNSnafu { dsn: dsn.clone() });
     let backend_kind = x[0];

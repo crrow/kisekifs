@@ -37,15 +37,29 @@ use kiseki_types::slice::{Slice, SliceID, Slices, SLICE_BYTES};
 pub type MetaEngineRef = Arc<MetaEngine>;
 
 pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
-    let backend = open_backend(config.dsn)?;
+    let backend = open_backend(&config.dsn)?;
     let format = backend.load_format()?;
 
-    todo!()
+    let me = MetaEngine {
+        open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
+        config,
+        format,
+        root: Default::default(),
+        sub_trash: None,
+        dir_parents: Default::default(),
+        fs_stat: Default::default(),
+        dir_stats: Default::default(),
+        free_inodes: IdTable::new(backend.clone(), Counter::NextInode),
+        free_slices: IdTable::new(backend.clone(), Counter::NextSlice),
+        backend,
+    };
+
+    Ok(Arc::new(me))
 }
 
 // update_format is used to change the file system's setting.
 pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
-    let backend = open_backend(dsn)?;
+    let backend = open_backend(&dsn)?;
 
     let mut need_init_root = false;
     match backend.load_format() {
@@ -217,8 +231,10 @@ impl MetaEngine {
         debug!("get_attr with inode {:?}", inode);
         let inode = self.check_root(inode);
         // check cache
-        if let Some(attr) = self.open_files.check(inode) {
-            return Ok(attr);
+        if !self.config.open_cache.is_zero() {
+            if let Some(attr) = self.open_files.check(inode) {
+                return Ok(attr);
+            }
         }
 
         // TODO: add timeout here
@@ -919,8 +935,8 @@ impl MetaEngine {
         );
 
         // TODO: update access time
-        let of = self.open_files.files.get_mut(&inode);
-        if let Some(of) = of {
+
+        if let Some(of) = self.open_files.files.get_mut(&inode) {
             if let Some(svs) = of.chunks.get(&chunk_index) {
                 debug!(
                     "read ino {} chunk {} slice info from cache, get count {}",
@@ -930,7 +946,7 @@ impl MetaEngine {
                 );
                 return Ok(Some(svs.clone()));
             }
-        };
+        }
 
         let slices = self.backend.get_chunk_slices(inode, chunk_index)?;
         // let slice_info_buf = match slice_info_buf {
@@ -947,6 +963,7 @@ impl MetaEngine {
         // TODO: build cache.
         self.open_files
             .update_chunk_slices_info(inode, chunk_index, slices.clone());
+
         Ok(Some(slices))
     }
 }
