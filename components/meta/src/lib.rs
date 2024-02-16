@@ -3,7 +3,7 @@ mod config;
 pub use config::MetaConfig;
 pub mod context;
 mod engine;
-pub use engine::MetaEngineRef;
+pub use engine::{open, update_format, MetaEngineRef};
 mod err;
 pub use err::Error;
 mod id_table;

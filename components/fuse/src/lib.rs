@@ -14,8 +14,9 @@
 
 mod config;
 mod err;
-mod null;
+pub mod null;
 
+use std::sync::Arc;
 use std::time::Duration;
 use std::{
     cmp::max,
@@ -23,10 +24,11 @@ use std::{
     time::SystemTime,
 };
 
-use config::FuseConfig;
+pub use config::FuseConfig;
 use fuser::{
     FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
+    TimeOrNow,
 };
 use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
 use kiseki_meta::context::{FuseContext, EMPTY_CONTEXT};
@@ -60,7 +62,7 @@ impl ToErrno for FuseError {
 #[derive(Debug)]
 pub struct KisekiFuse {
     config: FuseConfig,
-    vfs: KisekiVFS,
+    vfs: Arc<KisekiVFS>,
     runtime: runtime::Runtime,
 }
 
@@ -79,7 +81,7 @@ impl KisekiFuse {
         );
         Ok(Self {
             config: fuse_config,
-            vfs,
+            vfs: Arc::new(vfs),
             runtime,
         })
     }
@@ -105,11 +107,10 @@ impl KisekiFuse {
             }
         }
 
-        self.vfs.update_file_length(&mut entry);
-        let attr = &entry.attr;
+        self.vfs.update_length(inode, &mut entry.attr);
         reply.entry(
-            self.get_entry_ttl(entry.is_file()),
-            attr.to_fuse_attr(entry.inode),
+            self.vfs.get_entry_ttl(entry.attr.kind),
+            &entry.attr.to_fuse_attr(entry.inode),
             1,
         );
     }
@@ -141,7 +142,7 @@ impl KisekiFuse {
                     debug!("failed to refresh attr for {:?} {:?}", inode, e);
                 }
             }
-            self.vfs.update_length_by_attr(inode, &mut attr);
+            self.vfs.update_length(inode, &mut attr);
         }
 
         reply.attr(self.vfs.get_entry_ttl(attr.kind), &attr.to_fuse_attr(inode))
@@ -247,11 +248,11 @@ impl Filesystem for KisekiFuse {
                };
         */
 
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         // FIXME: use a better way
         let state = self
             .runtime
-            .block_on(self.vfs.stat_fs(&ctx, _ino).in_current_span())
+            .block_on(self.vfs.stat_fs(ctx, _ino).in_current_span())
             .unwrap();
 
         // Compute the total number of available blocks
@@ -309,10 +310,11 @@ impl Filesystem for KisekiFuse {
         mut reply: ReplyDirectory,
     ) {
         let ctx = FuseContext::from(_req);
-        let entries = match self
-            .runtime
-            .block_on(self.vfs.read_dir(&ctx, ino, fh, offset).in_current_span())
-        {
+        let entries = match self.runtime.block_on(
+            self.vfs
+                .read_dir(&ctx, ino, fh, offset, false)
+                .in_current_span(),
+        ) {
             Ok(n) => n,
             Err(e) => {
                 reply.error(e.to_errno());
@@ -323,13 +325,29 @@ impl Filesystem for KisekiFuse {
         let mut offset = offset + 1;
         debug!("get entry length: { }", entries.len());
         for entry in entries.iter() {
-            if reply.add(entry.inode.into(), offset, entry.attr.kind, &entry.name) {
+            if reply.add(
+                entry.get_inode().0,
+                offset,
+                entry.get_file_type(),
+                &entry.get_name(),
+            ) {
                 break;
             } else {
                 offset += 1;
             }
         }
         reply.ok();
+    }
+
+    fn readdirplus(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        reply: ReplyDirectoryPlus,
+    ) {
+        todo!()
     }
 
     #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]

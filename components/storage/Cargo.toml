@@ -36,6 +36,7 @@ log = "0.4.20"
 byte-pool = "0.2.4"
 fmmap = {version = "0.3.3", features = ["tokio","tokio-async"]}
 crc32fast = "1.3.2"
+moka = { version = "0.12.5", features = ["future"] }
 
 [dev-dependencies]
 criterion.workspace = true

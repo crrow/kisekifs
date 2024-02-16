@@ -10,10 +10,11 @@ use crate::{backend::key::Counter, err::Result};
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
+use rocksdb as rocksdb_backend;
 
 // TODO: optimize me
 pub fn open_backend<P: AsRef<Path>>(path: P) -> Result<BackendRef> {
-    let mut builder = rocksdb::Builder::default();
+    let mut builder = rocksdb_backend::Builder::default();
     builder.with_path(path.as_ref());
     builder.build()
 }

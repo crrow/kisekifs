@@ -1,5 +1,5 @@
 use crate::data_manager::{DataManager, DataManagerRef};
-use crate::err::Result;
+use crate::err::{Result, StorageSnafu};
 use crate::KisekiVFS;
 use dashmap::DashMap;
 use kiseki_common::{ChunkIndex, FH};
@@ -8,6 +8,7 @@ use kiseki_storage::raw_buffer::ReadBuffer;
 use kiseki_types::ino::Ino;
 use kiseki_types::slice::{OverlookedSlicesRef, Slice, SliceID};
 use rangemap::RangeMap;
+use snafu::ResultExt;
 use std::cmp::min;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
@@ -36,7 +37,7 @@ impl DataManager {
                 let fr = FileReader {
                     data_engine: Arc::downgrade(&self),
                     fh,
-                    ino,
+                    ino: inode,
                     length,
                     chunks: Default::default(),
                     closing: Default::default(),
@@ -146,8 +147,8 @@ impl FileReader {
             let mut virtual_slice_map = RangeMap::new();
             {
                 let overlap = raw_slices.overlook();
-                let overlap_slices = overlap.iter().collect_vec();
-                println!("overlap_slices: {:?}", overlap_slices);
+                // let overlap_slices = overlap.iter().collect_vec();
+                // println!("overlap_slices: {:?}", overlap_slices);
             }
 
             let range_map = raw_slices.overlook();
@@ -182,7 +183,7 @@ impl FileReader {
                             chunk_idx, r, s
                         );
                         let rb = engine.new_read_buffer(s.get_id(), s.get_underlying_size());
-                        rb.read_at(0, &mut dst[start..end])?;
+                        rb.read_at(0, &mut dst[start..end]).context(StorageSnafu)?;
                     }
                 }
                 total_read_len += len;

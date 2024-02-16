@@ -36,6 +36,60 @@ use kiseki_types::slice::{Slice, SliceID, Slices, SLICE_BYTES};
 
 pub type MetaEngineRef = Arc<MetaEngine>;
 
+pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
+    let backend = open_backend(config.dsn)?;
+    let format = backend.load_format()?;
+
+    todo!()
+}
+
+// update_format is used to change the file system's setting.
+pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
+    let backend = open_backend(dsn)?;
+
+    let mut need_init_root = false;
+    match backend.load_format() {
+        Ok(old_format) => {
+            if !old_format.dir_stats && format.dir_stats {
+                // remove dir stats as they are outdated
+            }
+            // TODO: update the old format
+        }
+        Err(e) => {
+            if matches!(e, Error::UninitializedEngine { .. }) {
+                // we need to initialize the engine
+                need_init_root = true;
+            }
+        }
+    }
+
+    let mut basic_attr = InodeAttr::default()
+        .set_kind(kiseki_types::FileType::Directory)
+        .set_nlink(2)
+        .set_length(4 << 10)
+        .set_parent(ROOT_INO)
+        .to_owned();
+
+    if format.trash_days > 0 {
+        if let Err(e) = backend.get_attr(TRASH_INODE) {
+            if e.is_not_found() {
+                basic_attr.set_perm(0o555);
+                backend.set_attr(TRASH_INODE, &basic_attr)?;
+            } else {
+                return Err(e);
+            }
+        }
+    }
+    backend.set_format(&format)?;
+    if need_init_root {
+        basic_attr.set_perm(0o777);
+        backend.set_attr(ROOT_INO, &basic_attr)?;
+        backend.increase_count_by(Counter::NextInode, 2)?;
+    }
+
+    Ok(())
+}
+
 pub struct MetaEngine {
     config: MetaConfig,
     format: Format,
@@ -61,68 +115,16 @@ impl Display for MetaEngine {
 }
 
 impl MetaEngine {
-    // update_format is used to change the file system's setting.
-    pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
-        let backend = open_backend(dsn)?;
-
-        let mut need_init_root = false;
-        match backend.load_format() {
-            Ok(old_format) => {
-                if !old_format.dir_stats && format.dir_stats {
-                    // remove dir stats as they are outdated
-                }
-                // TODO: update the old format
-            }
-            Err(e) => {
-                if matches!(e, Error::UninitializedEngine { .. }) {
-                    // we need to initialize the engine
-                    need_init_root = true;
-                }
-            }
-        }
-
-        let mut basic_attr = InodeAttr::default()
-            .set_kind(kiseki_types::FileType::Directory)
-            .set_nlink(2)
-            .set_length(4 << 10)
-            .set_parent(ROOT_INO)
-            .to_owned();
-
-        if format.trash_days > 0 {
-            if let Err(e) = backend.get_attr(TRASH_INODE) {
-                if e.is_not_found() {
-                    basic_attr.set_perm(0o555);
-                    backend.set_attr(TRASH_INODE, &basic_attr)?;
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-        backend.set_format(&format)?;
-        if need_init_root {
-            basic_attr.set_perm(0o777);
-            backend.set_attr(ROOT_INO, &basic_attr)?;
-            backend.increase_count_by(Counter::NextInode, 2)?;
-        }
-
-        Ok(())
-    }
     pub fn get_format(&self) -> &Format {
         &self.format
     }
 
-    pub fn open(config: MetaConfig) -> Result<Self> {
-        let backend = open_backend(config.dsn)?;
-        let format = backend.load_format()?;
-
-        todo!()
-    }
     pub fn next_slice_id(&self) -> Result<SliceID> {
         self.free_slices.next()
     }
 
     /// StatFS returns summary statistics of a volume.
-    pub fn stat_fs(&self, ctx: &FuseContext, inode: Ino) -> Result<FSStat> {
+    pub fn stat_fs(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<FSStat> {
         let stat = self.fs_stat.load();
 
         // let inode = self.check_root(inode);

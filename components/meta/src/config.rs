@@ -72,6 +72,13 @@ pub struct MetaConfig {
     pub skip_dir_mtime: Duration,
 }
 
+impl MetaConfig {
+    pub fn with_dsn(&mut self, dsn: &str) -> &mut Self {
+        self.dsn = dsn.to_string();
+        self
+    }
+}
+
 impl Default for MetaConfig {
     fn default() -> Self {
         Self {

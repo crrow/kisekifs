@@ -84,4 +84,18 @@ impl Entry {
             Entry::DEntry(e) => e.typ == FileType::RegularFile,
         }
     }
+
+    pub fn get_file_type(&self) -> FileType {
+        match self {
+            Entry::Full(e) => e.attr.kind,
+            Entry::DEntry(e) => e.typ,
+        }
+    }
+
+    pub fn get_name(&self) -> &str {
+        match self {
+            Entry::Full(e) => &e.name,
+            Entry::DEntry(e) => &e.name,
+        }
+    }
 }

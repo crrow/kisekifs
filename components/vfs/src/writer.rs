@@ -27,6 +27,7 @@ use kiseki_types::{
     slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
 };
 use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
+use libc::EBADF;
 use rangemap::RangeMap;
 use snafu::{OptionExt, ResultExt};
 use tokio::{
@@ -36,7 +37,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::err::{InvalidInoSnafu, JoinErrSnafu, Result, StorageErrSnafu};
+use crate::err::{JoinErrSnafu, LibcSnafu, Result};
 use crate::reader::FileReader;
 use crate::KisekiVFS;
 
@@ -73,7 +74,7 @@ impl DataManager {
         let fw = self
             .file_writers
             .get(&ino)
-            .context(InvalidInoSnafu { ino })?;
+            .context(LibcSnafu { errno: EBADF })?;
         debug!("get file write success");
         let write_len = fw.write(offset, data).await?;
         self.truncate_reader(ino, fw.get_length() as u64);
@@ -543,10 +544,7 @@ impl SliceWriter {
 
     async fn write_at(self: &Arc<Self>, offset: usize, data: &[u8]) -> Result<usize> {
         let mut write_guard = self.slice_buffer.write().await;
-        let written = write_guard
-            .write_at(offset, data)
-            .await
-            .context(StorageErrSnafu)?;
+        let written = write_guard.write_at(offset, data).await?;
         Ok(written)
     }
 

@@ -21,7 +21,8 @@ use std::{
 
 use crate::config::Config;
 use crate::data_manager::{DataManager, DataManagerRef};
-use crate::err::{JoinErrSnafu, LibcSnafu, OpenDalSnafu, Result, StorageErrSnafu};
+use crate::err::Error::LibcError;
+use crate::err::{JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result, StorageSnafu};
 use crate::handle::Handle;
 use crate::reader::FileReadersRef;
 use crate::writer::{FileWriter, FileWritersRef};
@@ -37,6 +38,7 @@ use kiseki_storage::{
     slice_buffer::{SliceBuffer, SliceBufferWrapper},
 };
 use kiseki_types::attr::SetAttrFlags;
+use kiseki_types::entry::Entry;
 use kiseki_types::slice::SliceID;
 use kiseki_types::{
     attr::InodeAttr,
@@ -99,7 +101,7 @@ impl KisekiVFS {
             object_storage,
             kiseki_storage::cache::new_juice_builder()
                 .build()
-                .context(StorageErrSnafu)?,
+                .context(StorageSnafu)?,
         ));
 
         let vfs = Self {
@@ -119,7 +121,7 @@ impl KisekiVFS {
 
     pub async fn init(&self, ctx: &FuseContext) -> Result<()> {
         debug!("vfs:init");
-        let _format = self.meta.load_format(false).await?;
+        // let _format = self.meta.get_format().await?;
         // if let Some(sub_dir) = &self.meta.config.sub_dir {
         //     self.meta.chroot(ctx, sub_dir).await?;
         // }
@@ -129,13 +131,14 @@ impl KisekiVFS {
     }
 
     pub async fn stat_fs<I: Into<Ino>>(
-        &self,
-        ctx: &FuseContext,
+        self: &Arc<Self>,
+        ctx: Arc<FuseContext>,
         ino: I,
     ) -> Result<kiseki_types::stat::FSStat> {
         let ino = ino.into();
         trace!("fs:stat_fs with ino {:?}", ino);
-        let h = tokio::task::spawn_blocking(|| self.meta.stat_fs(ctx, ino))
+        let cloned_self = self.clone();
+        let h = tokio::task::spawn_blocking(move || cloned_self.meta.stat_fs(ctx, ino))
             .await
             .context(JoinErrSnafu)??;
 
@@ -147,12 +150,12 @@ impl KisekiVFS {
         // TODO: handle the special case
         if parent == ROOT_INO || name.eq(CONTROL_INODE_NAME) {
             if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
-                return Ok(n.into());
+                return Ok(n.0.clone());
             }
         }
         if parent.is_special() && name == DOT {
             if let Some(n) = self.internal_nodes.get_internal_node(parent) {
-                return Ok(n.into());
+                return Ok(n.0.clone());
             }
         }
         let (inode, attr) = self.meta.lookup(ctx, parent, name, true).await?;
@@ -230,7 +233,8 @@ impl KisekiVFS {
         inode: I,
         fh: u64,
         offset: i64,
-    ) -> Result<Vec<FullEntry>> {
+        plus: bool,
+    ) -> Result<Vec<Entry>> {
         let inode = inode.into();
         debug!(
             "fs:readdir with ino {:?} fh {:?} offset {:?}",
@@ -244,18 +248,13 @@ impl KisekiVFS {
 
         let mut h = h.inner.write().await;
         if h.children.is_empty() || offset == 0 {
+            // FIXME
             h.read_at = Some(Instant::now());
-            let children = match self.meta.read_dir(ctx, inode, true).await {
-                Ok(children) => children,
-                Err(e) => {
-                    if e.to_errno() == libc::EACCES {
-                        self.meta.read_dir(ctx, inode, false).await?
-                    } else {
-                        return Err(e)?;
-                    }
-                }
-            };
-            h.children = children;
+            h.children = self
+                .meta
+                .read_dir(ctx, inode, plus)
+                .await
+                .context(MetaSnafu)?;
         }
 
         if (offset as usize) < h.children.len() {
@@ -300,12 +299,9 @@ impl KisekiVFS {
                 rdev,
                 String::new(),
             )
-            .await?;
-        let ttl = self.get_entry_ttl(attr.kind);
-        Ok(FullEntry::new_with_attr(ino, &name, attr)
-            .with_generation(1)
-            .with_ttl(ttl)
-            .to_owned())
+            .await
+            .context(MetaSnafu)?;
+        Ok(FullEntry::new(ino, &name, attr))
     }
 
     pub async fn create(
@@ -334,14 +330,11 @@ impl KisekiVFS {
         let (inode, attr) = self
             .meta
             .create(ctx, parent, name, mode & 0o777, cumask, flags)
-            .await?;
+            .await
+            .context(MetaSnafu)?;
 
-        let ttl = self.get_entry_ttl(attr.kind);
-        let mut e = FullEntry::new_with_attr(inode, name, attr)
-            .with_generation(1)
-            .with_ttl(ttl)
-            .to_owned();
-        self.update_file_length(&mut e);
+        let mut e = FullEntry::new(inode, name, attr);
+        self.update_length(inode, &mut e.attr);
         let fh = self.new_file_handle(inode, e.attr.length, flags)?;
         Ok((e, fh))
     }
@@ -367,7 +360,7 @@ impl KisekiVFS {
 
         if ino.is_special() {
             return if let Some(n) = self.internal_nodes.get_internal_node(ino) {
-                Ok(n.into())
+                Ok(n.get_attr())
             } else {
                 return LibcSnafu { errno: EPERM }.fail()?;
             };
@@ -432,7 +425,8 @@ impl KisekiVFS {
             if ctx.check_permission {
                 self.meta
                     .check_set_attr(ctx, ino, flags, &mut new_attr)
-                    .await?;
+                    .await
+                    .context(MetaSnafu)?;
             }
             let mtime = match mtime.unwrap() {
                 TimeOrNow::SpecificTime(st) => st,
@@ -444,20 +438,16 @@ impl KisekiVFS {
             }
         }
 
-        let entry = self
-            .meta
+        self.meta
             .set_attr(ctx, flags, ino, &mut new_attr)
             .await
-            .map(|mut entry| {
-                self.update_file_length(&mut entry);
-                let ttl = self.get_entry_ttl(new_attr.kind);
-                entry.with_ttl(ttl);
-                entry
-            })?;
+            .context(MetaSnafu)?;
+
+        self.update_length(ino, &mut new_attr);
 
         // TODO: invalid open_file cache
 
-        Ok(entry)
+        Ok(new_attr)
     }
 
     async fn truncate(&self, _ino: Ino, _size: u64, _fh: Option<u64>) -> Result<InodeAttr> {
@@ -488,7 +478,11 @@ impl KisekiVFS {
             .fail()?;
         };
 
-        let (ino, attr) = self.meta.mkdir(ctx, parent, name, mode, umask).await?;
+        let (ino, attr) = self
+            .meta
+            .mkdir(ctx, parent, name, mode, umask)
+            .await
+            .context(MetaSnafu)?;
         Ok(FullEntry::new(ino, name, attr))
     }
 
@@ -505,8 +499,12 @@ impl KisekiVFS {
             // libc::O_RDONLY { }
         }
 
-        let mut attr = self.meta.open_inode(ctx, inode, flags).await?;
-        self.update_length_by_attr(inode, &mut attr);
+        let mut attr = self
+            .meta
+            .open_inode(ctx, inode, flags)
+            .await
+            .context(MetaSnafu)?;
+        self.update_length(inode, &mut attr);
         let opened_fh = self.new_file_handle(inode, attr.length, flags)?;
         // TODO: review me
         let entry = FullEntry::new(inode, "", attr);
@@ -553,14 +551,17 @@ impl KisekiVFS {
 
         let _handle = self
             .find_handle(ino, fh)
-            .ok_or(LibcSnafu { errno: EBADF })?;
+            .context(LibcSnafu { errno: EBADF })?;
         if offset >= MAX_FILE_SIZE as u64 || offset + size >= MAX_FILE_SIZE as u64 {
             return LibcSnafu { errno: EFBIG }.fail()?;
         }
         let fr = self
             .data_manager
             .find_file_reader(ino, fh)
-            .ok_or(LibcSnafu { errno: libc::EBADF })?;
+            .ok_or(LibcError {
+                errno: libc::EBADF,
+                location: location!(),
+            })?;
         self.data_manager.flush_if_exists(ino).await?;
         let mut buf = vec![0u8; size as usize];
         let _read_len = fr.read(offset as usize, buf.as_mut_slice()).await?;
@@ -639,7 +640,8 @@ impl KisekiVFS {
                     0,
                     0x7FFFFFFFFFFFFFFF,
                 )
-                .await?;
+                .await
+                .context(MetaSnafu)?;
         }
         Ok(())
     }

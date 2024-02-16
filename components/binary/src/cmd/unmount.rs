@@ -22,7 +22,7 @@ pub struct UmountArgs {
 impl UmountArgs {
     pub fn run(&self) -> Result<(), Whatever> {
         let path = &self.mount_point;
-        sys_mount::unmount(path, sys_mount::UnmountFlags::empty())
+        rustix::mount::unmount(path, rustix::mount::UnmountFlags::FORCE)
             .with_whatever_context(|_| format!("could not umount { }", path.display()))?;
         Ok(())
     }

@@ -23,13 +23,11 @@ use kiseki_utils::logger::{LoggingOptions, DEFAULT_LOG_DIR};
 use snafu::{whatever, ResultExt, Whatever};
 use tracing::info;
 
-use crate::{
-    build_info, fuse,
-    fuse::{config::FuseConfig, null, KISEKI},
-    meta::MetaConfig,
-    vfs,
-    vfs::config::VFSConfig,
-};
+use crate::build_info;
+use kiseki_common::KISEKI;
+use kiseki_fuse::{null, FuseConfig};
+use kiseki_meta::MetaConfig;
+use kiseki_vfs::{Config as VFSConfig, KisekiVFS};
 
 const MOUNT_OPTIONS_HEADER: &str = "Mount options";
 const LOGGING_OPTIONS_HEADER: &str = "Logging options";
@@ -165,11 +163,11 @@ pub struct MountArgs {
 pub struct MetaArgs {
     #[arg(
     long,
-    help = "Specify the scheme of the meta store",
+    help = "Specify the dsn of the meta store",
     help_heading = META_OPTIONS_HEADER,
-    default_value_t = opendal::Scheme::Sled.to_string(),
+    default_value = "rocksdb",
     )]
-    pub scheme: String, // FIXME
+    pub dsn: String, // FIXME
 
     #[arg(
     long,
@@ -207,10 +205,12 @@ impl MountArgs {
     }
     fn meta_config(&self) -> Result<MetaConfig, Whatever> {
         let mut mc = MetaConfig::default();
-        mc.scheme = opendal::Scheme::from_str(&self.meta_args.scheme)
-            .with_whatever_context(|_| format!("invalid scheme {}", &self.meta_args.scheme))?;
-        mc.scheme_config
-            .insert("datadir".to_string(), self.meta_args.meta_address.clone());
+        // TODO: fix me
+        mc.with_dsn("rockdb://localhost:1234/kiseki-meta");
+        // mc.scheme = opendal::Scheme::from_str(&self.meta_args.scheme)
+        //     .with_whatever_context(|_| format!("invalid scheme {}", &self.meta_args.scheme))?;
+        // mc.scheme_config
+        //     .insert("datadir".to_string(), self.meta_args.meta_address.clone());
         Ok(mc)
     }
 
@@ -292,13 +292,12 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
     let meta_config = args.meta_config()?;
     let vfs_config = args.vfs_config();
 
-    let meta = meta_config
-        .open()
-        .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
-
-    let file_system = vfs::KisekiVFS::new(vfs_config, meta)
+    let meta = kiseki_meta::open(meta_config)
+        .with_whatever_context(|e| format!("failed to open meta, {:?}", e))?;
+    let file_system = KisekiVFS::new(vfs_config, meta)
         .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
-    let fs = fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
+
+    let fs = kiseki_fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(
         |e| {
             format!(

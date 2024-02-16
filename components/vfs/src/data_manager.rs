@@ -1,4 +1,3 @@
-use crate::err::InvalidInoSnafu;
 use crate::err::Result;
 use crate::reader::FileReadersRef;
 use crate::writer::{FileWriter, FileWritersRef};

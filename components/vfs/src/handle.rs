@@ -21,6 +21,7 @@ use std::{
 use crate::err::LibcSnafu;
 use crate::{err::Result, KisekiVFS};
 use dashmap::DashMap;
+use kiseki_types::entry::Entry;
 use kiseki_types::{entry::FullEntry, ino::Ino};
 use tokio::{
     sync::{Notify, RwLock},
@@ -81,7 +82,6 @@ impl KisekiVFS {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct Handle {
     fh: u64,                               // cannot be changed
     inode: Ino,                            // cannot be changed
@@ -146,9 +146,8 @@ impl Handle {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct HandleInner {
-    pub(crate) children: Vec<FullEntry>,
+    pub(crate) children: Vec<Entry>,
     pub(crate) read_at: Option<Instant>,
     pub(crate) ofd_owner: u64, // OFD lock
 }
