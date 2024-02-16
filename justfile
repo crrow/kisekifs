@@ -23,7 +23,7 @@
 
 alias c := check
 @check:
-    cargo check --all --all-features
+    cargo check --all --all-features --all-targets
 
 alias t := test
 @test:
@@ -39,11 +39,12 @@ alias b := bench
 
 # Applications:
 
-@build-fs:
-    cargo build --bin kiseki
+@build:
+    #cargo build --bin kiseki
+    cargo build --package kiseki-binary
 
 @build-release:
-    cargo build --release --bin kiseki
+    cargo build --release --package kiseki-binary
 
 alias sh := show-help
 @show-help:
@@ -54,12 +55,12 @@ alias sh := show-help
 
 alias sh-m := help-mount
 @help-mount:
-    cargo run --color=always --bin kiseki help mount
+    cargo run --color=always --package kiseki-binary help mount
 
 @mount:
     just clean
     just prepare
-    cargo run --color=always --bin kiseki mount --level debug
+    cargo run --color=always --package kiseki-binary mount --level debug
 
 @release-mount:
     just clean
@@ -83,7 +84,7 @@ alias sh-um := help-umount
 # ==================================================== format
 
 @format:
-    cargo run --color=always --bin kiseki format
+    cargo run --color=always --package kiseki-binary format
 
 alias sh-f := help-format
 @help-format:

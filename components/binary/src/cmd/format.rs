@@ -4,11 +4,12 @@ use clap::Args;
 use kiseki_types::setting::Format;
 use kiseki_utils::{align::align_to_block, readable_size::ReadableSize};
 use regex::Regex;
-use snafu::{ResultExt, Whatever};
+use snafu::{ensure, ensure_whatever, ResultExt, Whatever};
 use tokio::runtime;
 use tracing::{debug, info, level_filters::LevelFilter, warn, Instrument};
 
 use kiseki_meta::MetaConfig;
+use kiseki_utils::align::align4k;
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
 const MANAGEMENT_OPTIONS_HEADER: &str = "MANAGEMENT";
@@ -35,17 +36,9 @@ pub struct FormatArgs {
         long,
         help = "Specify the address of the meta store",
         help_heading = FORMAT_OPTIONS_HEADER,
-        default_value = "/tmp/kiseki-meta",
+        default_value = "rocksdb://:tmp/kiseki.meta",
     )]
-    pub meta_address: Option<String>,
-
-    #[arg(
-        long,
-        help = "Specify the dsn of the meta store",
-        help_heading = FORMAT_OPTIONS_HEADER,
-        default_value = "rocksdb",
-    )]
-    pub dsn: String, // FIXME
+    pub meta_dsn: Option<String>,
 
     #[arg(long, short, help = "overwrite existing format", help_heading = FORMAT_OPTIONS_HEADER)]
     pub force: bool,
@@ -108,6 +101,7 @@ impl FormatArgs {
         format
     }
     pub fn run(&self) -> Result<(), Whatever> {
+        kiseki_utils::logger::install_fmt_log();
         let mc = self.meta_config()?;
         debug!("meta created");
         let format = self.generate_format();
@@ -136,14 +130,19 @@ fn validate_name(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-fn validate_trash_day(s: &str) -> Result<u64, String> {
-    clap_num::number_range(s, 1, u64::MAX)
+fn validate_trash_day(s: &str) -> Result<usize, String> {
+    clap_num::number_range(s, 1, u64::MAX as usize)
 }
 
-fn validate_block_size(s: &str) -> Result<u64, String> {
-    clap_num::number_range(
-        s,
-        kiseki_common::MIN_BLOCK_SIZE as u64,
-        kiseki_common::MAX_BLOCK_SIZE as u64,
-    )
+fn validate_block_size(s: &str) -> Result<String, String> {
+    let n = ReadableSize::from_str(s).map_err(|e| format!("invalid block size: {}", e))?;
+    let n = n.as_bytes() as usize;
+    if n < kiseki_common::MIN_BLOCK_SIZE {
+        return Err(format!("block size {} too small", n));
+    }
+    if n > kiseki_common::MAX_BLOCK_SIZE {
+        return Err(format!("block size {} too large", n));
+    }
+
+    Ok(ReadableSize(align_to_block(n) as u64).to_string())
 }

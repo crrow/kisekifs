@@ -7,6 +7,9 @@ pub const MODE_MASK_W: u8 = 0b010;
 pub const MODE_MASK_X: u8 = 0b001;
 
 pub const KISEKI: &str = "kiseki";
+pub const KISEKI_DEBUG_META_ADDR: &str = "rocksdb://:/tmp/kiseki.meta";
+pub const KISEKI_DEBUG_CACHE: &str = "/tmp/kiseki.cache";
+pub const KISEKI_DEBUG_DATA: &str = "/tmp/kiseki.data";
 
 pub const PAGE_BUFFER_SIZE: usize = 300 << 20; // 300MiB
                                                // pub const PAGE_SIZE: usize = 64 << 10;
@@ -16,7 +19,7 @@ pub const BLOCK_SIZE: usize = 4 << 20; // 4 MiB
 
 pub const MIN_BLOCK_SIZE: usize = PAGE_SIZE; // 128 KiB
 
-pub const MAX_BLOCK_SIZE: usize = 512 << 10; // 16 KiB
+pub const MAX_BLOCK_SIZE: usize = 16 << 20; // 16 MB
 
 // The max size of a slice buffer can grow.
 pub const CHUNK_SIZE: usize = 64 << 20; // 64 MiB

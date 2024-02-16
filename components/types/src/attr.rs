@@ -268,7 +268,7 @@ mod tests {
             .set_gid(11)
             .set_uid(22)
             .to_owned();
-        attr.set_parent(Ino::from(1)).set_full();
+        attr.set_parent(Ino::from(1));
 
         assert_eq!(attr.perm, 0o777);
         assert_eq!(attr.kind, FileType::Directory);

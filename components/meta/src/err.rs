@@ -37,6 +37,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Invalid setting: {:?}, {:?}", String::from_utf8_lossy(key.as_slice()).to_string(), location))]
     InvalidSetting {
         #[snafu(implicit)]
         location: Location,

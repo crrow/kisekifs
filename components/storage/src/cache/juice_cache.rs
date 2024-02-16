@@ -1149,6 +1149,7 @@ impl FreeSpaceChecker {
 
 #[cfg(test)]
 mod tests {
+    use kiseki_common::KISEKI_DEBUG_CACHE;
     use tokio::io::AsyncReadExt;
 
     use super::*;
@@ -1157,7 +1158,7 @@ mod tests {
     async fn cache_full() {
         install_fmt_log();
 
-        let cache = JuiceFileCacheBuilder::default()
+        let cache = JuiceFileCacheBuilder::new(KISEKI_DEBUG_CACHE)
             .with_capacity(ReadableSize::mb(1))
             .with_free_ratio(0.5)
             .inner_build()

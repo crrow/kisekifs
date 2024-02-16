@@ -265,46 +265,41 @@ mod tests {
     async fn read() {
         install_fmt_log();
 
-        let meta_engine = MetaConfig::test_config().open().unwrap();
-        let meta_ctx = FuseContext::background();
+        let meta_config = MetaConfig::default();
         let format = Format::default();
-        meta_engine.init(format, false).await.unwrap();
+        kiseki_meta::update_format(meta_config.dsn.clone(), format.clone(), true).unwrap();
 
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let fuse_ctx = FuseContext::background();
         let (inode, _attr) = meta_engine
-            .create(&meta_ctx, ROOT_INO, "a", 0o650, 0, 0)
+            .create(&fuse_ctx, ROOT_INO, "a", 0o650, 0, 0)
             .await
             .unwrap();
 
         let sto_engine = new_mem_object_storage("");
-        let engine = Arc::new(
-            DataManager::new(
-                Arc::new(EngineConfig::default()),
-                sto_engine,
-                Arc::new(meta_engine),
-            )
-            .unwrap(),
-        );
+        let cache = kiseki_storage::cache::new_juice_builder().build().unwrap();
+        let data_manager = Arc::new(DataManager::new(
+            format.page_size,
+            format.block_size,
+            format.chunk_size,
+            meta_engine,
+            sto_engine,
+            cache,
+        ));
 
-        engine.new_file_writer(inode, 0);
+        data_manager.new_file_writer(inode, 0);
         let data = b"hello world" as &[u8];
 
-        let write_len = engine
+        let write_len = data_manager
             .write(inode, 0, data)
             .await
             .map_err(|e| println!("{}", e))
             .unwrap();
 
-        let fw = engine.find_file_writer(inode).unwrap();
-        fw.do_flush().await.unwrap();
+        let fw = data_manager.find_file_writer(inode).unwrap();
+        fw.flush().await.unwrap();
 
-        let file_reader = Arc::new(FileReader {
-            engine: Arc::downgrade(&engine),
-            fh: 0,
-            ino: inode,
-            length: write_len,
-            chunks: Default::default(),
-            closing: Default::default(),
-        });
+        let file_reader = data_manager.new_file_reader(inode, 0, write_len);
 
         let mut read_data = vec![0u8; 11];
         let read_len = file_reader.read(0, read_data.as_mut_slice()).await.unwrap();
@@ -312,26 +307,19 @@ mod tests {
         assert!(read_data.starts_with(b"hello world"));
         println!("{}", String::from_utf8_lossy(&read_data));
 
-        let chunk_size = engine.config.chunk_size;
-        let write_len = engine
+        let chunk_size = data_manager.chunk_size;
+        let write_len = data_manager
             .write(inode, chunk_size - 3, data)
             .await
             .map_err(|e| println!("{}", e))
             .unwrap();
         assert_eq!(write_len, data.len());
 
-        fw.do_flush().await.unwrap();
+        fw.flush().await.unwrap();
 
         let mut read_data = vec![0u8; 11];
 
-        let file_reader = Arc::new(FileReader {
-            engine: Arc::downgrade(&engine),
-            fh: 0,
-            ino: inode,
-            length: chunk_size + 8,
-            chunks: Default::default(),
-            closing: Default::default(),
-        });
+        let file_reader = data_manager.new_file_reader(inode, 0, chunk_size + 8);
         let read_len = file_reader
             .read(chunk_size - 3, read_data.as_mut_slice())
             .await

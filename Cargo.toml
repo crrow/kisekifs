@@ -44,7 +44,7 @@ rustix = "0.38.30"
 rand = "0.8.5"
 
 [package]
-name = "kisekifs"
+name = "kiseki"
 version = "0.1.0"
 edition = "2021"
 authors = ["Ryan Tan"]
@@ -61,6 +61,3 @@ bench = false
 
 [dependencies]
 
-
-[dev-dependencies]
-criterion.dev-dependencies = true
