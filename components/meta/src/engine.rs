@@ -145,8 +145,8 @@ impl MetaEngine {
         &self.format
     }
 
-    pub fn next_slice_id(&self) -> Result<SliceID> {
-        self.free_slices.next()
+    pub async fn next_slice_id(&self) -> Result<SliceID> {
+        self.free_slices.next().await
     }
 
     /// StatFS returns summary statistics of a volume.
@@ -404,25 +404,20 @@ impl MetaEngine {
             }
         );
 
-        debug!("mknod with parent {:?}, name {:?}, typ {:?}, mode {:?}, cumask {:?}, rdev {:?}, path {:?}",
-            parent, name, typ, mode, cumask, rdev, path);
-
         let parent = self.check_root(parent);
         let (space, inodes) = (kiseki_utils::align::align4k(0), 1i64);
         // self.check_quota(ctx, space, inodes, parent)?;
-        debug!("do mknod");
-        let r = self.do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)?;
-        debug!("do mknod finished");
+        let r = self
+            .do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
+            .await?;
 
-        debug!("update mem dir stat");
         self.update_mem_dir_stat(parent, 0, space, inodes)?;
-        debug!("update mem dir stat finished");
 
         Ok(r)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn do_mknod(
+    async fn do_mknod(
         &self,
         ctx: &FuseContext,
         parent: Ino,
@@ -437,8 +432,9 @@ impl MetaEngine {
             let next = self.backend.increase_count_by(Counter::NextTrash, 1)?;
             TRASH_INODE + Ino::from(next)
         } else {
-            Ino::from(self.free_inodes.next()?)
+            Ino::from(self.free_inodes.next().await?)
         };
+        debug!("new inode: {}", inode);
 
         let mut attr = InodeAttr::default()
             .set_perm(mode & !cumask)

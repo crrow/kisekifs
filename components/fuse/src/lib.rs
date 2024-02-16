@@ -23,6 +23,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use crate::err::Error;
 pub use config::FuseConfig;
 use fuser::{
     FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
@@ -42,23 +43,6 @@ use libc::{__u64, c_int};
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
 use tracing::{debug, error, field, info, instrument, Instrument};
-
-#[derive(Debug, Snafu)]
-pub enum FuseError {
-    #[snafu(display("invalid file name {:?}", name))]
-    ErrInvalidFileName { name: OsString },
-    #[snafu(display("file name too long {:?}", name))]
-    ErrFilenameTooLong { name: OsString },
-}
-
-impl ToErrno for FuseError {
-    fn to_errno(&self) -> c_int {
-        match self {
-            FuseError::ErrInvalidFileName { .. } => libc::EINVAL,
-            FuseError::ErrFilenameTooLong { .. } => libc::ENAMETOOLONG,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct KisekiFuse {
@@ -171,25 +155,16 @@ impl Filesystem for KisekiFuse {
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = FuseContext::from(_req);
-        let name = match name.to_str().ok_or_else(|| FuseError::ErrInvalidFileName {
-            name: name.to_owned(),
-        }) {
-            Ok(n) => n,
-            Err(e) => {
-                reply.error(e.to_errno());
+        let name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::EINVAL);
                 return;
             }
         };
 
-        // FIXME: tidy this error
-
         if name.len() > MAX_NAME_LENGTH {
-            reply.error(
-                FuseError::ErrFilenameTooLong {
-                    name: OsString::from(name),
-                }
-                .to_errno(),
-            );
+            reply.error(libc::ENAMETOOLONG);
             return;
         }
 
