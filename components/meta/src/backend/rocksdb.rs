@@ -52,27 +52,27 @@ impl Debug for RocksdbBackend {
 }
 
 impl Backend for RocksdbBackend {
+    // TODO: merge the exists format
     fn set_format(&self, format: &Format) -> Result<()> {
-        let transaction = self.db.transaction();
-        ensure!(
-            transaction
-                .get(key::CURRENT_FORMAT)
-                .context(RocksdbSnafu)?
-                .is_none(),
-            InvalidSettingSnafu {
-                key: Vec::from(key::CURRENT_FORMAT.as_bytes())
-            }
-        );
+        // let transaction = self.db.transaction();
+        // ensure!(
+        //     transaction
+        //         .get(key::CURRENT_FORMAT)
+        //         .context(RocksdbSnafu)?
+        //         .is_none(),
+        //     InvalidSettingSnafu {
+        //         key: Vec::from(key::CURRENT_FORMAT.as_bytes())
+        //     }
+        // );
 
         let setting_buf = bincode::serialize(format).context(model_err::CorruptionSnafu {
             kind: ModelKind::Setting,
             key: Vec::from(key::CURRENT_FORMAT.as_bytes()),
         })?;
 
-        transaction
+        self.db
             .put(key::CURRENT_FORMAT, setting_buf)
             .context(RocksdbSnafu)?;
-        transaction.commit().context(RocksdbSnafu)?;
         Ok(())
     }
     fn load_format(&self) -> Result<Format> {

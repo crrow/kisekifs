@@ -4,7 +4,7 @@ use clap::Args;
 use kiseki_types::setting::Format;
 use kiseki_utils::{align::align_to_block, readable_size::ReadableSize};
 use regex::Regex;
-use snafu::{ensure, ensure_whatever, ResultExt, Whatever};
+use snafu::{ensure, ensure_whatever, OptionExt, ResultExt, Whatever};
 use tokio::runtime;
 use tracing::{debug, info, level_filters::LevelFilter, warn, Instrument};
 
@@ -36,7 +36,7 @@ pub struct FormatArgs {
         long,
         help = "Specify the address of the meta store",
         help_heading = FORMAT_OPTIONS_HEADER,
-        default_value = "rocksdb://:tmp/kiseki.meta",
+        default_value = "rocksdb://:/tmp/kiseki.meta",
     )]
     pub meta_dsn: Option<String>,
 
@@ -81,10 +81,6 @@ pub struct FormatArgs {
     pub trash_days: usize,
 }
 impl FormatArgs {
-    fn meta_config(&self) -> Result<MetaConfig, Whatever> {
-        let mut mc = MetaConfig::default();
-        Ok(mc)
-    }
     fn generate_format(&self) -> Format {
         let mut format = Format::default();
         if let Some(cap) = self.capacity {
@@ -96,18 +92,19 @@ impl FormatArgs {
         format.trash_days = self.trash_days;
         let block_size = ReadableSize::from_str(&self.block_size)
             .expect("block size should be validated in the argument parser");
-        format.block_size = align_to_block(block_size.as_bytes() as usize);
+        format.block_size = block_size.as_bytes() as usize;
         format.name = self.name.clone();
         format
     }
     pub fn run(&self) -> Result<(), Whatever> {
         kiseki_utils::logger::install_fmt_log();
-        let mc = self.meta_config()?;
-        debug!("meta created");
+        let dsn = self
+            .meta_dsn
+            .clone()
+            .expect("meta_dsn should be validated in the argument parser");
         let format = self.generate_format();
-        kiseki_meta::update_format(mc.dsn, format, true)
-            .with_whatever_context(|e| format!("failed to create meta, {:?}", e))?;
-
+        kiseki_meta::update_format(dsn, format, true).unwrap();
+        info!("format file system {:?} success", self.name);
         Ok(())
     }
 }

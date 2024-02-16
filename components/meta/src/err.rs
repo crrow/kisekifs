@@ -10,6 +10,11 @@ pub enum Error {
         location: Location,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    UnsupportedMetaDSN {
+        #[snafu(implicit)]
+        location: Location,
+        dsn: String,
+    },
 
     TokioJoinError {
         #[snafu(implicit)]
@@ -37,6 +42,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Invalid setting: {:?}, {:?}", String::from_utf8_lossy(key.as_slice()).to_string(), location))]
     InvalidSetting {
         #[snafu(implicit)]

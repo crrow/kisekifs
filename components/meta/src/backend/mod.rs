@@ -2,21 +2,51 @@ use kiseki_common::ChunkIndex;
 use kiseki_types::entry::DEntry;
 use kiseki_types::stat::DirStat;
 use kiseki_types::{attr::InodeAttr, ino::Ino, setting::Format, slice::Slices, stat, FileType};
+use snafu::ensure;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
+use strum_macros::EnumString;
+use tracing::debug;
 
 use crate::{backend::key::Counter, err::Result};
 
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
-use rocksdb as rocksdb_backend;
+use crate::err::UnsupportedMetaDSNSnafu;
 
 // TODO: optimize me
-pub fn open_backend<P: AsRef<Path>>(path: P) -> Result<BackendRef> {
-    let mut builder = rocksdb_backend::Builder::default();
-    builder.with_path(path.as_ref());
-    builder.build()
+pub fn open_backend(dsn: String) -> Result<BackendRef> {
+    let x = dsn.splitn(2, "://:").collect::<Vec<_>>();
+    ensure!(x.len() == 2, UnsupportedMetaDSNSnafu { dsn: dsn.clone() });
+    let backend_kind = x[0];
+    let path = x[1];
+
+    let backend = BackendKinds::from_str(backend_kind).expect("unsupported backend kind");
+    backend.build(path)
+}
+
+#[derive(Debug, EnumString)]
+enum BackendKinds {
+    #[cfg(feature = "meta-rocksdb")]
+    #[strum(serialize = "rocksdb", serialize = "Rocksdb")]
+    Rocksdb,
+}
+
+impl BackendKinds {
+    fn build(&self, path: &str) -> Result<BackendRef> {
+        match self {
+            #[cfg(feature = "meta-rocksdb")]
+            BackendKinds::Rocksdb => {
+                let mut builder = rocksdb::Builder::default();
+                builder.with_path(path);
+                debug!("rocksdb backend is built with path: {}", path);
+                builder.build()
+            }
+            _ => unimplemented!("unsupported backend"),
+        }
+    }
 }
 
 pub type BackendRef = Arc<dyn Backend>;

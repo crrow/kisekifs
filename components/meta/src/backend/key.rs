@@ -1,7 +1,6 @@
 use kiseki_types::ino::Ino;
 
 pub const CURRENT_FORMAT: &str = "current_format";
-
 pub const USED_SPACE: &str = "used_space";
 pub const TOTAL_INODES: &str = "total_inodes";
 pub const LEGACY_SESSIONS: &str = "legacy_sessions";
