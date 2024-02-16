@@ -1,4 +1,3 @@
-use std::sync::Weak;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
@@ -7,11 +6,10 @@ use std::{
     ops::Range,
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
-        Arc,
+        Arc, Weak,
     },
 };
 
-use crate::data_manager::DataManager;
 use dashmap::{
     mapref::one::{Ref, RefMut},
     DashMap,
@@ -20,8 +18,10 @@ use kiseki_common::{
     cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE, FH,
 };
 use kiseki_meta::MetaEngineRef;
-use kiseki_storage::cache::CacheRef;
-use kiseki_storage::slice_buffer::{SliceBuffer, SliceBufferWrapper};
+use kiseki_storage::{
+    cache::CacheRef,
+    slice_buffer::{SliceBuffer, SliceBufferWrapper},
+};
 use kiseki_types::{
     ino::Ino,
     slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
@@ -37,9 +37,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::err::{JoinErrSnafu, LibcSnafu, Result};
-use crate::reader::FileReader;
-use crate::KisekiVFS;
+use crate::{
+    data_manager::DataManager,
+    err::{JoinErrSnafu, LibcSnafu, Result},
+    reader::FileReader,
+    KisekiVFS,
+};
 
 impl DataManager {
     /// Creates a new [FileWriter] for the file handle.

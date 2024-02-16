@@ -1,5 +1,6 @@
-use opendal::Operator;
 use std::path::Path;
+
+use opendal::Operator;
 
 pub type ObjectStorage = Operator;
 pub type LocalStorage = Operator;

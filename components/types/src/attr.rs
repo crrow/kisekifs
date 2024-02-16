@@ -14,13 +14,13 @@
 
 use std::time::SystemTime;
 
+use bitflags::bitflags;
 use fuser::{FileAttr, FileType};
+use kiseki_common::BlockSize;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::ino::{Ino, ROOT_INO};
-use bitflags::bitflags;
-use kiseki_common::BlockSize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetAttrFlags(pub u32);

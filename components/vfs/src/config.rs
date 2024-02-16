@@ -1,6 +1,7 @@
+use std::time::Duration;
+
 use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, PAGE_BUFFER_SIZE, PAGE_SIZE};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

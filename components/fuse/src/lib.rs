@@ -16,12 +16,11 @@ mod config;
 mod err;
 pub mod null;
 
-use std::sync::Arc;
-use std::time::Duration;
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
-    time::SystemTime,
+    sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 pub use config::FuseConfig;
@@ -32,10 +31,12 @@ use fuser::{
 };
 use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
 use kiseki_meta::context::{FuseContext, EMPTY_CONTEXT};
-use kiseki_types::attr::InodeAttr;
-use kiseki_types::entry::Entry;
-use kiseki_types::ToErrno;
-use kiseki_types::{entry::FullEntry, ino::Ino};
+use kiseki_types::{
+    attr::InodeAttr,
+    entry::{Entry, FullEntry},
+    ino::Ino,
+    ToErrno,
+};
 use kiseki_vfs::KisekiVFS;
 use libc::{__u64, c_int};
 use snafu::{ResultExt, Snafu, Whatever};
@@ -228,25 +229,23 @@ impl Filesystem for KisekiFuse {
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         // 	http://man.he.net/man2/statfs
-        /*
-               struct statfs {
-                   __fsword_t f_type;    // Type of filesystem (see below)
-                   __fsword_t f_bsize;   // Optimal transfer block size
-                   fsblkcnt_t f_blocks;  // Total data blocks in filesystem
-                   fsblkcnt_t f_bfree;   // Free blocks in filesystem
-                   fsblkcnt_t f_bavail;  // Free blocks available to
-                                            unprivileged user
-                   fsfilcnt_t f_files;   // Total file nodes in filesystem
-                   fsfilcnt_t f_ffree;   // Free file nodes in filesystem
-                   fsid_t     f_fsid;    // Filesystem ID
-                   __fsword_t f_namelen; // Maximum length of filenames
-                   __fsword_t f_frsize;  // Fragment size (since Linux 2.6)
-                   __fsword_t f_flags;   // Mount flags of filesystem
-                                            (since Linux 2.6.36)
-                   __fsword_t f_spare[xxx];
-                                   // Padding bytes reserved for future use
-               };
-        */
+        // struct statfs {
+        // __fsword_t f_type;    // Type of filesystem (see below)
+        // __fsword_t f_bsize;   // Optimal transfer block size
+        // fsblkcnt_t f_blocks;  // Total data blocks in filesystem
+        // fsblkcnt_t f_bfree;   // Free blocks in filesystem
+        // fsblkcnt_t f_bavail;  // Free blocks available to
+        // unprivileged user
+        // fsfilcnt_t f_files;   // Total file nodes in filesystem
+        // fsfilcnt_t f_ffree;   // Free file nodes in filesystem
+        // fsid_t     f_fsid;    // Filesystem ID
+        // __fsword_t f_namelen; // Maximum length of filenames
+        // __fsword_t f_frsize;  // Fragment size (since Linux 2.6)
+        // __fsword_t f_flags;   // Mount flags of filesystem
+        // (since Linux 2.6.36)
+        // __fsword_t f_spare[xxx];
+        // Padding bytes reserved for future use
+        // };
 
         let ctx = Arc::new(FuseContext::from(_req));
         // FIXME: use a better way

@@ -1,18 +1,25 @@
-use crate::data_manager::{DataManager, DataManagerRef};
-use crate::err::{Result, StorageSnafu};
-use crate::KisekiVFS;
+use std::{
+    cmp::min,
+    sync::{atomic::AtomicBool, Arc, Weak},
+};
+
 use dashmap::DashMap;
 use kiseki_common::{ChunkIndex, FH};
 use kiseki_meta::MetaEngineRef;
 use kiseki_storage::raw_buffer::ReadBuffer;
-use kiseki_types::ino::Ino;
-use kiseki_types::slice::{OverlookedSlicesRef, Slice, SliceID};
+use kiseki_types::{
+    ino::Ino,
+    slice::{OverlookedSlicesRef, Slice, SliceID},
+};
 use rangemap::RangeMap;
 use snafu::ResultExt;
-use std::cmp::min;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Weak};
 use tracing::debug;
+
+use crate::{
+    data_manager::{DataManager, DataManagerRef},
+    err::{Result, StorageSnafu},
+    KisekiVFS,
+};
 
 impl DataManager {
     fn new_read_buffer(&self, sid: SliceID, length: usize) -> ReadBuffer {
@@ -204,14 +211,11 @@ enum VirtualSlice {
 
 #[cfg(test)]
 mod tests {
-    use kiseki_meta::context::FuseContext;
-    use kiseki_types::ino::ROOT_INO;
+    use kiseki_meta::{context::FuseContext, MetaConfig};
+    use kiseki_types::{ino::ROOT_INO, setting::Format};
+    use kiseki_utils::{logger::install_fmt_log, object_storage::new_mem_object_storage};
 
     use super::*;
-    use kiseki_meta::MetaConfig;
-    use kiseki_types::setting::Format;
-    use kiseki_utils::logger::install_fmt_log;
-    use kiseki_utils::object_storage::new_mem_object_storage;
 
     #[test]
     fn get_from_range_map() {

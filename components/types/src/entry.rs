@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use fuser::FileType;
+use kiseki_common::{DOT, DOT_DOT};
 use serde::{Deserialize, Serialize};
 
-use crate::ino::ZERO_INO;
-use crate::{attr::InodeAttr, ino::Ino};
-use kiseki_common::{DOT, DOT_DOT};
+use crate::{
+    attr::InodeAttr,
+    ino::{Ino, ZERO_INO},
+};
 
 pub enum Entry {
     Full(FullEntry),

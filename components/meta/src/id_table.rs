@@ -1,7 +1,9 @@
-use crate::backend::key::Counter;
-use crate::backend::BackendRef;
-use crate::err::Result;
 use crossbeam::atomic::AtomicCell;
+
+use crate::{
+    backend::{key::Counter, BackendRef},
+    err::Result,
+};
 
 /// A table for allocating inode numbers.
 /// It starts at 2 since the root inode is 1.

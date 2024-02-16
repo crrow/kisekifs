@@ -1,16 +1,15 @@
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::{
     fmt::{Debug, Formatter},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 use kiseki_common::ChunkIndex;
-use kiseki_types::stat::DirStat;
 use kiseki_types::{
-    attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, FileType,
+    attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat::DirStat,
+    FileType,
 };
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::{key, key::Counter, Backend};

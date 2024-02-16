@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use fuser::FileType;
 use std::{collections::HashMap, time::Duration};
+
+use fuser::FileType;
 
 use crate::{
     attr::InodeAttr,

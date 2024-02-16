@@ -1,15 +1,16 @@
 use std::str::FromStr;
 
 use clap::Args;
+use kiseki_meta::MetaConfig;
 use kiseki_types::setting::Format;
-use kiseki_utils::{align::align_to_block, readable_size::ReadableSize};
+use kiseki_utils::{
+    align::{align4k, align_to_block},
+    readable_size::ReadableSize,
+};
 use regex::Regex;
 use snafu::{ensure, ensure_whatever, OptionExt, ResultExt, Whatever};
 use tokio::runtime;
 use tracing::{debug, info, level_filters::LevelFilter, warn, Instrument};
-
-use kiseki_meta::MetaConfig;
-use kiseki_utils::align::align4k;
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
 const MANAGEMENT_OPTIONS_HEADER: &str = "MANAGEMENT";

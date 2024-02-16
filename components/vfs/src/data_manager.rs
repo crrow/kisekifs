@@ -1,17 +1,22 @@
-use crate::err::Result;
-use crate::reader::FileReadersRef;
-use crate::writer::{FileWriter, FileWritersRef};
+use std::{
+    sync::{atomic::AtomicUsize, Arc},
+    time::SystemTime,
+};
+
 use kiseki_meta::MetaEngineRef;
 use kiseki_storage::cache::CacheRef;
 use kiseki_types::ino::Ino;
 use kiseki_utils::object_storage::ObjectStorage;
 use snafu::OptionExt;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
+
+use crate::{
+    err::Result,
+    reader::FileReadersRef,
+    writer::{FileWriter, FileWritersRef},
+};
 
 pub(crate) type DataManagerRef = Arc<DataManager>;
 
@@ -23,7 +28,7 @@ pub(crate) struct DataManager {
     pub(crate) file_writers: FileWritersRef,
     pub(crate) file_readers: FileReadersRef,
     pub(crate) id_generator: Arc<sonyflake::Sonyflake>,
-    /* Dependencies */
+    // Dependencies
     pub(crate) meta_engine: MetaEngineRef,
     pub(crate) object_storage: ObjectStorage,
     pub(crate) data_cache: CacheRef,

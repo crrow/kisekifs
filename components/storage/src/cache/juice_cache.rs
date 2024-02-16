@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::{Path, PathBuf};
 use std::{
     fmt::{Debug, Formatter},
     fs,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
         Arc,
@@ -23,8 +23,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::cache::Cache;
-use crate::err::{ErrStageNoMoreSpaceSnafu, OpenDalSnafu, Result, UnknownIOSnafu};
 use async_trait::async_trait;
 use crc32fast::Hasher;
 use dashmap::{DashMap, DashSet};
@@ -43,10 +41,15 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument, trace, warn};
+
+use crate::{
+    cache::Cache,
+    err::{ErrStageNoMoreSpaceSnafu, OpenDalSnafu, Result, UnknownIOSnafu},
+};
 // use crate::vfs::{
 //     err::{
-//         CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu, OpenDalSnafu, Result,
-//     },
+//         CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu,
+// OpenDalSnafu, Result,     },
 //     storage::cache::Cache,
 //     VFSError,
 // };
@@ -1150,10 +1153,10 @@ impl FreeSpaceChecker {
 #[cfg(test)]
 mod tests {
     use kiseki_common::KISEKI_DEBUG_CACHE;
+    use kiseki_utils::logger::install_fmt_log;
     use tokio::io::AsyncReadExt;
 
     use super::*;
-    use kiseki_utils::logger::install_fmt_log;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_full() {
         install_fmt_log();

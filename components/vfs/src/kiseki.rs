@@ -15,36 +15,25 @@
 use std::{
     fmt::{Debug, Display, Formatter},
     sync::{atomic::AtomicU64, Arc},
-    time::Duration,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
-use crate::config::Config;
-use crate::data_manager::{DataManager, DataManagerRef};
-use crate::err::Error::LibcError;
-use crate::err::{JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result, StorageSnafu};
-use crate::handle::Handle;
-use crate::reader::FileReadersRef;
-use crate::writer::{FileWriter, FileWritersRef};
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
-use kiseki_meta::context::FuseContext;
-use kiseki_meta::MetaEngineRef;
+use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::{
     cache::CacheRef,
     raw_buffer::ReadBuffer,
     slice_buffer::{SliceBuffer, SliceBufferWrapper},
 };
-use kiseki_types::attr::SetAttrFlags;
-use kiseki_types::entry::Entry;
-use kiseki_types::slice::SliceID;
 use kiseki_types::{
-    attr::InodeAttr,
-    entry::FullEntry,
+    attr::{InodeAttr, SetAttrFlags},
+    entry::{Entry, FullEntry},
     ino::{Ino, CONTROL_INODE, ROOT_INO},
     internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+    slice::SliceID,
     ToErrno,
 };
 use kiseki_utils::object_storage::ObjectStorage;
@@ -53,17 +42,28 @@ use snafu::{location, Location, OptionExt, ResultExt};
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace};
 
+use crate::{
+    config::Config,
+    data_manager::{DataManager, DataManagerRef},
+    err::{
+        Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result, StorageSnafu,
+    },
+    handle::Handle,
+    reader::FileReadersRef,
+    writer::{FileWriter, FileWritersRef},
+};
+
 pub struct KisekiVFS {
     pub config: Config,
 
-    /* Runtime status */
+    // Runtime status
     internal_nodes: InternalNodeTable,
     modified_at: DashMap<Ino, std::time::Instant>,
     pub(crate) _next_fh: AtomicU64,
     pub(crate) handles: DashMap<Ino, DashMap<FH, Arc<Handle>>>,
     pub(crate) data_manager: DataManagerRef,
 
-    /* Dependencies */
+    // Dependencies
     pub(crate) meta: MetaEngineRef,
 }
 
@@ -728,8 +728,8 @@ mod tests {
     //     vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
     //
     //     let write_len = vfs
-    //         .write(&meta_ctx, entry.inode, fh, 100 << 20, b"world", 0, 0, None)
-    //         .await
+    //         .write(&meta_ctx, entry.inode, fh, 100 << 20, b"world", 0, 0,
+    // None)         .await
     //         .unwrap();
     //     assert_eq!(write_len, 5);
     //

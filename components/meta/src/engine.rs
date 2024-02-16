@@ -1,38 +1,42 @@
-use dashmap::DashMap;
-use std::cmp::{max, min};
-use std::fmt::{Display, Formatter};
-use std::ops::Add;
-use std::path::{Component, Path};
+use std::{
+    cmp::{max, min},
+    fmt::{Display, Formatter},
+    ops::Add,
+    path::{Component, Path},
+    sync::{
+        atomic::{AtomicI64, Ordering, Ordering::Acquire},
+        Arc,
+    },
+    time::{Duration, SystemTime},
+};
 
-use crate::context::FuseContext;
-use crossbeam::atomic::AtomicCell;
-use crossbeam::channel::at;
+use crossbeam::{atomic::AtomicCell, channel::at};
+use dashmap::DashMap;
 use futures::AsyncReadExt;
 use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
-use kiseki_types::attr::{InodeAttr, SetAttrFlags};
-use kiseki_types::entry::{DEntry, Entry, FullEntry};
-use kiseki_types::ino::{Ino, ROOT_INO, TRASH_INODE};
-use kiseki_types::internal_nodes::{InternalNode, TRASH_INODE_NAME};
-use kiseki_types::stat::{DirStat, FSStat};
-use kiseki_types::FileType;
+use kiseki_types::{
+    attr::{InodeAttr, SetAttrFlags},
+    entry::{DEntry, Entry, FullEntry},
+    ino::{Ino, ROOT_INO, TRASH_INODE},
+    internal_nodes::{InternalNode, TRASH_INODE_NAME},
+    setting::Format,
+    slice::{Slice, SliceID, Slices, SLICE_BYTES},
+    stat::{DirStat, FSStat},
+    FileType,
+};
 use scopeguard::defer;
 use snafu::{ensure, ResultExt};
-use std::sync::atomic::Ordering::Acquire;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 use tokio::time::{timeout, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::backend::key::Counter;
-use crate::backend::{open_backend, BackendRef};
-use crate::config::MetaConfig;
-use crate::err::Error::LibcError;
-use crate::err::{Error, LibcSnafu, Result, TokioJoinSnafu};
-use crate::id_table::IdTable;
-use crate::open_files::OpenFiles;
-use kiseki_types::setting::Format;
-use kiseki_types::slice::{Slice, SliceID, Slices, SLICE_BYTES};
+use crate::{
+    backend::{key::Counter, open_backend, BackendRef},
+    config::MetaConfig,
+    context::FuseContext,
+    err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
+    id_table::IdTable,
+    open_files::OpenFiles,
+};
 
 pub type MetaEngineRef = Arc<MetaEngine>;
 
@@ -117,7 +121,7 @@ pub struct MetaEngine {
     free_inodes: IdTable,
     free_slices: IdTable,
 
-    /* Backend for the meta engine */
+    // Backend for the meta engine
     backend: BackendRef,
 }
 
@@ -303,8 +307,8 @@ impl MetaEngine {
     }
 
     // Change root to a directory specified by sub_dir.
-    // pub async fn chroot<P: AsRef<Path>>(&self, ctx: &FuseContext, sub_dir: P) -> Result<()> {
-    //     let sub_dir = sub_dir.as_ref();
+    // pub async fn chroot<P: AsRef<Path>>(&self, ctx: &FuseContext, sub_dir: P) ->
+    // Result<()> {     let sub_dir = sub_dir.as_ref();
     //     for c in sub_dir.components() {
     //         let name = match c {
     //             Component::Normal(name) => {
@@ -312,12 +316,12 @@ impl MetaEngine {
     //             }
     //             _ => unreachable!("invalid path component: {:?}", c),
     //         };
-    //         let (inode, attr) = match self.lookup(ctx, self.root, name, true).await {
-    //             Ok(r) => r,
+    //         let (inode, attr) = match self.lookup(ctx, self.root, name,
+    // true).await {             Ok(r) => r,
     //             Err(e) => {
     //                 if e.to_errno() == libc::ENOENT {
-    //                     let (inode, attr) = self.mkdir(ctx, self.root, name, 0o777, 0).await?;
-    //                     (inode, attr)
+    //                     let (inode, attr) = self.mkdir(ctx, self.root, name,
+    // 0o777, 0).await?;                     (inode, attr)
     //                 } else {
     //                     return Err(e);
     //                 }

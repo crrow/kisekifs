@@ -4,14 +4,17 @@ use std::{
     sync::Arc,
 };
 
-use crate::cache::CacheRef;
-use crate::err::{OpenDalSnafu, Result};
 use kiseki_common::{BlockSize, ChunkSize, PageSize};
 use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
 use kiseki_utils::readable_size::ReadableSize;
 use opendal::Operator;
 use snafu::{ensure, ResultExt};
 use tracing::debug;
+
+use crate::{
+    cache::CacheRef,
+    err::{OpenDalSnafu, Result},
+};
 
 pub struct ReadBuffer {
     block_size: usize,
@@ -340,7 +343,7 @@ impl WriteBuffer {
             .into_iter()
             .map(|(k, v)| {
                 let sto = self.object_storage.clone(); // Clone sto within the closure
-                                                       // let cache = self.cache.clone();
+                // let cache = self.cache.clone();
                 async move {
                     debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
                     let path = k.gen_path_for_object_sto();
@@ -385,11 +388,11 @@ fn cal_object_block_size(length: usize, block_size: usize, block_idx: usize) -> 
 #[cfg(test)]
 mod tests {
     use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
+    use kiseki_utils::object_storage::new_mem_object_storage;
     use rand::RngCore;
 
     use super::*;
     use crate::cache::new_juice_builder;
-    use kiseki_utils::object_storage::new_mem_object_storage;
 
     #[test]
     fn buffer_write() {

@@ -18,16 +18,21 @@ use std::{
     time::Duration,
 };
 
-use crate::err::LibcSnafu;
-use crate::{err::Result, KisekiVFS};
 use dashmap::DashMap;
-use kiseki_types::entry::Entry;
-use kiseki_types::{entry::FullEntry, ino::Ino};
+use kiseki_types::{
+    entry::{Entry, FullEntry},
+    ino::Ino,
+};
 use tokio::{
     sync::{Notify, RwLock},
     time::Instant,
 };
 use tracing::instrument;
+
+use crate::{
+    err::{LibcSnafu, Result},
+    KisekiVFS,
+};
 
 impl KisekiVFS {
     pub(crate) fn next_fh(&self) -> u64 {

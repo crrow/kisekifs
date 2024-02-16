@@ -5,8 +5,10 @@ use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use snafu::ResultExt;
 
-use crate::cache::juice_cache::JuiceFileCache;
-use crate::err::{OpenDalSnafu, Result};
+use crate::{
+    cache::juice_cache::JuiceFileCache,
+    err::{OpenDalSnafu, Result},
+};
 
 lazy_static! {
     pub static ref ID_GENERATOR: sonyflake::Sonyflake =

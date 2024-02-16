@@ -1,12 +1,10 @@
 mod build_info;
 mod cmd;
 
-use crate::cmd::format::FormatArgs;
-use crate::cmd::mount::MountArgs;
-use crate::cmd::unmount::UmountArgs;
-use clap::Parser;
-use clap::Subcommand;
+use clap::{Parser, Subcommand};
 use snafu::Whatever;
+
+use crate::cmd::{format::FormatArgs, mount::MountArgs, unmount::UmountArgs};
 
 #[derive(Debug, Parser)]
 #[clap(

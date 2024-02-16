@@ -6,8 +6,7 @@ pub mod setting;
 pub mod slice;
 pub mod stat;
 
-pub use fuser::FileType;
-pub use fuser::Request;
+pub use fuser::{FileType, Request};
 pub use libc::c_int as Errno;
 
 /// Errors that can be converted to a raw OS error (errno)

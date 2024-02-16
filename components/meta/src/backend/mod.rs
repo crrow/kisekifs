@@ -1,11 +1,11 @@
+use std::{path::Path, str::FromStr, sync::Arc};
+
 use kiseki_common::ChunkIndex;
-use kiseki_types::entry::DEntry;
-use kiseki_types::stat::DirStat;
-use kiseki_types::{attr::InodeAttr, ino::Ino, setting::Format, slice::Slices, stat, FileType};
+use kiseki_types::{
+    attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat, stat::DirStat,
+    FileType,
+};
 use snafu::ensure;
-use std::path::Path;
-use std::str::FromStr;
-use std::sync::Arc;
 use strum_macros::EnumString;
 use tracing::debug;
 
@@ -70,7 +70,7 @@ pub trait Backend: Send + Sync + 'static {
 
     fn set_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, slices: Slices) -> Result<()>;
     fn set_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, buf: Vec<u8>)
-        -> Result<()>;
+    -> Result<()>;
     fn get_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Option<Vec<u8>>>;
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices>;
 

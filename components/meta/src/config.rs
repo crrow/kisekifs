@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::err::Result;
 use std::{fmt::Display, path::PathBuf, str::FromStr, time::Duration};
 
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::err::Result;
 
 /// Atime (Access Time):
 /// Every file has three timestamps:
@@ -54,7 +55,8 @@ pub struct MetaConfig {
 
     pub skip_dir_nlink: usize,
     pub read_only: bool,
-    /// The duration to reuse open file without checking update (0 means disable this feature)
+    /// The duration to reuse open file without checking update (0 means disable
+    /// this feature)
     pub open_cache: Duration,
     /// max number of open files to cache (soft limit, 0 means unlimited)
     pub open_cache_limit: usize,

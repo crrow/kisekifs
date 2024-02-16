@@ -1,10 +1,7 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
 use dashmap::DashMap;
-use kiseki_types::attr::InodeAttr;
-use kiseki_types::ino::Ino;
-use kiseki_types::slice::Slices;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use kiseki_types::{attr::InodeAttr, ino::Ino, slice::Slices};
 
 pub(crate) struct OpenFile {
     pub attr: InodeAttr,
