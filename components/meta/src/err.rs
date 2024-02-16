@@ -30,6 +30,7 @@ pub enum Error {
     },
 
     // Model Error
+    #[snafu(display("Model error: {:?}, {:?}", source, location))]
     ModelError {
         #[snafu(implicit)]
         location: Location,
@@ -64,10 +65,7 @@ impl Error {
 }
 
 pub mod model_err {
-    use std::string::FromUtf8Error;
-
-    use kiseki_types::ino::Ino;
-    use snafu::{location, Location, Snafu};
+    use snafu::Snafu;
 
     #[derive(Debug)]
     pub enum ModelKind {
@@ -87,12 +85,12 @@ pub mod model_err {
         NotFound { kind: ModelKind, key: Vec<u8> },
         Corruption {
             kind: ModelKind,
-            key: Vec<u8>,
+            key: String,
             source: bincode::Error,
         },
         CorruptionString {
             kind: ModelKind,
-            key: Vec<u8>,
+            key: String,
             reason: String,
         },
     }

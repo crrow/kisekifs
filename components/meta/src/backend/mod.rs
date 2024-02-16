@@ -63,7 +63,7 @@ pub trait Backend: Send + Sync + 'static {
 
     fn get_entry_info(&self, parent: Ino, name: &str) -> Result<DEntry>;
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()>;
-    fn list_entry_info(&self, parent: Ino) -> Result<Vec<DEntry>>;
+    fn list_entry_info(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>>;
 
     fn set_symlink(&self, inode: Ino, path: String) -> Result<()>;
     fn get_symlink(&self, inode: Ino) -> Result<String>;

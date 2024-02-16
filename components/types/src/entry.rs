@@ -21,6 +21,7 @@ use crate::{
     ino::{Ino, ZERO_INO},
 };
 
+#[derive(Clone, Debug)]
 pub enum Entry {
     Full(FullEntry),
     DEntry(DEntry),
@@ -48,7 +49,7 @@ impl FullEntry {
 }
 
 /// DEntry represents the storage structure of an entry in a directory.
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct DEntry {
     pub parent: Ino,
     pub name: String,

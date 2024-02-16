@@ -338,17 +338,6 @@ impl Filesystem for KisekiFuse {
         reply.ok();
     }
 
-    fn readdirplus(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        reply: ReplyDirectoryPlus,
-    ) {
-        todo!()
-    }
-
     #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
     fn mknod(
         &mut self,

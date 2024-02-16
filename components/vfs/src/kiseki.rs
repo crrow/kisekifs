@@ -242,23 +242,43 @@ impl KisekiVFS {
         );
 
         let h = match self.find_handle(inode, fh) {
-            None => return LibcSnafu { errno: EBADF }.fail()?,
+            None => {
+                error!(
+                    "fs:readdir with ino {:?} fh {:?} offset {:?} failed",
+                    inode, fh, offset
+                );
+                return LibcSnafu { errno: EBADF }.fail()?;
+            }
             Some(h) => h,
         };
 
-        let mut h = h.inner.write().await;
-        if h.children.is_empty() || offset == 0 {
+        let mut read_guard = h.inner.read().await;
+        if read_guard.children.is_empty() || offset == 0 {
+            drop(read_guard);
+            let mut write_guard = h.inner.write().await;
             // FIXME
-            h.read_at = Some(Instant::now());
-            h.children = self
+            write_guard.read_at = Some(Instant::now());
+            write_guard.children = self
                 .meta
                 .read_dir(ctx, inode, plus)
                 .await
                 .context(MetaSnafu)?;
+            if (offset as usize) < write_guard.children.len() {
+                let result = write_guard.children[offset as usize..]
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Ok(result);
+            } else {
+                return Ok(vec![]);
+            }
         }
-
-        if (offset as usize) < h.children.len() {
-            return Ok(h.children.drain(offset as usize..).collect::<Vec<_>>());
+        if (offset as usize) < read_guard.children.len() {
+            let result = read_guard.children[offset as usize..]
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            return Ok(result);
         }
         Ok(Vec::new())
     }

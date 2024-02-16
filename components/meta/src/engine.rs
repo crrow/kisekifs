@@ -48,7 +48,7 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
         open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
         config,
         format,
-        root: Default::default(),
+        root: ROOT_INO,
         sub_trash: None,
         dir_parents: Default::default(),
         fs_stat: Default::default(),
@@ -107,7 +107,6 @@ pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
     }
     backend.set_format(&format)?;
     if need_init_root {
-        debug!("initialize root inode");
         basic_attr.set_perm(0o777);
         backend.set_attr(ROOT_INO, &basic_attr)?;
         backend.increase_count_by(Counter::NextInode, 2)?;
@@ -193,7 +192,7 @@ impl MetaEngine {
         let parent = self.check_root(parent);
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
-            ctx.check(parent, &parent_attr, kiseki_common::MODE_MASK_X)?;
+            ctx.check(parent, &parent_attr, MODE_MASK_X)?;
         }
         let mut name = name;
         if name == DOT_DOT {
@@ -240,7 +239,6 @@ impl MetaEngine {
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
-        debug!("get_attr with inode {:?}", inode);
         let inode = self.check_root(inode);
         // check cache
         if !self.config.open_cache.is_zero() {
@@ -263,7 +261,7 @@ impl MetaEngine {
     // Readdir returns all entries for given directory, which include attributes if
     // plus is true.
     pub async fn read_dir(&self, ctx: &FuseContext, inode: Ino, plus: bool) -> Result<Vec<Entry>> {
-        info!(dir=?inode, "readdir in plus?, {plus}");
+        debug!(dir=?inode, "readdir in plus?, {plus}");
         let inode = self.check_root(inode);
         let mut attr = self.get_attr(inode).await?;
         let mmask = if plus {
@@ -279,14 +277,18 @@ impl MetaEngine {
         }
 
         let mut basic_entries = Entry::new_basic_entry_pair(inode, attr.parent);
+        // let mut basic_entries = vec![];
 
         if let Err(e) = self.do_read_dir(inode, plus, &mut basic_entries, -1).await {
             return if e.is_not_found() && inode.is_trash() {
                 Ok(basic_entries)
             } else {
+                error!("readdir failed: {:?}", e);
                 Err(e)
             };
         }
+
+        debug!("find entries: {:?}", &basic_entries);
 
         Ok(basic_entries)
     }
@@ -297,7 +299,11 @@ impl MetaEngine {
         basic_entries: &mut Vec<Entry>,
         _limit: i64,
     ) -> Result<()> {
-        let entries = self.backend.list_entry_info(inode)?;
+        let backend = self.backend.clone();
+        let entries = tokio::task::spawn_blocking(move || backend.list_entry_info(inode, _limit))
+            .await
+            .context(TokioJoinSnafu)??;
+        // let entries = self.backend.list_entry_info(inode, _limit)?;
         for de in entries {
             let entry = if plus {
                 let attr = self.backend.get_attr(de.inode)?;

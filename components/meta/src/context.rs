@@ -3,6 +3,7 @@ use std::time::Instant;
 use kiseki_types::{attr::InodeAttr, ino::Ino};
 use lazy_static::lazy_static;
 use snafu::ensure;
+use tracing::debug;
 
 use crate::err::{LibcSnafu, Result};
 

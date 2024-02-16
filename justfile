@@ -58,7 +58,8 @@ alias sh-m := help-mount
     cargo run --color=always --package kiseki-binary help mount
 
 @mount:
-    mkdir -p /tmp/kiseki
+    just clean
+    just prepare
     cargo run --color=always --package kiseki-binary mount --level debug
 
 @release-mount:

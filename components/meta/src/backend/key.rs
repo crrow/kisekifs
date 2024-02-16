@@ -1,4 +1,5 @@
 use kiseki_types::ino::Ino;
+use lazy_static::lazy_static;
 
 pub const CURRENT_FORMAT: &str = "current_format";
 pub const USED_SPACE: &str = "used_space";
