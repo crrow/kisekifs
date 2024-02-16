@@ -118,4 +118,4 @@ alias rw := random-write
 @random-write:
     - rm -r /tmp/kiseki/fio
     mkdir -p /tmp/kiseki/fio
-    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=randwrite --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=randwrite --bs=1m --size=512m --numjobs=4 --direct=1 --group_reporting

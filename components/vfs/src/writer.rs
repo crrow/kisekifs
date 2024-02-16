@@ -37,7 +37,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 
 use crate::{
     data_manager::DataManager,
@@ -120,7 +120,8 @@ struct WriterPattern {
 }
 
 impl WriterPattern {
-    const LIMIT: isize = 3;
+    const LIMIT: isize = 5;
+
     fn monitor_write_at(&self, offset: usize, size: usize) {
         let last_offset = self
             .last_write_stop_offset
@@ -130,12 +131,12 @@ impl WriterPattern {
             // seq
             if count < Self::LIMIT {
                 // add weight on the seq side.
-                self.is_seq_count.fetch_add(1, Ordering::AcqRel);
+                self.is_seq_count.fetch_add(1, Ordering::SeqCst);
             }
         } else {
-            if count + Self::LIMIT > 0 {
+            if count > -Self::LIMIT {
                 // add weight on the random side.
-                self.is_seq_count.fetch_sub(1, Ordering::AcqRel);
+                self.is_seq_count.fetch_sub(1, Ordering::SeqCst);
             }
         }
     }
@@ -293,18 +294,34 @@ impl FileWriter {
     ) -> Vec<(Arc<SliceWriter>, ChunkWriteCtx)> {
         let mut sws = Vec::with_capacity(2);
         'cw_loop: for l in locate_chunk(CHUNK_SIZE, offset, expected_write_len) {
-            if self.pattern.is_seq() {
-                if let Some(cw) = self.slice_writers.get(&l.chunk_idx) {
-                    while let Some((_, sw)) = cw.iter().next_back() {
-                        let (flushed, length) =
-                            sw.get_flushed_length_and_total_write_length().await;
-                        if !sw.has_frozen() {
-                            if sw.offset_of_chunk + flushed <= l.chunk_offset
-                                && l.chunk_offset <= sw.offset_of_chunk + length
-                            {
-                                // we can write to this slice.
-                                sws.push((sw.clone(), l));
-                                continue 'cw_loop;
+            if let Some(cw) = self.slice_writers.get(&l.chunk_idx) {
+                debug!(
+                    "chunk_index: {} found ChunkWriter: {}, write pattern is seq: {}",
+                    l.chunk_idx,
+                    cw.len(),
+                    self.pattern.is_seq(),
+                );
+                for (idx, (_, sw)) in cw.iter().rev().enumerate() {
+                    let (flushed, length) = sw.get_flushed_length_and_total_write_length().await;
+                    debug!(
+                        "chunk_index: {} found slice writer: {} flushed: {}, length: {}",
+                        l.chunk_idx, sw, flushed, length
+                    );
+                    if !sw.has_frozen() {
+                        if sw.offset_of_chunk + flushed <= l.chunk_offset
+                            && l.chunk_offset <= sw.offset_of_chunk + length
+                        {
+                            // we can write to this slice.
+                            sws.push((sw.clone(), l));
+                            continue 'cw_loop;
+                        }
+                    }
+                    // flush some for random write
+                    if idx >= 3 && kiseki_storage::get_pool_free_ratio() > 0.7 {
+                        debug!("chunk_index: {} flush some for random write", l.chunk_idx);
+                        if let Some(req) = sw.make_full_flush_in_advance() {
+                            if let Err(e) = self.slice_flush_queue.send(req).await {
+                                panic!("failed to send flush request {e}");
                             }
                         }
                     }
@@ -337,6 +354,7 @@ impl FileWriter {
     }
 
     fn remove_done_slice_writer(self: &Arc<Self>) {
+        debug!("remove done slice writer");
         let mut to_remove = Vec::new();
 
         for mut cw in self.slice_writers.iter_mut() {
@@ -355,6 +373,7 @@ impl FileWriter {
                 .collect::<Vec<_>>();
 
             for k in keys {
+                debug!("remove slice writer: {}", k);
                 cw.remove(&k);
             }
             if cw.is_empty() {
@@ -362,6 +381,7 @@ impl FileWriter {
             }
         }
         for chunk_idx in to_remove {
+            debug!("remove chunk index: {}", chunk_idx);
             self.slice_writers.remove(&chunk_idx);
         }
     }
@@ -372,23 +392,34 @@ impl FileWriter {
     /// 2. move all slice writers to flush queue
     /// 3. wait for all slice writers to be flushed
     /// 4. mark manually flush as false
+    #[instrument(skip(self), fields(self.inode))]
     pub async fn flush(self: &Arc<Self>) -> Result<()> {
         // check if someone is flushing, or if we actually need to flush?
+        let start = Instant::now();
+        debug!("check if we need to flush");
         if self.manually_flush.load(Ordering::Acquire) || self.slice_writers.is_empty() {
+            debug!("no need to flush, cost: {:?}", start.elapsed());
             return Ok(()); // nothing to flush
         }
 
+        // we are the one who flush.
+        debug!(
+            "try to mark current file writer in manually flush, {:?}",
+            start.elapsed()
+        );
         if self
             .manually_flush
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_err()
         {
+            debug!("someone else is flushing, cost: {:?}", start.elapsed());
             // someone else wins the flush contention.
             return Ok(());
         }
 
         // win this contention, we are the one who flush.
         // mut the map, and move all slice writers to flush queue.
+        debug!("win the flush contention, cost: {:?}", start.elapsed());
         let chunk = self
             .slice_writers
             .iter_mut()
@@ -397,13 +428,18 @@ impl FileWriter {
                 // now no one can use the original chunk_idx every again.
                 // its ok we take the value out, since the background flusher won't put buffer
                 // back in we are in manually flushing.
+                debug!(
+                    "try to take out chunk index: {}, cost: {:?}",
+                    e.key(),
+                    start.elapsed()
+                );
                 let cw = e.value_mut();
                 std::mem::replace(cw, BTreeMap::default())
             })
             .collect::<Vec<_>>();
 
         // now new write requests will create new slice writer.
-
+        debug!("check flushable slice writers, cost: {:?}", start.elapsed());
         let mut sws = Vec::with_capacity(chunk.len());
         for cw in chunk {
             // TODO: optimize, we can even do truncate on the slice buffer.
@@ -414,19 +450,32 @@ impl FileWriter {
             }
         }
         if !sws.is_empty() {
+            debug!(
+                "move slice writers to flush queue, cost: {:?}",
+                start.elapsed()
+            );
             let (tx, rx) = oneshot::channel();
             let req = FlushReq::ManualFlush { sws, finished: tx };
+            debug!("send manual flush request, cost: {:?}", start.elapsed());
             if let Err(e) = self.slice_flush_queue.send(req).await {
                 panic!(
                     "failed to send manual flush request {e}, and since we take the buffer out, we can't put it back"
                 );
             }
+            debug!(
+                "wait for manual flush finished, cost: {:?}",
+                start.elapsed()
+            );
             match rx.await {
                 Ok(_) => info!("{} manual flush finished", self.inode),
                 Err(e) => println!("the sender dropped {}", e),
             }
         }
         // release the manually flush lock.
+        debug!(
+            "release the manually flush lock, cost: {:?}",
+            start.elapsed()
+        );
         self.manually_flush.store(false, Ordering::Release);
         Ok(())
     }
@@ -478,7 +527,7 @@ impl FileWriterFlusher {
                                 let (fl, wl ) = sw.get_flushed_length_and_total_write_length().await;
                                 debug!("{ino} flush full flushed_length {fl}, length: {wl}");
                                 tokio::spawn(async move {
-                                    let r = sw.flush().await;
+                                    let r = sw.flush().in_current_span().await;
                                     if let Err(e) = r {
                                         error!("{ino} failed to flush full {e}");
                                     }
@@ -486,10 +535,10 @@ impl FileWriterFlusher {
                                 });
                             },
                             FlushReq::ManualFlush{sws, finished} => {
-                                debug!("{ino} manually flush started, slice write count {}", sws.len());
+                                debug!("{} manually flush started, slice write count {}", ino, sws.len());
                                 let handles  = sws.into_iter().map(|sw | {
                                     tokio::spawn(async move {
-                                        let r = sw.flush().await;
+                                        let r = sw.flush().in_current_span().await;
                                         if let Err(e) = r {
                                             error!("{ino} failed to flush manually {e}");
                                         }
@@ -498,18 +547,24 @@ impl FileWriterFlusher {
                                         sw.mark_done();
                                     })
                                 }).collect::<Vec<_>>();
-                                tokio::select! {
-                                    // wait on all flush finished
-                                    _ = futures::future::join_all(handles) => {
-                                        let _ = finished.send(());
-                                    },
-                                    // or we are cancelled.
-                                    _ = cancel_token.cancelled() => {
-                                        debug!("{ino} flush task is cancelled");
-                                        let _ = finished.send(());
-                                        return;
+                                let cancel_token = cancel_token.clone();
+                                tokio::spawn(
+                                    async move {
+                                        tokio::select! {
+                                        // wait on all flush finished
+                                        _ = futures::future::join_all(handles) => {
+                                            debug!("{} manually flush finished", ino);
+                                            let _ = finished.send(());
+                                        },
+                                        // or we are cancelled.
+                                        _ = cancel_token.cancelled() => {
+                                            debug!("{ino} flush task is cancelled");
+                                            let _ = finished.send(());
+                                            return;
+                                        }
                                     }
-                                }
+                                    }
+                                );
                             },
                         }
                         // clean the map
@@ -594,9 +649,16 @@ impl SliceWriter {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(self._internal_seq))]
     async fn flush(self: &Arc<Self>) -> Result<()> {
+        debug!("try to flush slice writer {}", self._internal_seq);
         self.prepare_slice_id().await?;
+        debug!(
+            "prepare slice id success {}",
+            self.slice_id.load(Ordering::Acquire)
+        );
         let mut write_guard = self.slice_buffer.write().await;
+        debug!("start to flush slice buffer {}", self._internal_seq);
         write_guard
             .flush(
                 |bi, bs| -> String {
@@ -604,7 +666,9 @@ impl SliceWriter {
                 },
                 self.data_manager.upgrade().unwrap().object_storage.clone(),
             )
+            .in_current_span()
             .await?;
+        debug!("flush slice buffer success {}", self._internal_seq);
         Ok(())
     }
 
@@ -649,6 +713,13 @@ impl SliceWriter {
             });
         }
         None
+    }
+
+    fn make_full_flush_in_advance(self: &Arc<Self>) -> Option<FlushReq> {
+        if !self.freeze() {
+            return None;
+        }
+        Some(FlushReq::FlushFull(self.clone()))
     }
 
     // check if we can flush the sliceWriter, it is used in manual flush.

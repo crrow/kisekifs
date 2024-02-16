@@ -636,7 +636,7 @@ impl KisekiVFS {
     }
 
     pub async fn flush(&self, ctx: &FuseContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
-        debug!("do flush manually on ino {:?} fh {:?}", ino, fh);
+        debug!("do flush manually");
         let h = self
             .find_handle(ino, fh)
             .context(LibcSnafu { errno: libc::EBADF })?;
@@ -645,13 +645,13 @@ impl KisekiVFS {
         };
 
         if let Some(fw) = self.data_manager.find_file_writer(ino) {
+            debug!("find file write");
             tokio::spawn(async move {
                 fw.flush().await?;
                 Ok::<(), Error>(())
             })
             .await
             .context(JoinErrSnafu)??;
-            // fw.flush().await?;
         }
 
         if lock_owner != h.get_ofd_owner().await {
