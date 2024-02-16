@@ -31,6 +31,7 @@ use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use libc::EBADF;
 use rangemap::RangeMap;
 use snafu::{OptionExt, ResultExt};
+use tokio::time::Instant;
 use tokio::{
     sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock},
     task::JoinHandle,
@@ -82,15 +83,29 @@ impl DataManager {
             .file_writers
             .get(&ino)
             .context(LibcSnafu { errno: EBADF })?;
-        debug!("get file write success");
+        debug!("{} get file write success", ino);
         let write_len = fw.write(offset, data).await?;
-        self.truncate_reader(ino, fw.get_length() as u64);
+        let current_len = fw.get_length();
+        debug!(
+            "{} write len: {}, current_len: {}",
+            ino,
+            ReadableSize(write_len as u64),
+            ReadableSize(current_len as u64),
+        );
+        self.truncate_reader(ino, current_len as u64);
         Ok(write_len)
     }
 
     pub(crate) async fn flush_if_exists(&self, ino: Ino) -> Result<()> {
         if let Some(fw) = self.file_writers.get(&ino) {
             fw.flush().await?;
+            debug!(
+                "{} file writer exists and flush success, current_len: {}",
+                ino,
+                ReadableSize(fw.get_length() as u64)
+            );
+        } else {
+            debug!("{} file writer not exists, don't need to flush", ino);
         }
         Ok(())
     }
@@ -185,7 +200,7 @@ impl FileWriter {
     ///     1. for flushing block, we can reuse that SliceWriter.
     ///     2. for flushing whole chunk and manually flushing, we will use a new
     ///        SliceWriter. But we lock the map when we make flushReq.
-    #[instrument(skip_all, fields(self.inode, offset, write_len = data.len()))]
+    #[instrument(skip_all, fields(self.inode, offset, write_len = ReadableSize( data.len() as u64).to_string()))]
     pub async fn write(self: &Arc<Self>, offset: usize, data: &[u8]) -> Result<usize> {
         let expected_write_len = data.len();
         if expected_write_len == 0 {
@@ -197,7 +212,10 @@ impl FileWriter {
         let data_ptr = data.as_ptr();
 
         // 1. find write location.
+        let start = Instant::now();
+        debug!("try to find slice writer {:?}", start.elapsed());
         let slice_writers = self.find_slice_writer(offset, expected_write_len).await;
+        debug!("find slice writer success {:?}", start.elapsed());
         let handles = slice_writers
             .iter()
             .map(|(sw, l)| {

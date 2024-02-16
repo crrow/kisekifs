@@ -38,6 +38,7 @@ use kiseki_types::{
     ino::Ino,
     ToErrno,
 };
+use kiseki_utils::readable_size::ReadableSize;
 use kiseki_vfs::KisekiVFS;
 use libc::{__u64, c_int};
 use snafu::{ResultExt, Snafu, Whatever};
@@ -488,7 +489,7 @@ impl Filesystem for KisekiFuse {
         );
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len(), pid=_req.pid(), name=field::Empty))]
+    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=ReadableSize(offset as u64).to_string(), length=ReadableSize(data.len() as u64).to_string(), pid=_req.pid(), name=field::Empty))]
     // #[instrument(fields(req=_req.unique(), ino=ino, fh=fh, offset=offset,
     // length=data.len(), pid=_req.pid(), name=field::Empty))]
     fn write(

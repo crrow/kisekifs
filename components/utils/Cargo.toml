@@ -45,6 +45,7 @@ pyroscope = "0.5.7"
 pyroscope_pprofrs = "0.2.7"
 users = "0.11.0"
 toml = "0.8.9"
+tracing-core = "0.1.32"
 
 [dev-dependencies]
 tempfile.workspace = true

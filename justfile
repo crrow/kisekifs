@@ -76,10 +76,10 @@ alias sh-m := help-mount
 
 alias sh-um := help-umount
 @help-umount:
-    cargo run --color=always --bin kiseki help umount
+    cargo run --color=always --packgae kiseki-binary help umount
 
 @umount:
-    cargo run --release --color=always --bin kiseki umount
+    cargo run --release --color=always --package kiseki-binary umount
 
 # ==================================================== format
 

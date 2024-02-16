@@ -10,6 +10,8 @@ use std::{
 use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
+use log::info;
+use tracing::debug;
 
 use crate::err::Result;
 
@@ -131,6 +133,8 @@ impl HybridPagePool {
         // let disk_pool = self.disk_pool.as_ref().unwrap();
         // let page = disk_pool.acquire_page().await;
         // return Page::Disk(page);
+
+        debug!("pool free ratio {:?}", self.free_ratio());
 
         if self.memory_pool.remain_page_cnt() > 0 {
             if let Some(page) = self.try_acquire_page() {

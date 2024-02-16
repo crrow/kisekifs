@@ -27,6 +27,7 @@ use serde::{
     de::{Unexpected, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use tracing_core::Field;
 
 const UNIT: u64 = 1;
 
@@ -60,6 +61,10 @@ impl ReadableSize {
 
     pub const fn as_bytes(self) -> u64 {
         self.0
+    }
+
+    pub fn to_string(self) -> String {
+        format!("{:?}", self)
     }
 }
 
@@ -182,7 +187,6 @@ impl Display for ReadableSize {
         }
     }
 }
-
 impl<'de> Deserialize<'de> for ReadableSize {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

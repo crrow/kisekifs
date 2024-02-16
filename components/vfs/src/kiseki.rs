@@ -42,6 +42,7 @@ use snafu::{location, Location, OptionExt, ResultExt};
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace};
 
+use crate::err::Error;
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
@@ -620,16 +621,18 @@ impl KisekiVFS {
         if ino == CONTROL_INODE {
             todo!()
         }
-        if !self.data_manager.file_writer_exists(ino) {
+
+        return if let Some(fw) = self.data_manager.find_file_writer(ino) {
+            debug!("find file write");
+            let l = fw.write(offset, data).await?;
+            Ok(l as u32)
+        } else {
             error!(
                 "fs:write with ino {:?} fh {:?} offset {:?} size {:?} failed; maybe open flag contains problem",
                 ino, fh, offset, size
             );
-            return LibcSnafu { errno: libc::EBADF }.fail()?;
-        }
-
-        let len = self.data_manager.write(ino, offset, data).await?;
-        Ok(len as u32)
+            LibcSnafu { errno: libc::EBADF }.fail()?
+        };
     }
 
     pub async fn flush(&self, ctx: &FuseContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
@@ -642,7 +645,13 @@ impl KisekiVFS {
         };
 
         if let Some(fw) = self.data_manager.find_file_writer(ino) {
-            fw.flush().await?;
+            tokio::spawn(async move {
+                fw.flush().await?;
+                Ok::<(), Error>(())
+            })
+            .await
+            .context(JoinErrSnafu)??;
+            // fw.flush().await?;
         }
 
         if lock_owner != h.get_ofd_owner().await {
