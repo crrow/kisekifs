@@ -41,7 +41,7 @@ impl BackendKinds {
             BackendKinds::Rocksdb => {
                 let mut builder = rocksdb::Builder::default();
                 builder.with_path(path);
-                debug!("rocksdb backend is built with path: {}", path);
+                debug!("backend [rocksdb] is built with path: {}", path);
                 builder.build()
             }
             _ => unimplemented!("unsupported backend"),
@@ -70,7 +70,7 @@ pub trait Backend: Send + Sync + 'static {
 
     fn set_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, slices: Slices) -> Result<()>;
     fn set_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, buf: Vec<u8>)
-    -> Result<()>;
+        -> Result<()>;
     fn get_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Option<Vec<u8>>>;
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices>;
 

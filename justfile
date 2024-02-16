@@ -58,8 +58,7 @@ alias sh-m := help-mount
     cargo run --color=always --package kiseki-binary help mount
 
 @mount:
-    just clean
-    just prepare
+    mkdir -p /tmp/kiseki
     cargo run --color=always --package kiseki-binary mount --level debug
 
 @release-mount:
@@ -86,6 +85,10 @@ alias sh-um := help-umount
 @format:
     cargo run --color=always --package kiseki-binary format
 
+@prepare:
+    mkdir -p /tmp/kiseki /tmp/kiseki.meta/
+    just format
+
 alias sh-f := help-format
 @help-format:
     cargo run --color=always --bin kiseki help format
@@ -102,9 +105,7 @@ alias sh-f := help-format
     - rm -r /tmp/kiseki.data/
     echo "Done: remove data dir"
 
-@prepare:
-    mkdir -p /tmp/kiseki /tmp/kiseki.meta/
-    just format
+
 
 alias sw := seq-write
 @seq-write:

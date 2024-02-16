@@ -14,7 +14,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use super::{key, key::Counter, Backend};
 use crate::err::{
-    model_err, model_err::ModelKind, InvalidSettingSnafu, Result, RocksdbSnafu,
+    model_err, model_err::ModelKind, InvalidSettingSnafu, ModelSnafu, Result, RocksdbSnafu,
     UninitializedEngineSnafu,
 };
 
@@ -53,21 +53,12 @@ impl Debug for RocksdbBackend {
 impl Backend for RocksdbBackend {
     // TODO: merge the exists format
     fn set_format(&self, format: &Format) -> Result<()> {
-        // let transaction = self.db.transaction();
-        // ensure!(
-        //     transaction
-        //         .get(key::CURRENT_FORMAT)
-        //         .context(RocksdbSnafu)?
-        //         .is_none(),
-        //     InvalidSettingSnafu {
-        //         key: Vec::from(key::CURRENT_FORMAT.as_bytes())
-        //     }
-        // );
-
-        let setting_buf = bincode::serialize(format).context(model_err::CorruptionSnafu {
-            kind: ModelKind::Setting,
-            key: Vec::from(key::CURRENT_FORMAT.as_bytes()),
-        })?;
+        let setting_buf = bincode::serialize(format)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::Setting,
+                key: Vec::from(key::CURRENT_FORMAT.as_bytes()),
+            })
+            .context(ModelSnafu)?;
 
         self.db
             .put(key::CURRENT_FORMAT, setting_buf)
@@ -80,11 +71,12 @@ impl Backend for RocksdbBackend {
             .get_pinned(key::CURRENT_FORMAT)
             .context(RocksdbSnafu)?
             .context(UninitializedEngineSnafu)?;
-        let setting: Format =
-            bincode::deserialize(&setting_buf).context(model_err::CorruptionSnafu {
+        let setting: Format = bincode::deserialize(&setting_buf)
+            .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
                 key: key::CURRENT_FORMAT.as_bytes(),
-            })?;
+            })
+            .context(ModelSnafu)?;
         Ok(setting)
     }
 
@@ -95,36 +87,43 @@ impl Backend for RocksdbBackend {
             .get(&key)
             .context(RocksdbSnafu)?
             .map(|v| {
-                bincode::deserialize(&v).context(model_err::CorruptionSnafu {
-                    kind: ModelKind::Counter,
-                    key: key.clone(),
-                })
+                bincode::deserialize(&v)
+                    .context(model_err::CorruptionSnafu {
+                        kind: ModelKind::Counter,
+                        key: key.clone(),
+                    })
+                    .context(ModelSnafu)
             })
             .transpose()?
             .unwrap_or(0u64);
         let new = current + step as u64;
-        let new_buf = bincode::serialize(&new).context(model_err::CorruptionSnafu {
-            kind: ModelKind::Counter,
-            key: key.clone(),
-        })?;
+        let new_buf = bincode::serialize(&new)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::Counter,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
         transaction.put(&key, new_buf).context(RocksdbSnafu)?;
         transaction.commit().context(RocksdbSnafu)?;
         Ok(new)
     }
     fn load_count(&self, counter: Counter) -> Result<u64> {
         let key: Vec<u8> = counter.into();
-        let buf =
-            self.db
-                .get_pinned(&key)
-                .context(RocksdbSnafu)?
-                .context(model_err::NotFoundSnafu {
-                    kind: ModelKind::Counter,
-                    key: key.clone(),
-                })?;
-        let count: u64 = bincode::deserialize(&buf).context(model_err::CorruptionSnafu {
-            kind: ModelKind::Counter,
-            key: key.clone(),
-        })?;
+        let buf = self
+            .db
+            .get_pinned(&key)
+            .context(RocksdbSnafu)?
+            .context(model_err::NotFoundSnafu {
+                kind: ModelKind::Counter,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
+        let count: u64 = bincode::deserialize(&buf)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::Counter,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
         Ok(count)
     }
 
@@ -137,20 +136,25 @@ impl Backend for RocksdbBackend {
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Attr,
                 key: attr_key.clone(),
-            })?;
+            })
+            .context(ModelSnafu)?;
 
-        let attr: InodeAttr = bincode::deserialize(&buf).context(model_err::CorruptionSnafu {
-            kind: ModelKind::Attr,
-            key: attr_key,
-        })?;
+        let attr: InodeAttr = bincode::deserialize(&buf)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::Attr,
+                key: attr_key,
+            })
+            .context(ModelSnafu)?;
         Ok(attr)
     }
     fn set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()> {
         let attr_key = key::attr(inode);
-        let buf = bincode::serialize(attr).context(model_err::CorruptionSnafu {
-            kind: ModelKind::Attr,
-            key: attr_key.clone(),
-        })?;
+        let buf = bincode::serialize(attr)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::Attr,
+                key: attr_key.clone(),
+            })
+            .context(ModelSnafu)?;
         self.db.put(&attr_key, &buf).context(RocksdbSnafu)?;
         Ok(())
     }
@@ -164,13 +168,15 @@ impl Backend for RocksdbBackend {
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::DEntry,
                 key: entry_key.clone(),
-            })?;
+            })
+            .context(ModelSnafu)?;
 
-        let entry_info: DEntry =
-            bincode::deserialize(&entry_buf).context(model_err::CorruptionSnafu {
+        let entry_info: DEntry = bincode::deserialize(&entry_buf)
+            .context(model_err::CorruptionSnafu {
                 kind: ModelKind::DEntry,
                 key: entry_key,
-            })?;
+            })
+            .context(ModelSnafu)?;
         Ok(entry_info)
     }
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()> {
@@ -184,7 +190,8 @@ impl Backend for RocksdbBackend {
         .context(model_err::CorruptionSnafu {
             kind: ModelKind::DEntry,
             key: entry_key.clone(),
-        })?;
+        })
+        .context(ModelSnafu)?;
         self.db.put(&entry_key, &entry_buf).context(RocksdbSnafu)?;
         Ok(())
     }
@@ -194,11 +201,12 @@ impl Backend for RocksdbBackend {
         let mut res = Vec::default();
         while let Some(e) = iter.next() {
             let (key, value) = e.context(RocksdbSnafu)?;
-            let dentry: DEntry =
-                bincode::deserialize(&value).context(model_err::CorruptionSnafu {
+            let dentry: DEntry = bincode::deserialize(&value)
+                .context(model_err::CorruptionSnafu {
                     kind: ModelKind::DEntry,
                     key,
-                })?;
+                })
+                .context(ModelSnafu)?;
             res.push(dentry);
         }
         Ok(res)
@@ -220,16 +228,19 @@ impl Backend for RocksdbBackend {
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Symlink,
                 key: symlink_key.clone(),
-            })?;
+            })
+            .context(ModelSnafu)?;
         Ok(String::from_utf8_lossy(path_buf.as_ref()).to_string())
     }
 
     fn set_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, slices: Slices) -> Result<()> {
         let key = key::chunk_slices(inode, chunk_index);
-        let buf = bincode::serialize(&slices).context(model_err::CorruptionSnafu {
-            kind: ModelKind::ChunkSlices,
-            key: key.clone(),
-        })?;
+        let buf = bincode::serialize(&slices)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::ChunkSlices,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
         Ok(())
     }
@@ -252,45 +263,52 @@ impl Backend for RocksdbBackend {
     }
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices> {
         let key = key::chunk_slices(inode, chunk_index);
-        let buf =
-            self.db
-                .get_pinned(&key)
-                .context(RocksdbSnafu)?
-                .context(model_err::NotFoundSnafu {
-                    kind: ModelKind::ChunkSlices,
-                    key: key.clone(),
-                })?;
-        let slices = bincode::deserialize::<Slices>(&buf).context(model_err::CorruptionSnafu {
-            kind: ModelKind::ChunkSlices,
-            key: key.clone(),
-        })?;
+        let buf = self
+            .db
+            .get_pinned(&key)
+            .context(RocksdbSnafu)?
+            .context(model_err::NotFoundSnafu {
+                kind: ModelKind::ChunkSlices,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
+        let slices = bincode::deserialize::<Slices>(&buf)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::ChunkSlices,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
         Ok(slices)
     }
 
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()> {
         let key = key::dir_stat(inode);
-        let buf = bincode::serialize(&dir_stat).context(model_err::CorruptionSnafu {
-            kind: ModelKind::DirStat,
-            key: key.clone(),
-        })?;
+        let buf = bincode::serialize(&dir_stat)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::DirStat,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
         Ok(())
     }
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat> {
         let key = key::dir_stat(inode);
-        let buf =
-            self.db
-                .get_pinned(&key)
-                .context(RocksdbSnafu)?
-                .context(model_err::NotFoundSnafu {
-                    kind: ModelKind::DirStat,
-                    key: key.clone(),
-                })?;
-        let dir_stat =
-            bincode::deserialize::<DirStat>(&buf).context(model_err::CorruptionSnafu {
+        let buf = self
+            .db
+            .get_pinned(&key)
+            .context(RocksdbSnafu)?
+            .context(model_err::NotFoundSnafu {
                 kind: ModelKind::DirStat,
                 key: key.clone(),
-            })?;
+            })
+            .context(ModelSnafu)?;
+        let dir_stat = bincode::deserialize::<DirStat>(&buf)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::DirStat,
+                key: key.clone(),
+            })
+            .context(ModelSnafu)?;
         Ok(dir_stat)
     }
 }

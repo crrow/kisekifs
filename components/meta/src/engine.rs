@@ -58,6 +58,8 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
         backend,
     };
 
+    debug!("open meta engine: {}", me);
+
     Ok(Arc::new(me))
 }
 
@@ -68,6 +70,7 @@ pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
     let mut need_init_root = false;
     match backend.load_format() {
         Ok(old_format) => {
+            debug!("found exists format, need to update");
             if !old_format.dir_stats && format.dir_stats {
                 // remove dir stats as they are outdated
             }
@@ -76,7 +79,11 @@ pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
         Err(e) => {
             if matches!(e, Error::UninitializedEngine { .. }) {
                 // we need to initialize the engine
+                debug!("cannot found format, need to initialize the engine");
                 need_init_root = true;
+            } else {
+                debug!("cannot found format, but got error: {:?}", e);
+                return Err(e);
             }
         }
     }
@@ -100,6 +107,7 @@ pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
     }
     backend.set_format(&format)?;
     if need_init_root {
+        debug!("initialize root inode");
         basic_attr.set_perm(0o777);
         backend.set_attr(ROOT_INO, &basic_attr)?;
         backend.increase_count_by(Counter::NextInode, 2)?;
@@ -128,7 +136,7 @@ pub struct MetaEngine {
 impl Display for MetaEngine {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // TODO
-        write!(f, "MetaEngine")
+        write!(f, "MetaEngine: {}", self.format.name)
     }
 }
 

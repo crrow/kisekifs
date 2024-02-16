@@ -83,10 +83,8 @@ pub mod model_err {
     #[derive(Debug, Snafu)]
     #[snafu(visibility(pub))]
     pub enum Error {
-        NotFound {
-            kind: ModelKind,
-            key: Vec<u8>,
-        },
+        #[snafu(display("Not found: {:?}", String::from_utf8_lossy(key.as_slice()).to_string()))]
+        NotFound { kind: ModelKind, key: Vec<u8> },
         Corruption {
             kind: ModelKind,
             key: Vec<u8>,
@@ -102,15 +100,6 @@ pub mod model_err {
     impl Error {
         pub fn is_not_found(&self) -> bool {
             matches!(self, Error::NotFound { .. })
-        }
-    }
-
-    impl From<Error> for super::Error {
-        fn from(e: Error) -> Self {
-            super::Error::ModelError {
-                location: location!(),
-                source: e,
-            }
         }
     }
 }

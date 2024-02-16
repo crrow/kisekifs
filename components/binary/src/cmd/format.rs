@@ -37,7 +37,7 @@ pub struct FormatArgs {
         long,
         help = "Specify the address of the meta store",
         help_heading = FORMAT_OPTIONS_HEADER,
-        default_value = "rocksdb://:/tmp/kiseki.meta",
+        default_value = kiseki_common::KISEKI_DEBUG_META_ADDR,
     )]
     pub meta_dsn: Option<String>,
 
