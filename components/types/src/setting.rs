@@ -49,3 +49,10 @@ impl Default for Format {
         }
     }
 }
+
+impl Format {
+    pub fn with_name(&mut self, name: &str) -> &mut Self {
+        self.name = name.to_string();
+        self
+    }
+}

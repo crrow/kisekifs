@@ -43,8 +43,8 @@ impl DataManager {
             .or_insert_with(|| {
                 let fr = FileReader {
                     data_engine: Arc::downgrade(&self),
-                    fh,
                     ino: inode,
+                    fh,
                     length,
                     chunks: Default::default(),
                     closing: Default::default(),
@@ -55,18 +55,20 @@ impl DataManager {
             .clone()
     }
 
-    pub(crate) fn find_file_reader(
-        self: &Arc<Self>,
-        inode: Ino,
-        fh: FH,
-    ) -> Option<Arc<FileReader>> {
-        self.file_readers
-            .get(&(inode, fh))
-            .map(|m| m.value().clone())
-    }
-
     pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
-        debug!("DO NOTHING: truncate inode {} to {}", inode, length);
+        debug!(
+            "DO NOTHING: truncate reader: {:?}, length: {}",
+            inode, length
+        );
+        // if let Some(frs) = self.file_readers.get(&inode) {
+        //     for fr in frs.iter() {
+        //         if length < fr.length {
+        //             for slices in fr.chunks.iter() {
+        //
+        //             }
+        //         }
+        //     }
+        // }
     }
 }
 
@@ -77,10 +79,9 @@ pub(crate) type FileReadersRef = Arc<DashMap<(Ino, FH), Arc<FileReader>>>;
 #[derive(Debug)]
 pub(crate) struct FileReader {
     data_engine: Weak<DataManager>,
-    // The file handle.
-    fh: FH,
     // The file inode.
     ino: Ino,
+    fh: FH,
     // The max file read length, it was set when we crate the file handle.
     length: usize,
     // A file be divided into multiple chunks,
@@ -271,7 +272,7 @@ mod tests {
 
         let meta_config = MetaConfig::default();
         let format = Format::default();
-        kiseki_meta::update_format(meta_config.dsn.clone(), format.clone(), true).unwrap();
+        kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
 
         let meta_engine = kiseki_meta::open(meta_config).unwrap();
         let fuse_ctx = FuseContext::background();
@@ -291,7 +292,7 @@ mod tests {
             cache,
         ));
 
-        data_manager.new_file_writer(inode, 0);
+        data_manager.open_file_writer(inode, 0);
         let data = b"hello world" as &[u8];
 
         let write_len = data_manager

@@ -24,7 +24,6 @@ use kiseki_types::{
     stat::{DirStat, FSStat},
     FileType,
 };
-
 use scopeguard::defer;
 use snafu::{ensure, ResultExt};
 use tokio::time::{timeout, Instant};
@@ -65,8 +64,8 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
 }
 
 // update_format is used to change the file system's setting.
-pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
-    let backend = open_backend(&dsn)?;
+pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
+    let backend = open_backend(dsn)?;
 
     let mut need_init_root = false;
     match backend.load_format() {

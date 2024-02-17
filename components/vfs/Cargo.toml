@@ -29,4 +29,7 @@ fuser.workspace = true
 serde.workspace = true
 scopeguard.workspace = true
 opendal.workspace = true
-log = "0.4.20"
+
+
+[dev-dependencies]
+tempfile.workspace = true

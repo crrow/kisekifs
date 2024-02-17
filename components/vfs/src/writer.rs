@@ -1,4 +1,3 @@
-use std::sync::atomic::AtomicU64;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
@@ -6,7 +5,7 @@ use std::{
     io::Cursor,
     ops::Range,
     sync::{
-        atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
         Arc, Weak,
     },
 };
@@ -31,10 +30,10 @@ use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use libc::EBADF;
 use rangemap::RangeMap;
 use snafu::{OptionExt, ResultExt};
-use tokio::time::Instant;
 use tokio::{
     sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock},
     task::JoinHandle,
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
@@ -47,27 +46,35 @@ use crate::{
 };
 
 impl DataManager {
-    /// Creates a new [FileWriter] for the file handle.
-    pub(crate) fn new_file_writer(self: &Arc<Self>, ino: Ino, len: u64) {
-        let (tx, mut rx) = mpsc::channel(10);
-        let fw = FileWriter {
-            inode: ino,
-            length: AtomicUsize::new(len as usize),
-            slice_writers: Default::default(),
-            slice_flush_queue: tx,
-            manually_flush: Arc::new(Default::default()),
-            cancel_token: CancellationToken::new(),
-            seq_generate: self.id_generator.clone(),
-            pattern: Default::default(),
-            early_flush_threshold: 0.0,
-            // background_task_handle: (),
-            data_manager: Arc::downgrade(self),
-        };
-        let fw = Arc::new(fw);
-        self.file_writers.insert(ino, fw.clone());
+    /// Creates a new [FileWriter] for the file.
+    /// All file handle share the single one [FileWriter].
+    pub(crate) fn open_file_writer(self: &Arc<Self>, ino: Ino, len: u64) -> Arc<FileWriter> {
+        self.file_writers
+            .entry(ino)
+            .or_insert_with(|| {
+                let (tx, mut rx) = mpsc::channel(10);
+                let fw = FileWriter {
+                    inode: ino,
+                    length: AtomicUsize::new(len as usize),
+                    slice_writers: Default::default(),
+                    slice_flush_queue: tx,
+                    manually_flush: Arc::new(Default::default()),
+                    cancel_token: CancellationToken::new(),
+                    seq_generate: self.id_generator.clone(),
+                    pattern: Default::default(),
+                    early_flush_threshold: 0.0,
+                    data_manager: Arc::downgrade(self),
+                };
 
-        let ff = FileWriterFlusher { fw, rx };
-        tokio::spawn(async move { ff.run().await });
+                let fw = Arc::new(fw);
+                let fw_cloned = fw.clone();
+                tokio::spawn(async move {
+                    let flusher = FileWriterFlusher { fw: fw_cloned, rx };
+                    flusher.run().await
+                });
+                fw
+            })
+            .clone()
     }
 
     /// Use the [FileWriter] to write data to the file.

@@ -23,7 +23,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::err::Error;
 pub use config::FuseConfig;
 use fuser::{
     FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
@@ -44,6 +43,8 @@ use libc::{__u64, c_int};
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
 use tracing::{debug, error, field, info, instrument, Instrument};
+
+use crate::err::Error;
 
 #[derive(Debug)]
 pub struct KisekiFuse {
@@ -539,8 +540,30 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync, name=field::Empty))]
+    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync, name=field::Empty))]
     fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, _reply: ReplyEmpty) {
         todo!()
+    }
+
+    #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, name=field::Empty))]
+    fn fallocate(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        length: i64,
+        mode: i32,
+        reply: ReplyEmpty,
+    ) {
+        let ctx = Arc::new(FuseContext::from(req));
+        match self.runtime.block_on(
+            self.vfs
+                .fallocate(ctx, Ino(ino), fh, offset, length, mode as u8)
+                .in_current_span(),
+        ) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        }
     }
 }
