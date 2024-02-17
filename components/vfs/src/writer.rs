@@ -231,7 +231,9 @@ impl FileWriter {
         // 1. find write location.
         let start = Instant::now();
         debug!("try to find slice writer {:?}", start.elapsed());
-        let slice_writers = self.find_slice_writer(offset, expected_write_len).await;
+        let slice_writers = self
+            .find_writable_slice_writer(offset, expected_write_len)
+            .await;
         debug!("find slice writer success {:?}", start.elapsed());
         let handles = slice_writers
             .iter()
@@ -303,7 +305,7 @@ impl FileWriter {
         Ok(write_len)
     }
 
-    async fn find_slice_writer(
+    async fn find_writable_slice_writer(
         self: &Arc<Self>,
         offset: usize,
         expected_write_len: usize,
@@ -371,10 +373,8 @@ impl FileWriter {
         sws
     }
 
-    fn remove_done_slice_writer(self: &Arc<Self>) {
-        debug!("remove done slice writer");
+    async fn remove_done_slice_writer(self: &Arc<Self>) {
         let mut to_remove = Vec::new();
-
         for mut cw in self.slice_writers.iter_mut() {
             let chunk_idx = cw.key().clone();
             // show mut to make sure we get the right range as key.
@@ -391,8 +391,13 @@ impl FileWriter {
                 .collect::<Vec<_>>();
 
             for k in keys {
-                debug!("remove slice writer: {}", k);
-                cw.remove(&k);
+                if let Some(sw) = cw.remove(&k) {
+                    let (fl, l) = sw.get_flushed_length_and_total_write_length().await;
+                    debug!(
+                        "ChunkIndex({chunk_idx}) remove slice writer({}), flushed_len: {fl}, total_len: {l}, free_ratio: {}",
+                        sw.slice_id.load(Ordering::Acquire),  kiseki_storage::get_pool_free_ratio(),
+                    );
+                }
             }
             if cw.is_empty() {
                 to_remove.push(chunk_idx);
@@ -573,7 +578,7 @@ impl FileWriterFlusher {
                                                 error!("{ino} failed to flush bulk {e}");
                                             }
                                             // clean the map
-                                            fw.remove_done_slice_writer();
+                                            fw.remove_done_slice_writer().await;
                                         }
                                         _ = cancel_token.cancelled() => {
                                             return;
@@ -594,7 +599,7 @@ impl FileWriterFlusher {
                                             }
                                             sw.mark_done();
                                             // clean the map
-                                            fw.remove_done_slice_writer();
+                                            fw.remove_done_slice_writer().await;
                                         }
                                         _ = cancel_token.cancelled() => {
                                             debug!("{ino} flush full is cancelled");
@@ -607,34 +612,39 @@ impl FileWriterFlusher {
                                     }
                                     sw.mark_done();
                                     // clean the map
-                                    fw.remove_done_slice_writer();
+                                    fw.remove_done_slice_writer().await;
                                 });
                             },
                             FlushReq::ManualFlush{sws,remain, notify } => {
-                                debug!("{} manually flush started, slice write count {}", ino, sws.len());
+                                let total_len = sws.len();
+                                debug!("{} manually flush started, slice write count {}", ino, total_len);
                                 for sw in sws.into_iter() {
                                     let remain = remain.clone();
                                     let notify = notify.clone();
                                     tokio::spawn(async move {
-                                        let r = sw.flush().await;
+                                        let r = sw.flush().in_current_span().await;
                                         if let Err(e) = r {
                                             error!("{ino} failed to flush manually {e}");
                                         }
                                         // FIXME: we don't have to mark done, since all the slice writers
                                         // has been moved out from the map.
                                         sw.mark_done();
-                                        remain.fetch_sub(1, Ordering::AcqRel);
+                                        let pre_remain = remain.fetch_sub(1, Ordering::AcqRel);
+                                        debug!("{} manually flush remain: {}, total: {}", ino, pre_remain -1 , total_len);
                                         notify.notify_waiters();
                                     });
                                 }
 
                                 let fw = self.fw.clone();
                                 tokio::spawn(async move {
+                                    let start = Instant::now();
                                     while remain.load(Ordering::Acquire) > 0 {
+                                        debug!("wait for {} manually flush finished {:?}", ino, start.elapsed());
                                         notify.notified().await;
                                     }
+                                    info!("{} manually flush finished, cost: {:?}", ino, start.elapsed());
                                     // clean the map
-                                    fw.remove_done_slice_writer();
+                                    fw.remove_done_slice_writer().await;
                                 });
                             },
                         }

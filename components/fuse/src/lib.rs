@@ -583,7 +583,7 @@ impl Filesystem for KisekiFuse {
             .runtime
             .block_on(self.vfs.release(ctx, Ino(ino), fh).in_current_span())
         {
-            Ok(()) => reply.ok(),
+            Ok(_) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         };
     }
