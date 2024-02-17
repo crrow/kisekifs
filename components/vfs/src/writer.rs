@@ -311,66 +311,63 @@ impl FileWriter {
         expected_write_len: usize,
     ) -> Vec<(Arc<SliceWriter>, ChunkWriteCtx)> {
         let mut sws = Vec::with_capacity(2);
-        'cw_loop: for l in locate_chunk(CHUNK_SIZE, offset, expected_write_len) {
-            if let Some(cw) = self.slice_writers.get(&l.chunk_idx) {
+        for l in locate_chunk(CHUNK_SIZE, offset, expected_write_len) {
+            let sw = self.find_writable_slice_in_chunk(&l).await;
+            sws.push((sw, l));
+        }
+        sws
+    }
+
+    async fn find_writable_slice_in_chunk(self: &Arc<Self>, l: &ChunkWriteCtx) -> Arc<SliceWriter> {
+        if let Some(cw) = self.slice_writers.get(&l.chunk_idx) {
+            debug!(
+                "chunk_index: {} found ChunkWriter: {}, write pattern is seq: {}",
+                l.chunk_idx,
+                cw.len(),
+                self.pattern.is_seq(),
+            );
+            for (idx, (_, sw)) in cw.iter().rev().enumerate() {
+                let (flushed, length) = sw.get_flushed_length_and_total_write_length().await;
                 debug!(
-                    "chunk_index: {} found ChunkWriter: {}, write pattern is seq: {}",
-                    l.chunk_idx,
-                    cw.len(),
-                    self.pattern.is_seq(),
+                    "chunk_index: {} found slice writer: {} flushed: {}, length: {}",
+                    l.chunk_idx, sw, flushed, length
                 );
-                for (idx, (_, sw)) in cw.iter().rev().enumerate() {
-                    let (flushed, length) = sw.get_flushed_length_and_total_write_length().await;
-                    debug!(
-                        "chunk_index: {} found slice writer: {} flushed: {}, length: {}",
-                        l.chunk_idx, sw, flushed, length
-                    );
-                    if !sw.has_frozen() {
-                        if sw.offset_of_chunk + flushed <= l.chunk_offset
-                            && l.chunk_offset <= sw.offset_of_chunk + length
-                        {
-                            // we can write to this slice.
-                            sws.push((sw.clone(), l));
-                            continue 'cw_loop;
-                        }
-                    }
-                    // flush some for random write
-                    if idx >= 3
-                        && kiseki_storage::get_pool_free_ratio() < self.early_flush_threshold
+                if !sw.has_frozen() {
+                    if sw.offset_of_chunk + flushed <= l.chunk_offset
+                        && l.chunk_offset <= sw.offset_of_chunk + length
                     {
-                        debug!("chunk_index: {} flush some for random write", l.chunk_idx);
-                        if let Some(req) = sw.make_full_flush_in_advance() {
-                            if let Err(e) = self.slice_flush_queue.send(req).await {
-                                panic!("failed to send flush request {e}");
-                            }
+                        // we can write to this slice.
+                        return sw.clone();
+                    }
+                }
+                // flush some for random write
+                if idx >= 3 && kiseki_storage::get_pool_free_ratio() < self.early_flush_threshold {
+                    debug!("chunk_index: {} flush some for random write", l.chunk_idx);
+                    if let Some(req) = sw.make_full_flush_in_advance() {
+                        if let Err(e) = self.slice_flush_queue.send(req).await {
+                            panic!("failed to send flush request {e}");
                         }
                     }
                 }
             }
-
-            // in random mode or we can't find a suitable slice writer.
-            // we need to create a new one.
-            let mut entry = self
-                .slice_writers
-                .entry(l.chunk_idx)
-                .or_insert(BTreeMap::new());
-
-            if !entry.is_empty() {
-                // we need to flush some for random write
-                // TODO: optimize the random write
-            }
-
-            let sw = Arc::new(SliceWriter::new(
-                self.seq_generate
-                    .next_id()
-                    .expect("should not fail when generate internal seq"),
-                l.chunk_offset,
-                self.data_manager.clone(),
-            ));
-            entry.insert(sw._internal_seq, sw.clone());
-            sws.push((sw, l));
         }
-        sws
+
+        // in random mode or we can't find a suitable slice writer.
+        // we need to create a new one.
+        let mut entry = self
+            .slice_writers
+            .entry(l.chunk_idx)
+            .or_insert(BTreeMap::new());
+
+        let sw = Arc::new(SliceWriter::new(
+            self.seq_generate
+                .next_id()
+                .expect("should not fail when generate internal seq"),
+            l.chunk_offset,
+            self.data_manager.clone(),
+        ));
+        entry.insert(sw._internal_seq, sw.clone());
+        sw
     }
 
     async fn remove_done_slice_writer(self: &Arc<Self>) {
@@ -588,7 +585,11 @@ impl FileWriterFlusher {
                             },
                             FlushReq::FlushFull(sw) => {
                                 let (fl, wl ) = sw.get_flushed_length_and_total_write_length().await;
-                                debug!("{ino} flush full flushed_length {fl}, length: {wl}");
+                                debug!("Ino({ino}) flush full {} flushed_length {}, length: {}",
+                                    sw.slice_id.load(Ordering::Acquire),
+                                    ReadableSize(fl as u64),
+                                    ReadableSize(wl as u64),
+                                );
                                 let fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
                                 tokio::spawn(async move {

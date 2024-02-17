@@ -18,13 +18,12 @@ use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::Sampler};
 use opentelemetry_semantic_conventions::resource;
 use sentry::ClientInitGuard;
 use serde::{Deserialize, Serialize};
-use tracing::metadata::LevelFilter;
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{RollingFileAppender, Rotation},
 };
 use tracing_subscriber::{
-    filter, filter::Targets, fmt::Layer, layer::SubscriberExt, prelude::*, EnvFilter, Registry,
+    filter, fmt::Layer, layer::SubscriberExt, prelude::*, EnvFilter, Registry,
 };
 
 use crate::sentry_init::init_sentry;
@@ -94,6 +93,9 @@ pub fn init_global_logging(
     let level = &opts.level;
     let enable_otlp_tracing = opts.enable_otlp_tracing;
 
+    let self_filter =
+        filter::filter_fn(|metadata| metadata.target().starts_with(kiseki_common::KISEKI));
+
     let stdout_logging_layer = if opts.append_stdout {
         let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
         guards.push(stdout_guard);
@@ -104,9 +106,7 @@ pub fn init_global_logging(
                 .with_line_number(true)
                 .with_target(true)
                 .pretty()
-                .with_filter(filter::filter_fn(|metadata| {
-                    metadata.target().starts_with("kiseki")
-                })),
+                .with_filter(self_filter.clone()),
         )
     } else {
         None
@@ -115,7 +115,9 @@ pub fn init_global_logging(
     // JSON log layer.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
-    let file_logging_layer = Layer::new().with_writer(rolling_writer);
+    let file_logging_layer = Layer::new()
+        .with_writer(rolling_writer)
+        .with_filter(self_filter.clone());
     guards.push(rolling_writer_guard);
 
     // error JSON log layer.
@@ -123,7 +125,9 @@ pub fn init_global_logging(
         RollingFileAppender::new(Rotation::HOURLY, dir, format!("{}-{}", app_name, "err"));
     let (err_rolling_writer, err_rolling_writer_guard) =
         tracing_appender::non_blocking(err_rolling_appender);
-    let err_file_logging_layer = Layer::new().with_writer(err_rolling_writer);
+    let err_file_logging_layer = Layer::new()
+        .with_writer(err_rolling_writer)
+        .with_filter(self_filter.clone());
     guards.push(err_rolling_writer_guard);
 
     // resolve log level settings from:
@@ -147,11 +151,7 @@ pub fn init_global_logging(
     let (sentry_layer, sentry_guard) = match init_sentry() {
         None => (None, None),
         Some(sentry_guard) => (
-            Some(
-                sentry_tracing::layer().with_filter(filter::filter_fn(|metadata| {
-                    metadata.target().starts_with("kiseki")
-                })),
-            ),
+            Some(sentry_tracing::layer().with_filter(self_filter.clone())),
             Some(sentry_guard),
         ),
     };
