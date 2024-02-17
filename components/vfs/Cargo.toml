@@ -10,7 +10,7 @@ kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
 kiseki-storage = {path = "../../components/storage"}
 kiseki-common = {path = "../../components/common"}
-kiseki-meta = {path = "../../components/meta"}
+kiseki-meta = {path = "../../components/meta", features = ["meta-rocksdb"]}
 
 tokio.workspace = true
 futures.workspace = true

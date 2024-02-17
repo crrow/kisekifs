@@ -520,6 +520,10 @@ impl FileWriter {
             dm.file_writers.remove(&self.inode);
         };
     }
+
+    pub(crate) fn get_reference_count(self: &Arc<Self>) -> usize {
+        self.ref_count.load(Ordering::Acquire)
+    }
 }
 
 enum FlushReq {
@@ -552,7 +556,7 @@ impl FileWriterFlusher {
         loop {
             tokio::select! {
                 _ = cloned_cancel_token.cancelled() => {
-                    debug!("{ino} flush task is cancelled");
+                    debug!("flusher of [{ino}] is cancelled");
                     return;
                 }
                 req = self.rx.recv() => {

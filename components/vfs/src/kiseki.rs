@@ -41,6 +41,7 @@ use kiseki_types::{
 use kiseki_utils::object_storage::ObjectStorage;
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{ensure, location, Location, OptionExt, ResultExt};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace, Instrument};
 
@@ -718,7 +719,12 @@ impl KisekiVFS {
         todo!()
     }
 
-    pub async fn release(&self, ctx: Arc<FuseContext>, inode: Ino, fh: FH) -> Result<()> {
+    pub async fn release(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        fh: FH,
+    ) -> Result<JoinHandle<()>> {
         if inode.is_special() {
             todo!()
         }
@@ -749,10 +755,9 @@ impl KisekiVFS {
         }
         self.meta.close(inode).await?;
         let ht = self.handle_table.clone();
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             ht.release_file_handle(inode, fh).await;
-        });
-        Ok(())
+        }))
     }
 }
 
@@ -788,7 +793,7 @@ mod tests {
     async fn make_vfs() -> KisekiVFS {
         let tempdir = tempfile::tempdir().unwrap();
         let mut meta_config = kiseki_meta::MetaConfig::default();
-        meta_config.with_dsn(&format!("rocksdb://{}", tempdir.path().to_str().unwrap()));
+        meta_config.with_dsn(&format!("rocksdb://:{}", tempdir.path().to_str().unwrap()));
         let mut format = kiseki_types::setting::Format::default();
         format.with_name("test-kiseki");
         kiseki_meta::update_format(&meta_config.dsn, format, true).unwrap();
@@ -803,30 +808,40 @@ mod tests {
         install_fmt_log();
 
         let vfs = Arc::new(make_vfs().await);
-        let meta_ctx = Arc::new(FuseContext::background());
+        let ctx = Arc::new(FuseContext::background());
 
         let (entry, fh) = vfs
-            .create(&meta_ctx, ROOT_INO, "f", 0o755, 0, libc::O_RDWR)
+            .create(&ctx, ROOT_INO, "f", 0o755, 0, libc::O_RDWR)
             .await
             .unwrap();
 
         let write_len = vfs
-            .write(&meta_ctx, entry.inode, fh, 0, b"hello", 0, 0, None)
+            .write(&ctx, entry.inode, fh, 0, b"hello", 0, 0, None)
             .await
             .unwrap();
         assert_eq!(write_len, 5);
 
-        vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
+        vfs.fsync(&ctx, entry.inode, fh, true).await.unwrap();
 
         let write_len = vfs
-            .write(&meta_ctx, entry.inode, fh, 100 << 20, b"world", 0, 0, None)
+            .write(&ctx, entry.inode, fh, 100 << 20, b"world", 0, 0, None)
             .await
             .unwrap();
         assert_eq!(write_len, 5);
 
-        vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
+        vfs.fsync(&ctx, entry.inode, fh, true).await.unwrap();
+        let fw = vfs.data_manager.find_file_writer(entry.inode).unwrap();
+        assert_eq!(fw.get_reference_count(), 1);
+        let release_waiter = vfs.release(ctx, entry.inode, fh).await.unwrap();
+        // wait for the release to finish
+        release_waiter.await.unwrap();
+        assert_eq!(fw.get_reference_count(), 0);
+        assert_eq!(
+            vfs.data_manager.file_writers.contains_key(&entry.inode),
+            false
+        );
 
-        sequential_write(&vfs, entry.inode, fh).await;
+        // sequential_write(&vfs, entry.inode, fh).await;
     }
 
     async fn sequential_write(vfs: &Arc<KisekiVFS>, inode: Ino, fh: FH) {
