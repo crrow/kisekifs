@@ -635,7 +635,7 @@ impl KisekiVFS {
         };
     }
 
-    #[instrument(skip(self), fields(inode = ino, fh))]
+    #[instrument(skip(self), fields(ino, fh))]
     pub async fn flush(&self, ctx: &FuseContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
         let h = self
             .find_handle(ino, fh)
@@ -676,7 +676,7 @@ impl KisekiVFS {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(inode = ino, fh))]
+    #[instrument(skip(self), fields(ino, fh))]
     pub async fn fsync(
         &self,
         _ctx: &FuseContext,
