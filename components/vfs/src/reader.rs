@@ -1,7 +1,9 @@
-use std::sync::atomic::Ordering;
 use std::{
     cmp::min,
-    sync::{atomic::AtomicBool, Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
 };
 
 use dashmap::DashMap;

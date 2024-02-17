@@ -1,4 +1,3 @@
-use bitflags::bitflags;
 use std::{
     cmp::{max, min},
     fmt::{Display, Formatter},
@@ -11,6 +10,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use bitflags::bitflags;
 use crossbeam::{atomic::AtomicCell, channel::at};
 use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;

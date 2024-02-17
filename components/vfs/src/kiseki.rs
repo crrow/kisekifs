@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::Ordering;
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -25,11 +27,7 @@ use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
-use kiseki_storage::{
-    cache::CacheRef,
-    raw_buffer::ReadBuffer,
-    slice_buffer::{SliceBuffer, SliceBufferWrapper},
-};
+use kiseki_storage::{cache::CacheRef, raw_buffer::ReadBuffer, slice_buffer::SliceBuffer};
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
@@ -41,8 +39,7 @@ use kiseki_types::{
 use kiseki_utils::object_storage::ObjectStorage;
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{ensure, location, Location, OptionExt, ResultExt};
-use tokio::task::JoinHandle;
-use tokio::time::Instant;
+use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
 
 use crate::{

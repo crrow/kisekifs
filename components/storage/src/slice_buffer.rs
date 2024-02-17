@@ -96,62 +96,6 @@ fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: Block
     min(length - block_idx * block_size, block_size)
 }
 
-pub struct SliceBufferWrapper {
-    slice_id: SliceID,
-    inner: SliceBuffer,
-    object_storage: ObjectStorage,
-}
-
-impl SliceBufferWrapper {
-    pub fn new(object_storage: ObjectStorage) -> Self {
-        Self {
-            slice_id: EMPTY_SLICE_ID,
-            inner: SliceBuffer::new(),
-            object_storage,
-        }
-    }
-    pub fn set_slice_id(&mut self, sid: SliceID) {
-        self.slice_id = sid;
-    }
-
-    pub fn get_slice_id(&self) -> SliceID {
-        self.slice_id
-    }
-
-    pub async fn write_at(&mut self, offset: usize, data: &[u8]) -> Result<usize> {
-        self.inner.write_at(offset, data).in_current_span().await
-    }
-
-    pub async fn flush_to(&mut self, offset: usize) -> Result<()> {
-        let sid = self.slice_id;
-
-        let key_gen = move |idx, size| -> String { make_slice_object_key(sid, idx, size) };
-        let _ = self
-            .inner
-            .flush_bulk_to(offset, key_gen, self.object_storage.clone())
-            .await?;
-        Ok(())
-    }
-
-    pub async fn finish(&mut self) -> Result<()> {
-        let sid = self.slice_id;
-        let key_gen = move |idx, size| -> String { make_slice_object_key(sid, idx, size) };
-        let _ = self
-            .inner
-            .flush(key_gen, self.object_storage.clone())
-            .await?;
-        Ok(())
-    }
-
-    pub fn length(&self) -> usize {
-        self.inner.length
-    }
-
-    pub fn flushed_length(&self) -> usize {
-        self.inner.flushed_length
-    }
-}
-
 /// SliceAppendOnlyBuffer is a buffer that handle the write requests.
 ///
 /// Random write requests may hit the same slice buffer.
@@ -692,7 +636,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-        // we should be able to write the next block
+                                                                               // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

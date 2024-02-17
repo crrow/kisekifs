@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize};
 use std::{
     fmt::Debug,
+    marker::PhantomData,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -206,7 +205,7 @@ pub(crate) struct FileHandle {
     in_flushing: Arc<AtomicBool>,
     flush_notify: Arc<Notify>,
 
-    /* lock */
+    // lock
     pub(crate) locks: AtomicU8,
     flock_owner: AtomicU64, // kernel 3.1- does not pass lock_owner in release()
     ofd_owner: AtomicU64,
