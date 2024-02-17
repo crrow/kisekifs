@@ -12,9 +12,7 @@ use bincode::serialize;
 use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, Location, ResultExt, Snafu, Whatever};
-
-use crate::slice::Error::InvalidSliceKeyStr;
+use snafu::{ensure, Location, ResultExt, Snafu};
 
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
@@ -62,32 +60,24 @@ pub fn random_slice_id() -> u64 {
 pub type OverlookedSlices = RangeMap<usize, Slice>;
 pub type OverlookedSlicesRef = Arc<OverlookedSlices>;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Slices(pub Vec<Slice>);
 
 impl Slices {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.0.len() * SLICE_BYTES);
-        for slice in &self.0 {
-            buf.extend_from_slice(&slice.encode());
-        }
-        buf
-    }
-
-    pub fn decode(buf: &[u8]) -> Result<Slices, Error> {
-        ensure!(
-            buf.len() % SLICE_BYTES == 0,
-            InvalidSliceBufSnafu { len: buf.len() }
-        );
-        let mut slices = Vec::new();
-        let mut i = 0;
-        while i < buf.len() {
-            let slice = Slice::decode(&buf[i..i + SLICE_BYTES])?;
-            slices.push(slice);
-            i += SLICE_BYTES;
-        }
-        Ok(Slices(slices))
-    }
+    // pub fn decode(buf: &[u8]) -> Result<Slices, Error> {
+    //     ensure!(
+    //         buf.len() % SLICE_BYTES == 0,
+    //         InvalidSliceBufSnafu { len: buf.len() }
+    //     );
+    //     let mut slices = Vec::new();
+    //     let mut i = 0;
+    //     while i < buf.len() {
+    //         let slice = Slice::decode(&buf[i..i + SLICE_BYTES])?;
+    //         slices.push(slice);
+    //         i += SLICE_BYTES;
+    //     }
+    //     Ok(Slices(slices))
+    // }
 
     /// Look over all slices and build a RangeMap for them.
     pub fn overlook(&self) -> RangeMap<usize, Slice> {
@@ -300,8 +290,8 @@ mod tests {
             size: 1024,
             _padding: 0,
         };
-        let buf = slice.encode();
-        let slice2 = Slice::decode(&buf).unwrap();
+        let buf = bincode::serialize(&slice).unwrap();
+        let slice2 = bincode::deserialize(&buf).unwrap();
         assert_eq!(slice, slice2);
         println!("{}", buf.len());
         matches!(slice2, Slice::Owned { .. });
@@ -313,15 +303,15 @@ mod tests {
             off: 0,
             len: 1024,
         };
-        let buf = slice.encode();
+        let buf = bincode::serialize(&slice).unwrap();
         let slice2 = Slice::decode(&buf).unwrap();
         assert_eq!(slice, slice2);
         println!("{}", buf.len());
         matches!(slice2, Slice::Borrowed { .. });
 
         let slices = Slices(vec![slice, slice2]);
-        let buf = slices.encode();
-        let slices2 = Slices::decode(&buf).unwrap();
+        let buf = bincode::serialize(&slices).unwrap();
+        let slices2 = bincode::deserialize(&buf).unwrap();
         assert_eq!(slices, slices2);
     }
 }

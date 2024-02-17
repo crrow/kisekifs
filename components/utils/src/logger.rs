@@ -164,16 +164,19 @@ pub fn init_global_logging(
 
     if enable_otlp_tracing {
         global::set_text_map_propagator(TraceContextPropagator::new());
+        let endpoint = opts
+            .otlp_endpoint
+            .as_ref()
+            .map(|e| format!("http://{}", e))
+            .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string());
+        println!("find otlp tracing config: {}", &endpoint);
         // otlp exporter
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_exporter(
-                opentelemetry_otlp::new_exporter().tonic().with_endpoint(
-                    opts.otlp_endpoint
-                        .as_ref()
-                        .map(|e| format!("http://{}", e))
-                        .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string()),
-                ),
+                opentelemetry_otlp::new_exporter()
+                    .tonic()
+                    .with_endpoint(endpoint),
             )
             .with_trace_config(
                 opentelemetry_sdk::trace::config()

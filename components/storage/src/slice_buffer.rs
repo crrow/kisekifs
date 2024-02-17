@@ -7,19 +7,15 @@ use std::{
     },
 };
 
-use kiseki_types::{
-    slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
-    BlockIndex, BlockSize, ObjectStorage, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE,
-};
-use kiseki_utils::readable_size::ReadableSize;
+use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
+use kiseki_types::slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID};
+use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use snafu::ResultExt;
 use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
 use tracing::{debug, instrument, Instrument};
 
 use crate::{
-    error::{
-        InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
-    },
+    err::{InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu},
     pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
 };
 
@@ -177,7 +173,7 @@ pub struct SliceBuffer {
 }
 
 impl SliceBuffer {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             length: 0,
             flushed_length: 0,
@@ -243,15 +239,6 @@ impl SliceBuffer {
                             );
                             page.copy_to_writer(page_offset, current_page_to_read_len, &mut cursor)
                                 .await?;
-
-                            // let page_slice = page.as_slice();
-                            // dst[total_read_len..(total_read_len +
-                            // current_page_to_read_len)]
-                            //     .copy_from_slice(
-                            //         &page_slice
-                            //             [page_offset..(page_offset +
-                            // current_page_to_read_len)],
-                            //     );
                         } else {
                             // it is a hole, we should pad zero to the dst.
                             for i in total_read_len..total_read_len + current_block_to_read_len {
@@ -292,12 +279,12 @@ impl SliceBuffer {
             return InvalidSliceBufferWriteOffsetSnafu.fail()?;
         }
 
-        // debug_assert!(
-        //     offset >= self.flushed_length,
-        //     "offset: {} should be greater than flushed length: {}",
-        //     offset,
-        //     self.flushed_length
-        // );
+        debug_assert!(
+            offset >= self.flushed_length,
+            "offset: {} should be greater than flushed length: {}",
+            offset,
+            self.flushed_length
+        );
 
         let mut total_write_len = 0;
         while total_write_len < expected_write_len {
@@ -333,10 +320,6 @@ impl SliceBuffer {
                 page.copy_from_reader(page_offset, to_write_page_len, &mut reader)
                     .await?;
 
-                // let page_slice = page.as_mut_slice();
-                // page_slice[page_offset..(page_offset + to_write_page_len)]
-                //     .copy_from_slice(&data[total_write_len..(total_write_len +
-                // to_write_page_len)]);
                 total_page_write_len += to_write_page_len;
                 total_write_len += to_write_page_len;
                 block.update_len(max(block.get_len(), block_offset + total_page_write_len));
@@ -344,13 +327,6 @@ impl SliceBuffer {
         }
         self.length = max(self.length, offset + total_write_len);
         Ok(total_write_len)
-    }
-
-    /// should_flush check if we can flush the slice buffer.
-    pub fn should_flush(&self) -> bool {
-        self.length == CHUNK_SIZE
-            || self.length >= BLOCK_SIZE
-            || self.total_page_cnt * PAGE_SIZE > BLOCK_SIZE
     }
 
     fn full_block_cnt(&self) -> usize {
@@ -367,11 +343,11 @@ impl SliceBuffer {
             .count()
     }
 
-    pub fn flushed_len(&self) -> usize {
+    pub fn flushed_length(&self) -> usize {
         self.flushed_length
     }
 
-    pub fn len(&self) -> usize {
+    pub fn length(&self) -> usize {
         self.length
     }
 
@@ -416,7 +392,7 @@ impl SliceBuffer {
     /// flush_to flush the slice buffer to the storage until the offset.
     ///
     /// Ignore all empty block.
-    async fn flush_bulk_to<F: Fn(BlockIndex, BlockSize) -> String>(
+    pub async fn flush_bulk_to<F: Fn(BlockIndex, BlockSize) -> String>(
         &mut self,
         offset: usize,
         key_gen: F,
@@ -444,18 +420,20 @@ impl SliceBuffer {
             .map(|(idx, _)| idx)
             .collect::<Vec<_>>();
 
-        let total_released_page_cnt = Arc::new(AtomicUsize::new(0));
+        let mut total_released_page_cnt = 0usize;
         let handles = pending_block_idxes
             .into_iter()
             .map(|idx| {
                 let data_block = std::mem::take(&mut self.block_slots[idx]);
+                if matches!(data_block, Block::Data { .. }) {
+                    total_released_page_cnt += 1;
+                }
                 (idx, data_block.get_data_block())
             })
             .map(|(idx, data_block)| {
                 self.flushed_length += data_block.length;
                 let key = key_gen(idx, data_block.length);
                 let sto = object_storage.clone();
-                let wait_relase_page_cnt = total_released_page_cnt.clone();
                 let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
                     let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
                     let total_flush_data = data_block.length;
@@ -476,15 +454,6 @@ impl SliceBuffer {
                             Some(page) => {
                                 page.copy_to_writer(page_offset, to_flush_len, &mut writer)
                                     .await?;
-
-                                // let page_slice = page.as_slice();
-                                // writer
-                                //     .write_all(
-                                //         &page_slice[page_offset..(page_offset + to_flush_len)],
-                                //     )
-                                //     .await
-                                //     .context(UnknownIOSnafu)?;
-                                wait_relase_page_cnt.fetch_add(1, Ordering::AcqRel);
                             }
                         }
                         current_flush_data += to_flush_len;
@@ -500,9 +469,8 @@ impl SliceBuffer {
             r.context(JoinErrSnafu)??;
         }
 
-        let released_page = total_released_page_cnt.load(Ordering::Relaxed);
-        self.total_page_cnt -= released_page;
-        Ok(released_page)
+        self.total_page_cnt -= total_released_page_cnt;
+        Ok(total_released_page_cnt)
     }
 }
 
@@ -606,8 +574,7 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt, TryStreamExt};
-    use kiseki_types::new_mem_object_storage;
-    use kiseki_utils::logger::install_fmt_log;
+    use kiseki_utils::{logger::install_fmt_log, object_storage::new_mem_object_storage};
     use tracing::info;
 
     use super::*;
@@ -725,7 +692,7 @@ mod tests {
         assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-                                                                               // we should be able to write the next block
+        // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

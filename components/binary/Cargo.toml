@@ -1,0 +1,33 @@
+[package]
+name = "kiseki-binary"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+snafu.workspace = true
+tracing.workspace = true
+fuser.workspace = true
+tokio.workspace = true
+rustix = {workspace = true, features = ["mount"]}
+
+kiseki-utils = {path = "../../components/utils"}
+kiseki-types = {path = "../../components/types"}
+kiseki-storage = {path = "../../components/storage"}
+kiseki-common = {path = "../../components/common"}
+kiseki-meta = {path = "../../components/meta", features = ["meta-rocksdb"]}
+kiseki-fuse = { path = "../../components/fuse" }
+kiseki-vfs  = { path = "../../components/vfs" }
+
+clap = { version = "4.4.16", features = ["derive"]}
+clap-num = "1.0.2"
+procfs = "0.16.0"
+regex = "1.10.2"
+const_format = "0.2.32"
+ctrlc = "3.4.2"
+
+
+[build-dependencies]
+built = {version = "0.7.1", features= ["git2"]}
+const_format = "0.2.32"

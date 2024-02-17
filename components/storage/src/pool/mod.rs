@@ -7,11 +7,13 @@ use std::{
     thread,
 };
 
-use kiseki_types::{PAGE_BUFFER_SIZE, PAGE_SIZE};
+use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
+use log::info;
+use tracing::debug;
 
-use crate::error::Result;
+use crate::err::Result;
 
 lazy_static! {
     pub static ref GLOBAL_MEMORY_PAGE_POOL: Arc<memory_pool::MemoryPagePool> =
@@ -128,15 +130,21 @@ impl HybridPagePool {
     }
     /// acquire_page will wait and  acquire a page from the page pool.
     pub async fn acquire_page(self: &Arc<Self>) -> Page {
-        if let Some(page) = self.try_acquire_page() {
-            return page;
+        // let disk_pool = self.disk_pool.as_ref().unwrap();
+        // let page = disk_pool.acquire_page().await;
+        // return Page::Disk(page);
+
+        debug!("pool free ratio {:?}", self.free_ratio());
+
+        if self.memory_pool.remain_page_cnt() > 0 {
+            if let Some(page) = self.try_acquire_page() {
+                return page;
+            }
         }
 
         if let Some(disk_pool) = &self.disk_pool {
-            return tokio::select! {
-                page = self.memory_pool.acquire_page() => Page::Memory(page),
-                page = disk_pool.acquire_page() =>  Page::Disk(page),
-            };
+            let page = disk_pool.acquire_page().await;
+            return Page::Disk(page);
         }
         let page = self.memory_pool.acquire_page().await;
         Page::Memory(page)
@@ -156,6 +164,10 @@ impl HybridPagePool {
 
     pub fn capacity(&self) -> usize {
         self.memory_capacity + self.disk_capacity
+    }
+
+    pub fn free_ratio(&self) -> f64 {
+        self.remain() as f64 / self.total_page_cnt as f64
     }
 }
 
@@ -179,7 +191,6 @@ impl Page {
             Page::Disk(page) => page.copy_to_writer(offset, length, writer).await,
         }
     }
-
     pub(crate) async fn copy_from_reader<R>(
         &self,
         offset: usize,
@@ -198,13 +209,14 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{io::Cursor, thread};
+
     use kiseki_utils::logger::install_fmt_log;
-    use std::io::Cursor;
-    use std::thread;
     use tokio::time::Instant;
     use tokio_util::io::StreamReader;
     use tracing::debug;
+
+    use super::*;
 
     #[tokio::test]
     async fn basic() {
