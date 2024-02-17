@@ -96,9 +96,10 @@ impl DataManager {
         Ok(write_len)
     }
 
+    #[instrument(skip(self), fields(ino))]
     pub(crate) async fn flush_if_exists(&self, ino: Ino) -> Result<()> {
         if let Some(fw) = self.file_writers.get(&ino) {
-            fw.flush().await?;
+            fw.flush().in_current_span().await?;
             debug!(
                 "{} file writer exists and flush success, current_len: {}",
                 ino,
@@ -474,7 +475,11 @@ impl FileWriter {
             while remain.load(Ordering::Acquire) > 0 {
                 notify.notified().await;
             }
-            info!("{} manual flush finished", self.inode);
+            info!(
+                "{} manual flush finished, cost: {:?}",
+                self.inode,
+                start.elapsed()
+            );
         }
         // release the manually flush lock.
         debug!(
@@ -506,6 +511,7 @@ struct FileWriterFlusher {
 }
 
 impl FileWriterFlusher {
+    #[instrument(skip(self), fields(self.fw.inode))]
     async fn run(mut self) {
         debug!("{} flush task started", self.fw.inode);
         let cancel_token = self.fw.cancel_token.clone();
@@ -560,7 +566,7 @@ impl FileWriterFlusher {
                                         // has been moved out from the map.
                                         sw.mark_done();
                                         remain.fetch_sub(1, Ordering::AcqRel);
-                                        notify.notify_one();
+                                        notify.notify_waiters();
                                     });
                                 }
 
@@ -655,7 +661,7 @@ impl SliceWriter {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(self._internal_seq))]
+    #[instrument(skip(self), fields(_internal_seq = self._internal_seq))]
     async fn flush(self: &Arc<Self>) -> Result<()> {
         debug!("try to flush slice writer {}", self._internal_seq);
         self.prepare_slice_id().await?;
@@ -674,7 +680,10 @@ impl SliceWriter {
             )
             .in_current_span()
             .await?;
-        debug!("flush slice buffer success {}", self._internal_seq);
+        debug!(
+            "SliceWriter flush slice buffer success slice_id: {}",
+            self.slice_id.load(Ordering::Acquire),
+        );
         Ok(())
     }
 

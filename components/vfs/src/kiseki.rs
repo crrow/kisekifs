@@ -40,7 +40,7 @@ use kiseki_utils::object_storage::ObjectStorage;
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio::time::Instant;
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{debug, error, info, instrument, trace, Instrument};
 
 use crate::err::Error;
 use crate::{
@@ -635,8 +635,8 @@ impl KisekiVFS {
         };
     }
 
+    #[instrument(skip(self), fields(inode = ino, fh))]
     pub async fn flush(&self, ctx: &FuseContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
-        debug!("do flush manually");
         let h = self
             .find_handle(ino, fh)
             .context(LibcSnafu { errno: libc::EBADF })?;
@@ -645,14 +645,15 @@ impl KisekiVFS {
         };
 
         if let Some(fw) = self.data_manager.find_file_writer(ino) {
-            debug!("find file write");
+            debug!("find file write, spawn task to flush it");
             tokio::spawn(async move {
-                fw.flush().await?;
+                fw.flush().in_current_span().await?;
                 Ok::<(), Error>(())
             })
             .await
             .context(JoinErrSnafu)??;
         }
+        debug!("file writer flush finished");
 
         if lock_owner != h.get_ofd_owner().await {
             h.set_ofd_owner(0).await;
@@ -675,6 +676,7 @@ impl KisekiVFS {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(inode = ino, fh))]
     pub async fn fsync(
         &self,
         _ctx: &FuseContext,
