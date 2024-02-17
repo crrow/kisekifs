@@ -5,6 +5,9 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+tokio-console = ["console-subscriber", "tokio/tracing"]
+
 [dependencies]
 snafu.workspace = true
 tokio.workspace = true
@@ -17,6 +20,7 @@ opendal.workspace = true
 
 kiseki-common = {path = "../../components/common"}
 
+console-subscriber = { version = "0.2", optional = true }
 num_cpus = "1.14.0"
 sentry-tracing = "0.32.2"
 dotenvy = "0.15.7"

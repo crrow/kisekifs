@@ -209,6 +209,7 @@ mod tests {
         for _ in 0..pool.total_page_cnt() {
             let pool = pool.clone();
             let handle = tokio::spawn(async move {
+                let page2 = pool.acquire_page().await;
                 let page = pool.acquire_page().await;
                 tokio::time::sleep(Duration::from_millis(1)).await;
                 let mut cursor = Cursor::new(b"hello");

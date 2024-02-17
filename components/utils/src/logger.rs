@@ -30,6 +30,7 @@ use crate::sentry_init::init_sentry;
 
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 pub const DEFAULT_LOG_DIR: &str = "/tmp/kiseki.logs";
+pub const DEFAULT_TOKIO_CONSOLE_ADDR: &str = "127.0.0.1:6669";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,6 +41,7 @@ pub struct LoggingOptions {
     pub otlp_endpoint: Option<String>,
     pub tracing_sample_ratio: Option<f64>,
     pub append_stdout: bool,
+    pub tokio_console_addr: Option<String>,
 }
 
 impl PartialEq for LoggingOptions {
@@ -50,6 +52,7 @@ impl PartialEq for LoggingOptions {
             && self.otlp_endpoint == other.otlp_endpoint
             && self.tracing_sample_ratio == other.tracing_sample_ratio
             && self.append_stdout == other.append_stdout
+            && self.tokio_console_addr == other.tokio_console_addr
     }
 }
 
@@ -64,6 +67,7 @@ impl Default for LoggingOptions {
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
+            tokio_console_addr: Some(DEFAULT_TOKIO_CONSOLE_ADDR.to_string()),
         }
     }
 }
@@ -156,6 +160,34 @@ pub fn init_global_logging(
         ),
     };
 
+    // Must enable 'tokio_unstable' cfg to use this feature.
+    // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
+    #[cfg(feature = "tokio-console")]
+    let subscriber = {
+        let tokio_console_layer = if let Some(tokio_console_addr) = &opts.tokio_console_addr {
+            let addr: std::net::SocketAddr = tokio_console_addr.parse().unwrap_or_else(|e| {
+                panic!("Invalid binding address '{tokio_console_addr}' for tokio-console: {e}");
+            });
+            println!("tokio-console listening on {addr}");
+
+            Some(
+                console_subscriber::ConsoleLayer::builder()
+                    .server_addr(addr)
+                    .spawn(),
+            )
+        } else {
+            None
+        };
+
+        Registry::default()
+            .with(tokio_console_layer)
+            .with(stdout_logging_layer.map(|x| x.with_filter(layer_filter.clone())))
+            .with(file_logging_layer.with_filter(layer_filter))
+            .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR))
+            .with(sentry_layer)
+    };
+
+    #[cfg(not(feature = "tokio-console"))]
     let subscriber = Registry::default()
         .with(stdout_logging_layer.map(|x| x.with_filter(layer_filter.clone())))
         .with(file_logging_layer.with_filter(layer_filter))

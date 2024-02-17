@@ -206,6 +206,7 @@ impl MountArgs {
             otlp_endpoint: self.otlp_endpoint.clone(),
             tracing_sample_ratio: self.tracing_sample_ratio,
             append_stdout: self.append_stdout,
+            tokio_console_addr: Some(kiseki_utils::logger::DEFAULT_TOKIO_CONSOLE_ADDR.to_string()),
         };
         Some(opts)
     }

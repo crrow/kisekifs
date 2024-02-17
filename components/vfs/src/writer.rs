@@ -634,7 +634,6 @@ impl FileWriterFlusher {
                                 });
                             },
                         }
-
                     }
                 }
             }
