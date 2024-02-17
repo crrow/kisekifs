@@ -94,4 +94,14 @@ impl OpenFiles {
             of.chunks.insert(chunk_idx, views);
         }
     }
+
+    /// close a file
+    pub(crate) fn close(&self, ino: Ino) -> bool {
+        if let Some(mut of) = self.files.get_mut(&ino) {
+            let of = of.value_mut();
+            of.reference_count -= 1;
+            return of.reference_count <= 0;
+        }
+        true
+    }
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::Ordering;
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
@@ -50,7 +51,7 @@ use crate::{
         Error, Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result,
         StorageSnafu,
     },
-    handle::{HandleTable, HandleTableRef, HandleV2},
+    handle::{Handle, HandleTable, HandleTableRef},
     reader::FileReadersRef,
     writer::{FileWriter, FileWritersRef},
 };
@@ -578,15 +579,14 @@ impl KisekiVFS {
             .handle_table
             .find_handle(ino, fh)
             .context(LibcSnafu { errno: EBADF })?;
-        let handle = handle
+        let file_handle = handle
             .as_file_handle()
             .context(LibcSnafu { errno: EBADF })?;
         self.handle_table.flush_if_exists(ino).await?;
+
         let mut buf = vec![0u8; size as usize];
-        let _read_len = handle
-            .reader
-            .read(offset as usize, buf.as_mut_slice())
-            .await?;
+        let read_guard = file_handle.read();
+        let _read_len = read_guard.read(offset as usize, buf.as_mut_slice()).await?;
         debug!(
             "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: {:?}",
             ino, fh, offset, size, _read_len
@@ -622,23 +622,27 @@ impl KisekiVFS {
         if ino == CONTROL_INODE {
             todo!()
         }
+
         let handle = _handle
             .as_file_handle()
             .context(LibcSnafu { errno: EBADF })?;
-        let writer = handle
-            .writer
-            .as_ref()
-            .context(LibcSnafu { errno: EBADF })?
-            .clone();
-        let write_len = writer.write(offset, data).await?;
+
+        let write_guard = handle.write().context(LibcSnafu { errno: EBADF })?;
+        let write_len = write_guard.write(offset, data).await?;
         self.data_manager
-            .truncate_reader(ino, writer.get_length() as u64);
+            .truncate_reader(ino, write_guard.get_length() as u64);
 
         Ok(write_len as u32)
     }
 
     #[instrument(skip(self), fields(ino, fh))]
-    pub async fn flush(&self, ctx: &FuseContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
+    pub async fn flush(
+        &self,
+        ctx: Arc<FuseContext>,
+        ino: Ino,
+        fh: u64,
+        lock_owner: u64,
+    ) -> Result<()> {
         let h = self
             .handle_table
             .find_handle(ino, fh)
@@ -648,19 +652,9 @@ impl KisekiVFS {
             return Ok(());
         };
 
-        if let Some(writer) = h.writer.clone() {
-            tokio::spawn(async move {
-                writer.flush().in_current_span().await?;
-                Ok::<(), Error>(())
-            })
-            .await
-            .context(JoinErrSnafu)??;
-            debug!("file writer flush finished");
-        }
-
+        h.try_flush().await?;
         h.try_set_ofd_owner(lock_owner);
-
-        if h.locks & 2 != 0 {
+        if h.locks.load(Ordering::Acquire) & 2 != 0 {
             self.meta
                 .set_lk(
                     ctx,
@@ -718,11 +712,47 @@ impl KisekiVFS {
             .handle_table
             .find_handle(inode, fh)
             .context(LibcSnafu { errno: EBADF })?;
-        // if self.data_manager.find_file_writer(inode, fh).is_none() {
-        //     return LibcSnafu { errno: EBADF }.fail()?;
-        // }
+        let _ = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
+        self.meta.fallocate(inode, offset, length, mode).await?;
 
         todo!()
+    }
+
+    pub async fn release(&self, ctx: Arc<FuseContext>, inode: Ino, fh: FH) -> Result<()> {
+        if inode.is_special() {
+            todo!()
+        }
+        if let Some(handle) = self.handle_table.find_handle(inode, fh) {
+            handle.wait_all_operations_done().await;
+            if let Some(fh) = handle.as_file_handle() {
+                let (locks, fowner, powner) = fh.get_locks();
+                fh.try_flush().await?;
+                if locks & 1 != 0 {
+                    self.meta
+                        .flock(ctx.clone(), inode, fowner, libc::F_UNLCK)
+                        .await?;
+                }
+                if locks & 2 != 0 && powner != 0 {
+                    self.meta
+                        .set_lk(
+                            ctx,
+                            inode,
+                            powner,
+                            false,
+                            libc::F_UNLCK,
+                            0,
+                            0x7FFFFFFFFFFFFFFF,
+                        )
+                        .await?;
+                }
+            }
+        }
+        self.meta.close(inode).await?;
+        let ht = self.handle_table.clone();
+        tokio::spawn(async move {
+            ht.release_file_handle(inode, fh).await;
+        });
+        Ok(())
     }
 }
 

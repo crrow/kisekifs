@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::{
     cmp::min,
     sync::{atomic::AtomicBool, Arc, Weak},
@@ -60,15 +61,6 @@ impl DataManager {
             "DO NOTHING: truncate reader: {:?}, length: {}",
             inode, length
         );
-        // if let Some(frs) = self.file_readers.get(&inode) {
-        //     for fr in frs.iter() {
-        //         if length < fr.length {
-        //             for slices in fr.chunks.iter() {
-        //
-        //             }
-        //         }
-        //     }
-        // }
     }
 }
 
@@ -201,6 +193,23 @@ impl FileReader {
         }
 
         Ok(total_read_len)
+    }
+
+    pub(crate) fn close(self: &Arc<Self>) {
+        if self
+            .closing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            debug!("someone else win the close contention: {:?}", self.ino);
+            return;
+        }
+
+        let engine = self
+            .data_engine
+            .upgrade()
+            .expect("engine should not be dropped");
+        engine.file_readers.remove(&(self.ino, self.fh));
     }
 }
 

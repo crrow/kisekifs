@@ -529,10 +529,10 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
     fn flush(&mut self, req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
-        let ctx = FuseContext::from(req);
+        let ctx = Arc::new(FuseContext::from(req));
         match self.runtime.block_on(
             self.vfs
-                .flush(&ctx, Ino(ino), fh, lock_owner)
+                .flush(ctx, Ino(ino), fh, lock_owner)
                 .in_current_span(),
         ) {
             Ok(()) => reply.ok(),
@@ -565,5 +565,26 @@ impl Filesystem for KisekiFuse {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         }
+    }
+
+    #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, fh=fh, name=field::Empty))]
+    fn release(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        _flags: i32,
+        _ock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        let ctx = Arc::new(FuseContext::from(req));
+        match self
+            .runtime
+            .block_on(self.vfs.release(ctx, Ino(ino), fh).in_current_span())
+        {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        };
     }
 }

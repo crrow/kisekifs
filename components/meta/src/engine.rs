@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use std::{
     cmp::{max, min},
     fmt::{Display, Formatter},
@@ -11,7 +12,7 @@ use std::{
 };
 
 use crossbeam::{atomic::AtomicCell, channel::at};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
 use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::{
@@ -43,13 +44,14 @@ pub type MetaEngineRef = Arc<MetaEngine>;
 pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
     let backend = open_backend(&config.dsn)?;
     let format = backend.load_format()?;
+    let open_files = OpenFiles::new(config.open_cache, config.open_cache_limit);
 
     let me = MetaEngine {
-        open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
         config,
         format,
         root: ROOT_INO,
-        sub_trash: None,
+        open_files,
+        removed_files: Default::default(),
         dir_parents: Default::default(),
         fs_stat: Default::default(),
         dir_stats: Default::default(),
@@ -119,8 +121,10 @@ pub struct MetaEngine {
     config: MetaConfig,
     format: Format,
     root: Ino,
-    sub_trash: Option<InternalNode>,
+
     open_files: OpenFiles,
+    removed_files: DashSet<Ino>,
+
     dir_parents: DashMap<Ino, Ino>,
     fs_stat: AtomicCell<FSStat>,
     dir_stats: DashMap<Ino, DirStat>,
@@ -934,7 +938,7 @@ impl MetaEngine {
     #[allow(clippy::too_many_arguments)]
     pub async fn set_lk(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         inode: Ino,
         owner: u64,
         block: bool,
@@ -988,5 +992,80 @@ impl MetaEngine {
             .update_chunk_slices_info(inode, chunk_index, slices.clone());
 
         Ok(Some(slices))
+    }
+
+    // Fallocate preallocate given space for given file.
+    pub async fn fallocate(
+        &self,
+        inode: Ino,
+        offset: usize,
+        length: usize,
+        mode: u8,
+    ) -> Result<()> {
+        let mode = FallocateMode::from_bits(mode).expect("invalid fallocate mode");
+        if mode.contains(FallocateMode::COLLAPSE_RANGE) && mode != FallocateMode::COLLAPSE_RANGE {
+            LibcSnafu {
+                errno: libc::EINVAL,
+            }
+            .fail()?;
+        }
+        if mode.contains(FallocateMode::INSERT_RANGE) && mode != FallocateMode::INSERT_RANGE {
+            LibcSnafu {
+                errno: libc::EINVAL,
+            }
+            .fail()?;
+        }
+        if mode == FallocateMode::INSERT_RANGE || mode == FallocateMode::COLLAPSE_RANGE {
+            LibcSnafu {
+                errno: libc::ENOTSUP,
+            }
+            .fail()?;
+        }
+        if mode.contains(FallocateMode::PUNCH_HOLE) && mode.contains(FallocateMode::KEEP_SIZE) {
+            LibcSnafu {
+                errno: libc::EINVAL,
+            }
+            .fail()?;
+        }
+
+        todo!()
+    }
+
+    pub async fn flock(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        owner: u64,
+        ltype: libc::c_int,
+    ) -> Result<()> {
+        debug!(
+            "TO IMPLEMENT: flock with inode {:?}, owner {:?}, ltype {:?}",
+            inode, owner, ltype
+        );
+        Ok(())
+    }
+
+    // Close a file.
+    pub async fn close(&self, inode: Ino) -> Result<()> {
+        if self.open_files.close(inode) {
+            if self.removed_files.remove(&inode).is_some() {
+                // TODO: doDeleteSustainedInode
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallocateMode(pub u8);
+
+bitflags! {
+    impl FallocateMode: u8 {
+        const KEEP_SIZE = 0x01;
+        const PUNCH_HOLE = 0x02;
+        const NO_HIDE_STALE = 0x04;
+        const COLLAPSE_RANGE = 0x08;
+        const ZERO_RANGE = 0x10;
+        const INSERT_RANGE = 0x20;
     }
 }

@@ -49,7 +49,8 @@ impl DataManager {
     /// Creates a new [FileWriter] for the file.
     /// All file handle share the single one [FileWriter].
     pub(crate) fn open_file_writer(self: &Arc<Self>, ino: Ino, len: u64) -> Arc<FileWriter> {
-        self.file_writers
+        let fw = self
+            .file_writers
             .entry(ino)
             .or_insert_with(|| {
                 let (tx, mut rx) = mpsc::channel(10);
@@ -61,8 +62,9 @@ impl DataManager {
                     manually_flush: Arc::new(Default::default()),
                     cancel_token: CancellationToken::new(),
                     seq_generate: self.id_generator.clone(),
+                    ref_count: Arc::new(Default::default()),
                     pattern: Default::default(),
-                    early_flush_threshold: 0.0,
+                    early_flush_threshold: 0.3,
                     data_manager: Arc::downgrade(self),
                 };
 
@@ -74,7 +76,9 @@ impl DataManager {
                 });
                 fw
             })
-            .clone()
+            .clone();
+        fw.ref_count.fetch_add(1, Ordering::AcqRel);
+        fw
     }
 
     /// Use the [FileWriter] to write data to the file.
@@ -179,11 +183,15 @@ pub struct FileWriter {
     manually_flush: Arc<AtomicBool>,
     cancel_token: CancellationToken,
     seq_generate: Arc<sonyflake::Sonyflake>,
+    // tracking how many operations is using the file writer.
+    // 1. when we open, we increase the counter.
+    // 2. when we close the file, decrease the counter.
+    ref_count: Arc<AtomicUsize>,
 
     // random write early flush
     // when we reach the threshold, we should flush some flush to the remote storage.
     pattern: WriterPattern,
-    // TODO: implement me
+    // when should we flush the buffer in advance, according to current buffer pool free ratio.
     early_flush_threshold: f64,
 
     // dependencies
@@ -325,7 +333,9 @@ impl FileWriter {
                         }
                     }
                     // flush some for random write
-                    if idx >= 3 && kiseki_storage::get_pool_free_ratio() > 0.7 {
+                    if idx >= 3
+                        && kiseki_storage::get_pool_free_ratio() < self.early_flush_threshold
+                    {
                         debug!("chunk_index: {} flush some for random write", l.chunk_idx);
                         if let Some(req) = sw.make_full_flush_in_advance() {
                             if let Err(e) = self.slice_flush_queue.send(req).await {
@@ -496,6 +506,20 @@ impl FileWriter {
         self.manually_flush.store(false, Ordering::Release);
         Ok(())
     }
+
+    /// Close won't really close the file writer, it tries to decrease the ref count first.
+    #[instrument(skip(self), fields(self.inode))]
+    pub(crate) async fn close(self: &Arc<Self>) {
+        if let Err(e) = self.flush().await {
+            error!("failed to flush in close {e}");
+        }
+        if self.ref_count.fetch_sub(1, Ordering::AcqRel) <= 1 {
+            // we are the last one, we can close the file writer.
+            self.cancel_token.cancel();
+            let dm = self.data_manager.upgrade().unwrap();
+            dm.file_writers.remove(&self.inode);
+        };
+    }
 }
 
 enum FlushReq {
@@ -522,11 +546,12 @@ impl FileWriterFlusher {
     async fn run(mut self) {
         debug!("{} flush task started", self.fw.inode);
         let cancel_token = self.fw.cancel_token.clone();
+        let cloned_cancel_token = cancel_token.clone();
         let ino = self.fw.inode.clone();
 
         loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => {
+                _ = cloned_cancel_token.cancelled() => {
                     debug!("{ino} flush task is cancelled");
                     return;
                 }
@@ -536,20 +561,42 @@ impl FileWriterFlusher {
                             FlushReq::FlushBulk {sw, offset} => {
                                 debug!("{ino} flush bulk to {offset}");
                                 let fw = self.fw.clone();
+                                let cancel_token = cancel_token.clone();
                                 tokio::spawn(async move {
-                                    let r = sw.flush_bulk(offset).await;
-                                    if let Err(e) = r {
-                                        error!("{ino} failed to flush bulk {e}");
+                                    tokio::select! {
+                                        r = sw.flush_bulk(offset) => {
+                                            if let Err(e) = r {
+                                                error!("{ino} failed to flush bulk {e}");
+                                            }
+                                            // clean the map
+                                            fw.remove_done_slice_writer();
+                                        }
+                                        _ = cancel_token.cancelled() => {
+                                            return;
+                                        }
                                     }
-                                    // clean the map
-                                    fw.remove_done_slice_writer();
                                 });
                             },
                             FlushReq::FlushFull(sw) => {
                                 let (fl, wl ) = sw.get_flushed_length_and_total_write_length().await;
                                 debug!("{ino} flush full flushed_length {fl}, length: {wl}");
                                 let fw = self.fw.clone();
+                                let cancel_token = cancel_token.clone();
                                 tokio::spawn(async move {
+                                    tokio::select! {
+                                        r = sw.flush() => {
+                                            if let Err(e) = r {
+                                                error!("{ino} failed to flush full {e}");
+                                            }
+                                            sw.mark_done();
+                                            // clean the map
+                                            fw.remove_done_slice_writer();
+                                        }
+                                        _ = cancel_token.cancelled() => {
+                                            debug!("{ino} flush full is cancelled");
+                                            return;
+                                        }
+                                    }
                                     let r = sw.flush().in_current_span().await;
                                     if let Err(e) = r {
                                         error!("{ino} failed to flush full {e}");

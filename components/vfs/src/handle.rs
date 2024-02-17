@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize};
 use std::{
     fmt::Debug,
     sync::{
@@ -24,6 +26,7 @@ use dashmap::DashMap;
 use kiseki_common::FH;
 use kiseki_types::{entry::Entry, ino::Ino};
 use kiseki_utils::readable_size::ReadableSize;
+use libc::clone;
 use snafu::ResultExt;
 use tokio::{
     sync::{Notify, RwLock},
@@ -41,7 +44,7 @@ use crate::{
 pub(crate) type HandleTableRef = Arc<HandleTable>;
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
-    handles: DashMap<Ino, DashMap<FH, Arc<HandleV2>>>,
+    handles: DashMap<Ino, DashMap<FH, Handle>>,
     _next_fh: AtomicU64,
 }
 
@@ -62,7 +65,7 @@ impl HandleTable {
         let e = self.handles.entry(inode).or_insert(DashMap::new());
         e.insert(
             fh,
-            Arc::new(HandleV2::Dir(DirHandle {
+            Handle::Dir(Arc::new(DirHandle {
                 fh,
                 inode,
                 inner: RwLock::new(DirHandleInner {
@@ -78,39 +81,31 @@ impl HandleTable {
     pub(crate) fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<FH> {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => FileHandle {
-                fh,
+            libc::O_RDONLY => FileHandle::new(
                 inode,
-                reader: self
-                    .data_manager
-                    .new_file_reader(inode, fh, length as usize),
-                writer: None,
-                locks: 0,
-                flock_owner: 0,
-                ofd_owner: Default::default(),
-            },
-            libc::O_WRONLY | libc::O_RDWR => FileHandle {
                 fh,
-                inode,
-                reader: self
-                    .data_manager
+                self.data_manager
                     .new_file_reader(inode, fh, length as usize),
-                writer: Some(self.data_manager.open_file_writer(inode, length)),
-                locks: 0,
-                flock_owner: 0,
-                ofd_owner: Default::default(),
-            },
+                None,
+            ),
+            libc::O_WRONLY | libc::O_RDWR => FileHandle::new(
+                inode,
+                fh,
+                self.data_manager
+                    .new_file_reader(inode, fh, length as usize),
+                Some(self.data_manager.open_file_writer(inode, length)),
+            ),
             _ => LibcSnafu { errno: libc::EPERM }.fail()?,
         };
         self.handles
             .entry(inode)
             .or_default()
-            .insert(fh, Arc::new(HandleV2::File(h)));
+            .insert(fh, Handle::File(Arc::new(h)));
 
         Ok(fh)
     }
 
-    pub(crate) fn find_handle(&self, ino: Ino, fh: u64) -> Option<Arc<HandleV2>> {
+    pub(crate) fn find_handle(&self, ino: Ino, fh: u64) -> Option<Handle> {
         self.handles.get(&ino)?.get(&fh).map(|h| h.value().clone())
     }
 
@@ -140,38 +135,58 @@ impl HandleTable {
         }
         Ok(())
     }
+
+    // after writes it waits for data sync, so do it after everything
+    pub(crate) async fn release_file_handle(&self, inode: Ino, fh: FH) {
+        if let Some(h) = self.handles.get(&inode) {
+            if let Some((_, h)) = h.remove(&fh) {
+                if let Some(fh) = h.as_file_handle() {
+                    fh.wait_operation_done().await;
+                    fh.close().await;
+                }
+            }
+        }
+    }
 }
 
-pub(crate) enum HandleV2 {
-    File(FileHandle),
-    Dir(DirHandle),
+#[derive(Clone)]
+pub(crate) enum Handle {
+    File(Arc<FileHandle>),
+    Dir(Arc<DirHandle>),
 }
 
-impl HandleV2 {
+impl Handle {
     pub(crate) fn get_fh(&self) -> FH {
         match self {
-            HandleV2::File(h) => h.fh,
-            HandleV2::Dir(h) => h.fh,
+            Handle::File(h) => h.fh,
+            Handle::Dir(h) => h.fh,
         }
     }
     pub(crate) fn get_inode(&self) -> Ino {
         match self {
-            HandleV2::File(h) => h.inode,
-            HandleV2::Dir(h) => h.inode,
+            Handle::File(h) => h.inode,
+            Handle::Dir(h) => h.inode,
         }
     }
 
-    pub(crate) fn as_file_handle(&self) -> Option<&FileHandle> {
+    pub(crate) fn as_file_handle(&self) -> Option<Arc<FileHandle>> {
         match self {
-            HandleV2::File(h) => Some(h),
+            Handle::File(h) => Some(h.clone()),
             _ => None,
         }
     }
 
-    pub(crate) fn as_dir_handle(&self) -> Option<&DirHandle> {
+    pub(crate) fn as_dir_handle(&self) -> Option<Arc<DirHandle>> {
         match self {
-            HandleV2::Dir(h) => Some(h),
+            Handle::Dir(h) => Some(h.clone()),
             _ => None,
+        }
+    }
+
+    pub(crate) async fn wait_all_operations_done(&self) {
+        match self {
+            Handle::File(h) => h.wait_operation_done().await,
+            Handle::Dir(_) => {}
         }
     }
 }
@@ -179,18 +194,172 @@ impl HandleV2 {
 pub(crate) struct FileHandle {
     fh: FH,     // cannot be changed
     inode: Ino, // cannot be changed
-    pub(crate) reader: Arc<FileReader>,
-    pub(crate) writer: Option<Arc<FileWriter>>,
-    pub(crate) locks: u8,
-    flock_owner: u64, // kernel 3.1- does not pass lock_owner in release()
-    pub(crate) ofd_owner: AtomicU64,
+
+    reader: Arc<FileReader>,
+    reader_cnt: Arc<AtomicUsize>,
+    reader_notify: Arc<Notify>,
+
+    writer: Option<Arc<FileWriter>>,
+    writer_cnt: Arc<AtomicUsize>,
+    writer_notify: Arc<Notify>,
+
+    in_flushing: Arc<AtomicBool>,
+    flush_notify: Arc<Notify>,
+
+    /* lock */
+    pub(crate) locks: AtomicU8,
+    flock_owner: AtomicU64, // kernel 3.1- does not pass lock_owner in release()
+    ofd_owner: AtomicU64,
+
+    closed: AtomicBool,
 }
 
 impl FileHandle {
+    pub(crate) fn new(
+        inode: Ino,
+        fh: FH,
+        fr: Arc<FileReader>,
+        fw: Option<Arc<FileWriter>>,
+    ) -> Self {
+        FileHandle {
+            fh,
+            inode,
+            reader: fr,
+            reader_cnt: Arc::new(AtomicUsize::new(0)),
+            reader_notify: Arc::new(Default::default()),
+            writer: fw,
+            writer_cnt: Arc::new(AtomicUsize::new(0)),
+            writer_notify: Arc::new(Default::default()),
+            in_flushing: Default::default(),
+            flush_notify: Arc::new(Default::default()),
+            locks: Default::default(),
+            flock_owner: Default::default(),
+            ofd_owner: Default::default(),
+            closed: Default::default(),
+        }
+    }
     pub(crate) fn try_set_ofd_owner(&self, lock_owner: u64) {
         let _ = self
             .ofd_owner
             .compare_exchange(lock_owner, 0, Ordering::AcqRel, Ordering::Relaxed);
+    }
+
+    pub(crate) fn read(&self) -> FileHandleReadGuard {
+        self.reader_cnt.fetch_add(1, Ordering::AcqRel);
+        FileHandleReadGuard {
+            reader: self.reader.clone(),
+            reader_cnt: self.reader_cnt.clone(),
+            reader_notify: self.reader_notify.clone(),
+        }
+    }
+
+    pub(crate) fn write(&self) -> Option<FileHandleWriteGuard> {
+        if self.writer.is_none() {
+            return None;
+        }
+        self.writer_cnt.fetch_add(1, Ordering::AcqRel);
+        Some(FileHandleWriteGuard {
+            file_writer: self.writer.as_ref().unwrap().clone(),
+            writer_cnt: self.writer_cnt.clone(),
+            writer_notify: self.writer_notify.clone(),
+        })
+    }
+
+    pub(crate) async fn try_flush(&self) -> Result<()> {
+        if let Some(fw) = self.writer.as_ref() {
+            while self
+                .in_flushing
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+            {
+                // wait for flush to complete
+                self.flush_notify.notified().await;
+            }
+
+            let in_flushing = self.in_flushing.clone();
+            let flush_notify = self.flush_notify.clone();
+            let fw = fw.clone();
+            tokio::spawn(async move {
+                fw.flush().in_current_span().await?;
+                in_flushing.store(false, Ordering::Release);
+                flush_notify.notify_waiters();
+                Ok::<(), Error>(())
+            })
+            .await
+            .context(JoinErrSnafu)??;
+        }
+
+        Ok(())
+    }
+    async fn wait_operation_done(&self) {
+        while self.reader_cnt.load(Ordering::Acquire) > 0
+            || self.writer_cnt.load(Ordering::Acquire) > 0
+        {
+            tokio::select! {
+                _ = self.reader_notify.notified() => {}
+                _ = self.writer_notify.notified() => {}
+            };
+        }
+        while self.in_flushing.load(Ordering::Acquire) {
+            self.flush_notify.notified().await;
+        }
+    }
+
+    pub(crate) fn get_locks(&self) -> (u8, u64, u64) {
+        (
+            self.locks.load(Ordering::Acquire),
+            self.flock_owner.load(Ordering::Acquire),
+            self.ofd_owner.load(Ordering::Acquire),
+        )
+    }
+
+    pub(crate) async fn close(&self) {
+        self.reader.close();
+        if let Some(writer) = &self.writer {
+            writer.close().await;
+        }
+    }
+}
+
+pub(crate) struct FileHandleWriteGuard {
+    file_writer: Arc<FileWriter>,
+    writer_cnt: Arc<AtomicUsize>,
+    writer_notify: Arc<Notify>,
+}
+
+impl FileHandleWriteGuard {
+    pub(crate) async fn write(&self, offset: usize, src: &[u8]) -> Result<usize> {
+        self.file_writer.write(offset, src).in_current_span().await
+    }
+
+    pub(crate) fn get_length(&self) -> usize {
+        self.file_writer.get_length()
+    }
+}
+
+impl Drop for FileHandleWriteGuard {
+    fn drop(&mut self) {
+        self.writer_cnt.fetch_sub(1, Ordering::AcqRel);
+        self.writer_notify.notify_waiters();
+    }
+}
+
+pub(crate) struct FileHandleReadGuard {
+    reader: Arc<FileReader>,
+    reader_cnt: Arc<AtomicUsize>,
+    reader_notify: Arc<Notify>,
+}
+
+impl FileHandleReadGuard {
+    pub(crate) async fn read(&self, offset: usize, dst: &mut [u8]) -> Result<usize> {
+        self.reader.read(offset, dst).await
+    }
+}
+
+impl Drop for FileHandleReadGuard {
+    fn drop(&mut self) {
+        self.reader_cnt.fetch_sub(1, Ordering::AcqRel);
+        self.reader_notify.notify_waiters()
     }
 }
 
@@ -205,71 +374,3 @@ pub(crate) struct DirHandleInner {
     pub(crate) read_at: Option<Instant>,
     pub(crate) ofd_owner: u64, // OFD lock
 }
-
-// pub(crate) struct Handle {
-//     fh: FH,                                // cannot be changed
-//     inode: Ino,                            // cannot be changed
-//     pub(crate) inner: RwLock<HandleInner>, // status lock
-//     pub(crate) reader: Arc<FileReader>,
-//     pub(crate) writer: Arc<FileWriter>,
-//
-//     pub(crate) locks: u8,
-//     flock_owner: u64, // kernel 3.1- does not pass lock_owner in release()
-// }
-//
-// impl Handle {
-//     pub(crate) fn new(fh: u64, inode: Ino) -> Self {
-//         let inner = HandleInner::new();
-//         let notify = Arc::new(Notify::new());
-//
-//         Self {
-//             fh,
-//             inode,
-//             inner: RwLock::new(inner),
-//             locks: 0,
-//             flock_owner: 0,
-//         }
-//     }
-//     pub(crate) fn new_with<F: FnMut(&mut Handle)>(fh: u64, inode: Ino, mut f:
-// F) -> Self {         let mut h = Self {
-//             fh,
-//             inode,
-//             inner: RwLock::new(HandleInner::new()),
-//             locks: 0,
-//             flock_owner: 0,
-//         };
-//         f(&mut h);
-//         h
-//     }
-//     pub(crate) fn fh(&self) -> u64 {
-//         self.fh
-//     }
-//
-//     pub(crate) fn inode(&self) -> Ino {
-//         self.inode
-//     }
-//
-//     pub(crate) async fn get_ofd_owner(&self) -> u64 {
-//         self.inner.read().await.ofd_owner
-//     }
-//
-//     pub(crate) async fn set_ofd_owner(&self, value: u64) {
-//         self.inner.write().await.ofd_owner = value;
-//     }
-// }
-//
-// pub(crate) struct HandleInner {
-//     pub(crate) children: Vec<Entry>,
-//     pub(crate) read_at: Option<Instant>,
-//     pub(crate) ofd_owner: u64, // OFD lock
-// }
-//
-// impl HandleInner {
-//     pub(crate) fn new() -> Self {
-//         Self {
-//             children: Vec::new(),
-//             read_at: None,
-//             ofd_owner: 0,
-//         }
-//     }
-// }
