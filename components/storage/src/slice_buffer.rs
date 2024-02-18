@@ -349,6 +349,7 @@ impl SliceBuffer {
             offset
         );
 
+        let mut dummy_flushed_length = self.flushed_length;
         let pending_block_idxes = self
             .block_slots
             .iter()
@@ -357,8 +358,10 @@ impl SliceBuffer {
                 Block::Empty => false,
                 Block::Data(..) => {
                     let block_idx = *idx;
+                    let start = block_idx * BLOCK_SIZE;
                     let end = (block_idx + 1) * BLOCK_SIZE;
-                    end <= offset
+                    dummy_flushed_length = end;
+                    start >= dummy_flushed_length && end <= offset
                 }
             })
             .map(|(idx, _)| idx)

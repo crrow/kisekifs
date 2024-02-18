@@ -37,11 +37,13 @@ use kiseki_types::{
     ToErrno,
 };
 use kiseki_utils::object_storage::ObjectStorage;
-use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
+use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
+use scopeguard::defer;
 use snafu::{ensure, location, Location, OptionExt, ResultExt};
 use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
 
+use crate::handle::FileHandleWriteGuard;
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
@@ -547,7 +549,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn read(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         fh: u64,
         offset: i64,
@@ -580,11 +582,17 @@ impl KisekiVFS {
         let file_handle = handle
             .as_file_handle()
             .context(LibcSnafu { errno: EBADF })?;
-        self.handle_table.flush_if_exists(ino).await?;
 
         let mut buf = vec![0u8; size as usize];
-        let read_guard = file_handle.read();
+        let read_guard = file_handle
+            .read_lock(ctx.clone())
+            .await
+            .context(LibcSnafu { errno: EINTR })?; // failed to lock
+
+        self.data_manager.direct_flush(ino).await?;
+
         let _read_len = read_guard.read(offset as usize, buf.as_mut_slice()).await?;
+        file_handle.remove_operation(&ctx).await;
         debug!(
             "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: {:?}",
             ino, fh, offset, size, _read_len
@@ -595,7 +603,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn write(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         fh: u64,
         offset: i64,
@@ -625,8 +633,13 @@ impl KisekiVFS {
             .as_file_handle()
             .context(LibcSnafu { errno: EBADF })?;
 
-        let write_guard = handle.write().context(LibcSnafu { errno: EBADF })?;
+        let write_guard = handle
+            .write_lock(ctx.clone())
+            .await
+            .context(LibcSnafu { errno: EINTR })?;
         let write_len = write_guard.write(offset, data).await?;
+        handle.remove_operation(&ctx).await;
+
         self.data_manager
             .truncate_reader(ino, write_guard.get_length() as u64);
 
@@ -644,13 +657,36 @@ impl KisekiVFS {
         let h = self
             .handle_table
             .find_handle(ino, fh)
-            .context(LibcSnafu { errno: EBADF })?;
+            .context(LibcSnafu { errno: ENOENT })?;
         let h = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
         if ino.is_special() {
             return Ok(());
         };
 
-        h.try_flush().await?;
+        if h.has_writer() {
+            let guard = loop {
+                match h.write_lock(ctx.clone()).await {
+                    Some(guard) => break Some(guard),
+                    None => {
+                        if !ctx.is_cancelled() {
+                            // as long as it's not cancelled, we should continue to wait
+                            h.cancel_operations(&ctx.pid).await;
+                            continue; // go back to acquire lock again.
+                        } else {
+                            // we get cancelled while waiting for the lock
+                            break None;
+                        }
+                    }
+                }
+            };
+            let guard = guard.context(LibcSnafu { errno: EINTR })?;
+            guard.flush().await?;
+            h.remove_operation(&ctx).await;
+        } else {
+            // still need to cancel
+            h.cancel_operations(&ctx.pid).await;
+        }
+
         h.try_set_ofd_owner(lock_owner);
         if h.locks.load(Ordering::Acquire) & 2 != 0 {
             self.meta
@@ -672,7 +708,7 @@ impl KisekiVFS {
     #[instrument(skip(self), fields(ino, fh))]
     pub async fn fsync(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         fh: u64,
         _data_sync: bool,
@@ -681,13 +717,19 @@ impl KisekiVFS {
             return Ok(());
         }
 
-        self.handle_table
+        let handle = self
+            .handle_table
             .find_handle(ino, fh)
             .context(LibcSnafu { errno: EBADF })?;
-        if let Some(fw) = self.data_manager.find_file_writer(ino) {
-            fw.flush().await?;
-        }
+        if let Some(fh) = handle.as_file_handle() {
+            let write_guard = fh
+                .write_lock(ctx.clone())
+                .await
+                .context(LibcSnafu { errno: EINTR })?;
 
+            write_guard.flush().await?;
+            fh.remove_operation(&ctx).await;
+        }
         Ok(())
     }
 
@@ -726,10 +768,13 @@ impl KisekiVFS {
             todo!()
         }
         if let Some(handle) = self.handle_table.find_handle(inode, fh) {
-            handle.wait_all_operations_done().await;
+            handle.wait_all_operations_done(ctx.clone()).await?;
             if let Some(fh) = handle.as_file_handle() {
-                let (locks, fowner, powner) = fh.get_locks();
-                fh.try_flush().await?;
+                if fh.has_writer() {
+                    fh.unsafe_flush().await?;
+                    self.invalidate_length(inode);
+                }
+                let (locks, fowner, powner) = fh.get_posix_lock_info();
                 if locks & 1 != 0 {
                     self.meta
                         .flock(ctx.clone(), inode, fowner, libc::F_UNLCK)
@@ -755,6 +800,12 @@ impl KisekiVFS {
         Ok(tokio::spawn(async move {
             ht.release_file_handle(inode, fh).await;
         }))
+    }
+
+    fn invalidate_length(&self, ino: Ino) {
+        self.modified_at
+            .get_mut(&ino)
+            .map(|mut v| *v = std::time::Instant::now());
     }
 }
 
@@ -813,22 +864,55 @@ mod tests {
             .unwrap();
 
         let write_len = vfs
-            .write(&ctx, entry.inode, fh, 0, b"hello", 0, 0, None)
+            .write(ctx.clone(), entry.inode, fh, 0, b"hello", 0, 0, None)
             .await
             .unwrap();
         assert_eq!(write_len, 5);
 
-        vfs.fsync(&ctx, entry.inode, fh, true).await.unwrap();
+        vfs.fsync(ctx.clone(), entry.inode, fh, true).await.unwrap();
 
         let write_len = vfs
-            .write(&ctx, entry.inode, fh, 100 << 20, b"world", 0, 0, None)
+            .write(
+                ctx.clone(),
+                entry.inode,
+                fh,
+                100 << 20,
+                b"world",
+                0,
+                0,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(write_len, 5);
 
-        vfs.fsync(&ctx, entry.inode, fh, true).await.unwrap();
+        vfs.fsync(ctx.clone(), entry.inode, fh, true).await.unwrap();
         let fw = vfs.data_manager.find_file_writer(entry.inode).unwrap();
         assert_eq!(fw.get_reference_count(), 1);
+
+        {
+            // small write
+            let buf = vec![1u8; 5 << 10];
+            for i in 32..0 {
+                let write_len = vfs
+                    .write(
+                        ctx.clone(),
+                        entry.inode,
+                        fh,
+                        i * (4 << 10),
+                        &buf,
+                        0,
+                        0,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(write_len, buf.len() as u32);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
         let release_waiter = vfs.release(ctx, entry.inode, fh).await.unwrap();
         // wait for the release to finish
         release_waiter.await.unwrap();
@@ -841,15 +925,15 @@ mod tests {
         // sequential_write(&vfs, entry.inode, fh).await;
     }
 
-    async fn sequential_write(vfs: &Arc<KisekiVFS>, inode: Ino, fh: FH) {
-        let meta_ctx = FuseContext::background();
-        let data = vec![0u8; 128 << 10];
-        for _i in 0..=1000 {
-            let write_len = vfs
-                .write(&meta_ctx, inode, fh, 128 << 10, &data, 0, 0, None)
-                .await
-                .unwrap();
-            assert_eq!(write_len, 128 << 10);
-        }
-    }
+    // async fn sequential_write(vfs: &Arc<KisekiVFS>, inode: Ino, fh: FH) {
+    //     let meta_ctx = FuseContext::background();
+    //     let data = vec![0u8; 128 << 10];
+    //     for _i in 0..=1000 {
+    //         let write_len = vfs
+    //             .write(&meta_ctx, inode, fh, 128 << 10, &data, 0, 0, None)
+    //             .await
+    //             .unwrap();
+    //         assert_eq!(write_len, 128 << 10);
+    //     }
+    // }
 }

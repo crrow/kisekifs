@@ -464,11 +464,11 @@ impl Filesystem for KisekiFuse {
         lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         let mut bytes_read = 0;
         match self.runtime.block_on(
             self.vfs
-                .read(&ctx, Ino(ino), fh, offset, size, flags, lock_owner)
+                .read(ctx, Ino(ino), fh, offset, size, flags, lock_owner)
                 .in_current_span(),
         ) {
             Ok(data) => {
@@ -505,11 +505,11 @@ impl Filesystem for KisekiFuse {
         lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         match self.runtime.block_on(
             self.vfs
                 .write(
-                    &ctx,
+                    ctx,
                     Ino(ino),
                     fh,
                     offset,
@@ -542,7 +542,15 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync, name=field::Empty))]
     fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, _reply: ReplyEmpty) {
-        todo!()
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .fsync(ctx, Ino(ino), fh, datasync)
+                .in_current_span(),
+        ) {
+            Ok(()) => _reply.ok(),
+            Err(e) => _reply.error(e.to_errno()),
+        }
     }
 
     #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, name=field::Empty))]

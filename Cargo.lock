@@ -1740,6 +1740,7 @@ dependencies = [
  "tempfile",
  "tikv-client",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
