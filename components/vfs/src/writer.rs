@@ -51,7 +51,7 @@ impl DataManager {
             .file_writers
             .entry(ino)
             .or_insert_with(|| {
-                let (tx, mut rx) = mpsc::channel(10);
+                let (tx, mut rx) = mpsc::channel(100);
                 let fw = FileWriter {
                     inode: ino,
                     length: AtomicUsize::new(len as usize),
