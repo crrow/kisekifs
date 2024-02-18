@@ -321,6 +321,7 @@ impl FileHandle {
             .or_default()
             .insert(ctx.unique, ctx.clone());
 
+        debug!("FileHandleWriteGuard is created");
         Some(FileHandleWriteGuard {
             file_writer: self.writer.as_ref().unwrap().clone(),
             exclusive_locking: self.exclusive_locking.clone(),
@@ -431,6 +432,7 @@ impl FileHandleWriteGuard {
 
 impl Drop for FileHandleWriteGuard {
     fn drop(&mut self) {
+        debug!("FileHandleWriteGuard has been dropped");
         self.exclusive_locking.store(false, Ordering::Release);
         self.exclusive_lock_notify.notify_waiters();
     }
@@ -451,6 +453,7 @@ impl FileHandleReadGuard {
 
 impl Drop for FileHandleReadGuard {
     fn drop(&mut self) {
+        debug!("read lock is released");
         self.reader_cnt.fetch_sub(1, Ordering::AcqRel);
         self.reader_notify.notify_waiters()
     }

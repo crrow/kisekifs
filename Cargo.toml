@@ -55,6 +55,8 @@ autobenches = false
 
 [profile.release]
 debug = true
+panic = 'abort'
+
 
 [lib]
 bench = false

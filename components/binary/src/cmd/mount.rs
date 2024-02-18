@@ -82,7 +82,7 @@ pub struct MountArgs {
     long,
     help = "Number of threads to use for tokio async runtime",
     help_heading = MOUNT_OPTIONS_HEADER,
-    default_value = "8",
+    default_value = "10",
     )]
     pub async_work_threads: usize,
 
@@ -216,6 +216,9 @@ impl MountArgs {
     }
 
     pub fn run(self) -> Result<(), Whatever> {
+        human_panic::setup_panic!();
+        kiseki_utils::panic_hook::set_panic_hook();
+
         if self.foreground {
             let (_guard, _sentry_guard) = if let Some(opts) = self.load_logging_opts() {
                 kiseki_utils::logger::init_global_logging_without_runtime("kiseki-fuse", &opts)

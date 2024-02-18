@@ -1421,6 +1421,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "human-panic"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4f016c89920bbb30951a8405ecacbb4540db5524313b9445736e7e1855cf370"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "backtrace",
+ "os_info",
+ "serde",
+ "serde_derive",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1671,6 +1687,7 @@ dependencies = [
  "const_format",
  "ctrlc",
  "fuser",
+ "human-panic",
  "kiseki-common",
  "kiseki-fuse",
  "kiseki-meta",
@@ -1805,6 +1822,7 @@ dependencies = [
 name = "kiseki-utils"
 version = "0.1.0"
 dependencies = [
+ "backtrace",
  "console-subscriber",
  "dotenvy",
  "kiseki-common",

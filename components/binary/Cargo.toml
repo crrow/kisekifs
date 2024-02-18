@@ -26,6 +26,7 @@ procfs = "0.16.0"
 regex = "1.10.2"
 const_format = "0.2.32"
 ctrlc = "3.4.2"
+human-panic = "1.2.3"
 
 
 [build-dependencies]

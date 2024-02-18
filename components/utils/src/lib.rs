@@ -4,6 +4,7 @@ pub mod align;
 pub mod env;
 pub mod logger;
 pub mod object_storage;
+pub mod panic_hook;
 pub mod pyroscope_init;
 pub mod readable_size;
 pub mod runtime;
