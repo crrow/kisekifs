@@ -358,10 +358,10 @@ impl SliceBuffer {
                 Block::Empty => false,
                 Block::Data(..) => {
                     let block_idx = *idx;
-                    let start = block_idx * BLOCK_SIZE;
+                    // let start = block_idx * BLOCK_SIZE;
                     let end = (block_idx + 1) * BLOCK_SIZE;
-                    dummy_flushed_length = end;
-                    start >= dummy_flushed_length && end <= offset
+                    // dummy_flushed_length = end;
+                    end <= offset
                 }
             })
             .map(|(idx, _)| idx)
@@ -406,6 +406,7 @@ impl SliceBuffer {
                         current_flush_data += to_flush_len;
                     }
                     writer.close().await.context(OpenDalSnafu)?;
+                    debug!("write object to {:?}", key);
                     Ok(())
                 });
                 handle
@@ -417,6 +418,10 @@ impl SliceBuffer {
         }
 
         self.total_page_cnt -= total_released_page_cnt;
+        debug!(
+            "flushed length: {}, total_released_page: {}",
+            self.flushed_length, total_released_page_cnt
+        );
         Ok(total_released_page_cnt)
     }
 }

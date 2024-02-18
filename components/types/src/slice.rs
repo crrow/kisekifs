@@ -64,20 +64,20 @@ pub type OverlookedSlicesRef = Arc<OverlookedSlices>;
 pub struct Slices(pub Vec<Slice>);
 
 impl Slices {
-    // pub fn decode(buf: &[u8]) -> Result<Slices, Error> {
-    //     ensure!(
-    //         buf.len() % SLICE_BYTES == 0,
-    //         InvalidSliceBufSnafu { len: buf.len() }
-    //     );
-    //     let mut slices = Vec::new();
-    //     let mut i = 0;
-    //     while i < buf.len() {
-    //         let slice = Slice::decode(&buf[i..i + SLICE_BYTES])?;
-    //         slices.push(slice);
-    //         i += SLICE_BYTES;
-    //     }
-    //     Ok(Slices(slices))
-    // }
+    pub fn decode(buf: &[u8]) -> Result<Slices, Error> {
+        ensure!(
+            buf.len() % SLICE_BYTES == 0,
+            InvalidSliceBufSnafu { len: buf.len() }
+        );
+        let mut slices = Vec::new();
+        let mut i = 0;
+        while i < buf.len() {
+            let slice = Slice::decode(&buf[i..i + SLICE_BYTES])?;
+            slices.push(slice);
+            i += SLICE_BYTES;
+        }
+        Ok(Slices(slices))
+    }
 
     /// Look over all slices and build a RangeMap for them.
     pub fn overlook(&self) -> RangeMap<usize, Slice> {
@@ -131,10 +131,6 @@ impl Slice {
             size: size as u32,
             _padding: 0,
         }
-    }
-
-    pub fn encode(&self) -> Vec<u8> {
-        serialize(self).unwrap()
     }
 
     pub fn decode(buf: &[u8]) -> Result<Self, Error> {

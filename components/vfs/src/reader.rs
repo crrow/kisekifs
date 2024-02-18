@@ -148,7 +148,7 @@ impl FileReader {
             // make a virtual slice map to record the slice and hole.
             let mut virtual_slice_map = RangeMap::new();
             {
-                let overlap = raw_slices.overlook();
+                // let overlap = raw_slices.overlook();
                 // let overlap_slices = overlap.iter().collect_vec();
                 // println!("overlap_slices: {:?}", overlap_slices);
             }

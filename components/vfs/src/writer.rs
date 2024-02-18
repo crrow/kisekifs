@@ -1,3 +1,4 @@
+use crossbeam::atomic::AtomicCell;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
@@ -28,6 +29,7 @@ use libc::EBADF;
 use rangemap::RangeMap;
 use scopeguard::defer;
 use snafu::{OptionExt, ResultExt};
+use tokio::time::error::Elapsed;
 use tokio::{
     sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock},
     task::JoinHandle,
@@ -167,7 +169,7 @@ pub struct FileWriter {
     // the length of current file.
     length: AtomicUsize,
     // buffer writers.
-    chunk_writers: RwLock<HashMap<ChunkIndex, ChunkWriter>>,
+    chunk_writers: RwLock<HashMap<ChunkIndex, Arc<ChunkWriter>>>,
     // we may need to wait on the flush queue to flush the data to the remote storage.
     slice_flush_queue: mpsc::Sender<FlushReq>,
 
@@ -316,71 +318,38 @@ impl FileWriter {
             } else {
                 drop(read_guard);
 
+                let cw = Arc::new(ChunkWriter {
+                    inode: self.inode,
+                    chunk_index: l.chunk_idx,
+                    slice_writers: Default::default(),
+                    fw: Arc::downgrade(self),
+                    first_write_notify: Arc::new(Default::default()),
+                });
+
                 // we need to create a new one.
                 let sw = Arc::new(SliceWriter::new(
                     l.chunk_idx,
+                    &cw,
                     self.seq_generate
                         .next_id()
                         .expect("should not fail when generate internal seq"),
                     l.chunk_offset,
                     self.data_manager.clone(),
                 ));
-                let mut slice_writers = BTreeMap::new();
-                slice_writers.insert(sw._internal_seq, sw.clone());
-                let cw = ChunkWriter {
-                    inode: self.inode,
-                    chunk_index: l.chunk_idx,
-                    slice_writers: RwLock::new(slice_writers),
-                    fw: Arc::downgrade(self),
-                };
+                let mut write_guard = cw.slice_writers.write().await;
+                write_guard.insert(sw._internal_seq, sw.clone());
+                drop(write_guard);
+
+                let cloned_cw = cw.clone();
+                tokio::spawn(async move {
+                    cloned_cw.background_committer().await;
+                });
                 let mut write_guard = self.chunk_writers.write().await;
                 write_guard.insert(l.chunk_idx, cw);
                 sws.push((sw, l));
             }
         }
         sws
-    }
-
-    async fn remove_done_slice_writer(self: &Arc<Self>) {
-        let mut to_remove = Vec::new();
-        let read_guard = self.chunk_writers.read().await;
-        for (chunk_index, cw) in read_guard.iter() {
-            let slice_writers = cw.slice_writers.read().await;
-            let keys = slice_writers
-                .iter()
-                .filter_map(|(seq, sw)| {
-                    if sw.has_done() {
-                        Some(seq.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            drop(slice_writers);
-
-            let mut slice_writers = cw.slice_writers.write().await;
-            for k in keys {
-                if let Some(sw) = slice_writers.remove(&k) {
-                    let (fl, l) = sw.get_flushed_length_and_total_write_length().await;
-                    debug!(
-                        "ChunkIndex({chunk_index}) remove slice writer({}), flushed_len: {fl}, total_len: {l}, free_ratio: {}",
-                        sw.slice_id.load(Ordering::Acquire),
-                        kiseki_storage::get_pool_free_ratio(),
-                    );
-                }
-            }
-            if slice_writers.is_empty() {
-                to_remove.push(chunk_index.clone());
-                // write_guard.remove(chunk_index);
-            }
-        }
-        drop(read_guard);
-
-        let mut write_guard = self.chunk_writers.write().await;
-        for chunk_idx in to_remove {
-            debug!("remove chunk index: {}", chunk_idx);
-            write_guard.remove(&chunk_idx);
-        }
     }
 
     /// flush all buffered data.
@@ -466,7 +435,6 @@ impl FileWriterFlusher {
     #[instrument(skip(self), fields(self.fw.inode))]
     async fn run(mut self) {
         debug!("Ino({}) flush task started", self.fw.inode);
-        let (remove_tx, mut remove_rx) = mpsc::channel(10);
         let cancel_token = self.fw.cancel_token.clone();
         let cloned_cancel_token = cancel_token.clone();
         let ino = self.fw.inode.clone();
@@ -477,22 +445,6 @@ impl FileWriterFlusher {
                     debug!("flusher of [{ino}] is cancelled");
                     return;
                 }
-                remove_req = remove_rx.recv() => {
-                    if let Some((chunk_index, internal_seq)) = remove_req {
-                        let chunk_writers = self.fw.chunk_writers.read().await;
-                        if let Some(chunk_writer) = chunk_writers.get(&chunk_index) {
-                            let mut slice_writers = chunk_writer.slice_writers.write().await;
-                            slice_writers.remove(&internal_seq);
-                            if slice_writers.is_empty() {
-                                // we need to remove the chunk writer.
-                                drop(slice_writers);
-                                drop(chunk_writers);
-                                let mut chunk_writers = self.fw.chunk_writers.write().await;
-                                chunk_writers.remove(&chunk_index);
-                            }
-                        }
-                    }
-                }
                 req = self.flush_rx.recv() => {
                     if let Some(req) = req {
                         match req {
@@ -500,18 +452,11 @@ impl FileWriterFlusher {
                                 debug!("{ino} flush bulk to {offset}");
                                 let fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
-                                let remove_tx = remove_tx.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
                                         r = sw.flush_bulk(offset) => {
                                             if let Err(e) = r {
                                                 error!("{ino} failed to flush bulk {e}");
-                                            }
-                                            if sw.has_done() {
-                                                // clean the map
-                                                if let Err(e) = remove_tx.send((sw.chunk_index, sw._internal_seq)).await {
-                                                    error!("{ino} failed to send remove request {e}");
-                                                }
                                             }
                                         }
                                         _ = cancel_token.cancelled() => {
@@ -529,7 +474,6 @@ impl FileWriterFlusher {
                                 );
                                 let fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
-                                let remove_tx = remove_tx.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
                                         r = sw.flush() => {
@@ -537,10 +481,6 @@ impl FileWriterFlusher {
                                                 error!("{ino} failed to flush full {e}");
                                             }
                                             sw.mark_done();
-                                            // clean the map
-                                            if let Err(e) = remove_tx.send((sw.chunk_index, sw._internal_seq)).await {
-                                                error!("{ino} failed to send remove request {e}");
-                                            }
                                         }
                                         _ = cancel_token.cancelled() => {
                                             debug!("{ino} flush full is cancelled");
@@ -555,16 +495,12 @@ impl FileWriterFlusher {
                                 for sw in sws.into_iter() {
                                     let remain = remain.clone();
                                     let notify = notify.clone();
-                                    let remove_tx = remove_tx.clone();
                                     tokio::spawn(async move {
                                         let r = sw.flush().in_current_span().await;
                                         if let Err(e) = r {
                                             error!("{ino} failed to flush manually {e}");
                                         }
                                         sw.mark_done();
-                                        if let Err(e) = remove_tx.send((sw.chunk_index, sw._internal_seq)).await {
-                                            error!("{ino} failed to send remove request {e}");
-                                        }
                                         let pre_remain = remain.fetch_sub(1, Ordering::AcqRel);
                                         debug!("{} manually flush remain: {}, total: {}", ino, pre_remain -1 , total_len);
                                         notify.notify_waiters();
@@ -594,10 +530,11 @@ struct ChunkWriter {
     chunk_index: ChunkIndex,
     slice_writers: RwLock<BTreeMap<InternalSliceSeq, Arc<SliceWriter>>>,
     fw: Weak<FileWriter>,
+    first_write_notify: Arc<Notify>,
 }
 
 impl ChunkWriter {
-    async fn find_writable_slice_writer(&self, l: &ChunkWriteCtx) -> Arc<SliceWriter> {
+    async fn find_writable_slice_writer(self: &Arc<Self>, l: &ChunkWriteCtx) -> Arc<SliceWriter> {
         let fw = self.fw.upgrade().unwrap();
         let read_guard = self.slice_writers.read().await;
         for (idx, (_, sw)) in read_guard.iter().rev().enumerate() {
@@ -634,6 +571,7 @@ impl ChunkWriter {
 
         let sw = Arc::new(SliceWriter::new(
             l.chunk_idx,
+            self,
             fw.seq_generate
                 .next_id()
                 .expect("should not fail when generate internal seq"),
@@ -644,6 +582,85 @@ impl ChunkWriter {
         write_guard.insert(sw._internal_seq, sw.clone());
         sw
     }
+
+    async fn background_committer(self: &Arc<Self>) {
+        let fw = self.fw.upgrade().unwrap();
+        let dm = fw.data_manager.upgrade().unwrap();
+        let meta_engine = dm.meta_engine.clone();
+        fw.ref_count.fetch_add(1, Ordering::AcqRel);
+
+        // wait for the first write.
+        self.first_write_notify.notified().await;
+
+        loop {
+            let read_guard = self.slice_writers.read().await;
+            let sw = read_guard.iter().next().map(|(_, sw)| sw.clone());
+            if sw.is_none() {
+                debug!(
+                    "chunk_index: {} has no slice writer, exit",
+                    self.chunk_index
+                );
+                // no slice writer, exit.
+                let mut write_guard = fw.chunk_writers.write().await;
+                write_guard.remove(&self.chunk_index);
+                return;
+            }
+            drop(read_guard);
+
+            // check if the slice writer has done.
+            let sw = sw.unwrap();
+            while !sw.has_done() {
+                let notify = sw.done_notify.clone();
+                if let Err(e) =
+                    tokio::time::timeout(std::time::Duration::from_millis(300), notify.notified())
+                        .await
+                {
+                    warn!("{} wait for done notify timeout {e}, flush it manually", sw);
+                    if let Some(req) = sw.make_full_flush_in_advance() {
+                        if let Err(e) = fw.slice_flush_queue.send(req).await {
+                            panic!("failed to send flush request {e}");
+                        }
+                    }
+                }
+            }
+
+            // remove the slice writer.
+            let mut write_guard = self.slice_writers.write().await;
+            write_guard.remove(&sw._internal_seq);
+            drop(write_guard);
+
+            // write slice meta info to meta engine.
+            let slice_id = sw.slice_id.load(Ordering::Acquire);
+            let len = sw.slice_buffer.read().await.length();
+            // then the sw is done.
+            // write the meta info of this slice.
+            if let Err(e) = meta_engine
+                .write_slice(
+                    self.inode,
+                    self.chunk_index,
+                    sw.offset_of_chunk,
+                    kiseki_types::slice::Slice::Owned {
+                        chunk_pos: sw.offset_of_chunk as u32,
+                        id: slice_id,
+                        size: len as u32,
+                        _padding: 0,
+                    },
+                    sw.last_modified.load(),
+                )
+                .await
+            {
+                panic!("failed to write slice meta info {e}");
+            }
+        }
+    }
+}
+
+impl Drop for ChunkWriter {
+    fn drop(&mut self) {
+        if let Some(fw) = self.fw.upgrade() {
+            fw.ref_count.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 /// SliceWriter is the entry point for writing data to a slice,
@@ -652,6 +669,7 @@ impl ChunkWriter {
 /// but cannot change the start offset.
 struct SliceWriter {
     chunk_index: ChunkIndex,
+    chunk_writer: Weak<ChunkWriter>,
     // the internal seq of the slice writer,
     // used to identify the slice writer,
     // we have it since we delay the slice-id assignment until we
@@ -672,6 +690,8 @@ struct SliceWriter {
     // 1. FlushFull will set this to true.
     // 2. Manual flush will set this to true.
     done: AtomicBool,
+    done_notify: Arc<Notify>,
+    last_modified: AtomicCell<Instant>,
 
     // dependencies
     // the underlying object storage.
@@ -687,12 +707,14 @@ impl Display for SliceWriter {
 impl SliceWriter {
     fn new(
         chunk_index: ChunkIndex,
+        cw: &Arc<ChunkWriter>,
         seq: u64,
         offset_of_chunk: usize,
         data_manager: Weak<DataManager>,
     ) -> SliceWriter {
         Self {
             chunk_index,
+            chunk_writer: Arc::downgrade(cw),
             _internal_seq: seq,
             slice_id: AtomicU64::new(EMPTY_SLICE_ID),
             offset_of_chunk,
@@ -700,6 +722,8 @@ impl SliceWriter {
             frozen: AtomicBool::new(false),
             freeze_notify: Default::default(),
             done: AtomicBool::new(false),
+            done_notify: Arc::new(Default::default()),
+            last_modified: AtomicCell::new(Instant::now()),
             data_manager,
         }
     }
@@ -707,6 +731,12 @@ impl SliceWriter {
     async fn write_at(self: &Arc<Self>, offset: usize, data: &[u8]) -> Result<usize> {
         let mut write_guard = self.slice_buffer.write().await;
         let written = write_guard.write_at(offset, data).await?;
+        let cw = self
+            .chunk_writer
+            .upgrade()
+            .expect("chunk writer should not be dropped");
+        cw.first_write_notify.notify_one();
+        self.last_modified.store(Instant::now());
         Ok(written)
     }
 
@@ -835,7 +865,8 @@ impl SliceWriter {
 
     // mark self as done, then we will remove the ref from the map.
     fn mark_done(self: &Arc<Self>) {
-        self.done.store(true, Ordering::Release)
+        self.done.store(true, Ordering::Release);
+        self.done_notify.notify_waiters();
     }
 
     fn has_done(self: &Arc<Self>) -> bool {

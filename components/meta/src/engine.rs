@@ -26,6 +26,7 @@ use kiseki_types::{
     FileType,
 };
 use scopeguard::defer;
+use serde::Serialize;
 use snafu::{ensure, ResultExt};
 use tokio::time::{timeout, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -825,7 +826,7 @@ impl MetaEngine {
             "slice should be owned for writing slice"
         );
         debug!(
-            "write-slice: with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
+            "write_slice: with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
             inode, chunk_idx, chunk_pos, slice, mtime
         );
 
@@ -854,7 +855,7 @@ impl MetaEngine {
         let now = SystemTime::now();
         attr.mtime = now;
         attr.ctime = now;
-        let val = slice.encode();
+        let val = bincode::serialize(&slice).unwrap();
         if slices_buf.eq(&val) {
             warn!(
                 "{inode} try to write the same slice {:?} at {chunk_idx}",
