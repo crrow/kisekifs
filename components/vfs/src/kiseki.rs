@@ -43,7 +43,6 @@ use snafu::{ensure, location, Location, OptionExt, ResultExt};
 use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
 
-use crate::handle::FileHandleWriteGuard;
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
@@ -51,7 +50,7 @@ use crate::{
         Error, Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result,
         StorageSnafu,
     },
-    handle::{Handle, HandleTable, HandleTableRef},
+    handle::{FileHandleWriteGuard, Handle, HandleTable, HandleTableRef},
     reader::FileReadersRef,
     writer::{FileWriter, FileWritersRef},
 };

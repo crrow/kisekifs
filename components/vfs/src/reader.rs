@@ -313,7 +313,7 @@ mod tests {
             .unwrap();
 
         let fw = data_manager.find_file_writer(inode).unwrap();
-        fw.flush().await.unwrap();
+        fw.finish().await.unwrap();
 
         let file_reader = data_manager.new_file_reader(inode, 0, write_len);
 
@@ -331,7 +331,7 @@ mod tests {
             .unwrap();
         assert_eq!(write_len, data.len());
 
-        fw.flush().await.unwrap();
+        fw.finish().await.unwrap();
 
         let mut read_data = vec![0u8; 11];
 

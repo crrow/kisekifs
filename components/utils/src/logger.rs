@@ -161,7 +161,8 @@ pub fn init_global_logging(
     };
 
     // Must enable 'tokio_unstable' cfg to use this feature.
-    // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
+    // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F
+    // common-telemetry/console -- standalone start`
     #[cfg(feature = "tokio-console")]
     let subscriber = {
         let tokio_console_layer = if let Some(tokio_console_addr) = &opts.tokio_console_addr {

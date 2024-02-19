@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::{
+    collections::HashMap,
     fmt::Debug,
     marker::PhantomData,
     sync::{
@@ -281,7 +281,8 @@ impl FileHandle {
                 // check if someone is holding the exclusive lock
                 || self.exclusive_locking.load(Ordering::Acquire)
             {
-                // wait for they notify that exclusive lock has been released or reader has been released.
+                // wait for they notify that exclusive lock has been released or reader has been
+                // released.
                 tokio::select! {
                     _ =self.exclusive_lock_notify.notified() => {
                         debug!("exclusive lock is released")
@@ -363,7 +364,8 @@ impl FileHandle {
             // check if someone is holding the exclusive lock
             || self.write_wait_cnt.load(Ordering::Acquire) > 0 || self.exclusive_locking.load(Ordering::Acquire)
         {
-            // wait for they notify that exclusive lock has been released or reader has been released.
+            // wait for they notify that exclusive lock has been released or reader has been
+            // released.
             if cancel_token.is_some() {
                 let cancel_token = cancel_token.as_ref().unwrap().clone();
                 tokio::select! {
@@ -402,7 +404,7 @@ impl FileHandle {
     // Flush without lock
     pub(crate) async fn unsafe_flush(&self) -> Result<()> {
         if let Some(writer) = &self.writer {
-            writer.flush().await
+            writer.finish().await
         } else {
             Ok(())
         }
@@ -422,7 +424,7 @@ impl FileHandleWriteGuard {
     }
 
     pub(crate) async fn flush(&self) -> Result<()> {
-        self.file_writer.flush().await
+        self.file_writer.finish().await
     }
 
     pub(crate) fn get_length(&self) -> usize {
