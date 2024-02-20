@@ -1823,6 +1823,7 @@ name = "kiseki-utils"
 version = "0.1.0"
 dependencies = [
  "backtrace",
+ "bytes",
  "console-subscriber",
  "dotenvy",
  "kiseki-common",

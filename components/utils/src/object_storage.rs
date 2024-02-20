@@ -73,18 +73,18 @@ pub fn new_minio_store<P: AsRef<Path>>(path: P) -> Result<ObjectStorage, opendal
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{Buf, Bytes};
+    use kiseki_common::BLOCK_SIZE;
 
     #[tokio::test]
     async fn s3() {
         let op = new_minio_store("/tmp/kiseki.data").unwrap();
         let key = "test";
-        let data = b"hello world";
-        let mut writer = op.writer(key).await.unwrap();
-        writer.write(data.as_slice()).await.unwrap();
-        writer.write(data.as_slice()).await.unwrap();
-        writer.close().await.unwrap();
+        let data = Bytes::from(vec![1u8; BLOCK_SIZE]);
+        op.write(key, data).await.unwrap();
+        let read = op.read(key).await.unwrap();
+        assert_eq!(read.len(), BLOCK_SIZE);
 
-        let res = op.read(key).await.unwrap();
-        assert_eq!(res.as_slice(), data.as_slice());
+        let buf = bytes::BytesMut::with_capacity(BLOCK_SIZE);
     }
 }

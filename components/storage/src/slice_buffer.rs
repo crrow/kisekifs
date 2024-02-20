@@ -1,3 +1,4 @@
+use bytes::Buf;
 use std::{
     cmp::{max, min},
     io::Cursor,
@@ -382,6 +383,9 @@ impl SliceBuffer {
                     let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
                     let total_flush_data = data_block.length;
                     let mut current_flush_data = 0;
+                    // let mut object_block_buf = vec![0u8; total_flush_data];
+                    // let mut cursor = Cursor::new(&mut object_block_buf);
+
                     while current_flush_data < total_flush_data {
                         let page_idx = current_flush_data / PAGE_SIZE;
                         let page_offset = current_flush_data % PAGE_SIZE;
@@ -391,6 +395,7 @@ impl SliceBuffer {
                         );
                         match &data_block.pages[page_idx] {
                             None => {
+                                // cursor.advance(to_flush_len);
                                 writer
                                     .write_all(&vec![0u8; to_flush_len])
                                     .await
@@ -405,6 +410,10 @@ impl SliceBuffer {
                         current_flush_data += to_flush_len;
                     }
                     // writer.close().await.context(OpenDalSnafu)?;
+                    // sto.write_with(&key, object_block_buf)
+                    //     .concurrent(2)
+                    //     .await
+                    //     .context(OpenDalSnafu)?;
                     if let Err(e) = writer.close().await {
                         panic!(
                             "close writer failed: {:?}, expect flush len: {}",
