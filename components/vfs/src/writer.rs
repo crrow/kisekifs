@@ -6,7 +6,6 @@
 //! writer has a background committer to flush the SliceWriters to the remote
 //! storage by order.
 
-use std::sync::atomic::AtomicU8;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
@@ -14,7 +13,7 @@ use std::{
     io::Cursor,
     ops::Range,
     sync::{
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Weak,
     },
     time::Duration,
@@ -365,6 +364,8 @@ impl FileWriter {
         if let Err(e) = futures::future::try_join_all(handles).await {
             panic!("failed to flush chunk writers {e}");
         }
+        let mut write_guard = self.chunk_writers.write().await;
+        write_guard.clear();
 
         Ok(())
     }
@@ -586,10 +587,6 @@ impl ChunkWriter {
                 let id = sw._internal_seq.clone();
                 let sid = sw.slice_id.load(Ordering::Acquire);
                 let state = SliceWriterState::from(sw.state.load(Ordering::Acquire));
-                println!(
-                    "find sw in chunk... Ino({}), ChunkIdx({}), SliceWriter({}), Sid({}), state: {:?}, sw_count_in_current_chunk: {} ",
-                    self.inode, self.chunk_index, id, sid, state, current_len
-                );
                 if matches!(
                     state,
                     SliceWriterState::Writing | SliceWriterState::Flushing
@@ -597,12 +594,12 @@ impl ChunkWriter {
                     continue;
                 }
                 if state == SliceWriterState::Done {
-                    // println!("current state is done, skip");
                     done.push(id);
                     continue;
                 }
 
-                // actually we don't care if we are in seq or random mode when the flush is called.
+                // actually we don't care if we are in seq or random mode when the flush is
+                // called.
                 let req = sw.make_flush_req(false, true).await;
                 if let Some(req) = req {
                     fw.slice_flush_queue
@@ -623,40 +620,14 @@ impl ChunkWriter {
                 }
             }
 
-            println!(
-                "Ino({}), ChunkIdx({}), done_count({:?}), remain:({}), waiting...",
-                self.inode,
-                self.chunk_index,
-                done_len,
-                current_len - done_len
-            );
-
             // wait for the slice writer to finish.
             tokio::select! {
                 _ = self.slice_done_notify.notified() => {
-                    println!("Ino({}), ChunkIdx({}), notified", self.inode, self.chunk_index);
                 },
                 _= tokio::time::sleep(Duration::from_millis(100)) => {
-                    println!("Ino({}), ChunkIdx({}), waiting timeout, check again",self.inode, self.chunk_index);
-                    // panic!("waiting timeout");
                 },
             }
         }
-    }
-}
-
-impl Drop for ChunkWriter {
-    fn drop(&mut self) {
-        debug!(
-            "{} chunk_index: {} is dropped",
-            self.inode, self.chunk_index
-        );
-        // if let Some(fw) = self.fw.upgrade() {
-        //     // fw.ref_count.fetch_sub(1, Ordering::AcqRel);
-        //     if fw.flush_waiting.load(Ordering::Acquire) > 0 {
-        //         fw.flush_notify.notify_waiters();
-        //     }
-        // }
     }
 }
 

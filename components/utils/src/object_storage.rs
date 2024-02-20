@@ -28,3 +28,11 @@ pub fn new_fs_store<P: AsRef<Path>>(path: P) -> Result<ObjectStorage, opendal::E
     let obj = Operator::new(builder)?.finish();
     Ok(obj)
 }
+
+pub fn new_sled_store<P: AsRef<Path>>(path: P) -> Result<ObjectStorage, opendal::Error> {
+    let mut builder = opendal::services::Sled::default();
+    let path = path.as_ref();
+    builder.datadir(path.to_string_lossy().as_ref());
+    let obj = Operator::new(builder)?.finish();
+    Ok(obj)
+}

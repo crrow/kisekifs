@@ -107,7 +107,7 @@ alias sh-f := help-format
     echo "Done: remove data dir"
     - rm -r /tmp/kiseki.log/
     echo "Done: remove log dir"
-
+    - rm -r /home/dh/kiseki/kiseki.data
 
 
 alias sw := seq-write
