@@ -435,7 +435,11 @@ impl SliceBuffer {
                         );
                     }
                     writer.shutdown().await.context(UnknownIOSnafu)?;
-                    debug!("write object to {:?}", key);
+                    debug!(
+                        "write object to {:?}, len: {:?}",
+                        key,
+                        ReadableSize(total_flush_data as u64).to_string()
+                    );
                     Ok(())
                 });
                 handle

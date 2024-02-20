@@ -944,7 +944,7 @@ impl SliceWriter {
                         return None;
                     }
                     Some(FlushReq::FlushFull(self.clone()))
-                } else if length - flushed_len >= BLOCK_SIZE {
+                } else if length - flushed_len >= BLOCK_SIZE && !seq {
                     if self
                         .state
                         .compare_exchange(
