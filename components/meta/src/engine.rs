@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{
     cmp::{max, min},
     fmt::{Display, Formatter},
@@ -28,6 +29,7 @@ use kiseki_types::{
 use scopeguard::defer;
 use serde::Serialize;
 use snafu::{ensure, ResultExt};
+use tokio::sync::RwLock;
 use tokio::time::{timeout, Instant};
 use tracing::{debug, error, info, instrument, trace, warn};
 
@@ -124,7 +126,7 @@ pub struct MetaEngine {
     root: Ino,
 
     open_files: OpenFiles,
-    removed_files: DashSet<Ino>,
+    removed_files: RwLock<HashSet<Ino>>,
 
     dir_parents: DashMap<Ino, Ino>,
     fs_stat: AtomicCell<FSStat>,
@@ -149,6 +151,7 @@ impl MetaEngine {
         &self.format
     }
 
+    #[instrument(skip(self))]
     pub async fn next_slice_id(&self) -> Result<SliceID> {
         self.free_slices.next().await
     }
@@ -247,7 +250,7 @@ impl MetaEngine {
         let inode = self.check_root(inode);
         // check cache
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.check(inode) {
+            if let Some(attr) = self.open_files.check(inode).await {
                 return Ok(attr);
             }
         }
@@ -256,7 +259,7 @@ impl MetaEngine {
         let mut attr = self.backend.get_attr(inode)?;
 
         // update cache
-        self.open_files.update(inode, &mut attr);
+        self.open_files.update(inode, &mut attr).await;
         if attr.is_filetype(FileType::Directory) && !inode.is_root() && !attr.parent.is_trash() {
             self.dir_parents.insert(inode, attr.parent);
         }
@@ -586,7 +589,7 @@ impl MetaEngine {
             Err(e) => return Err(e),
         };
 
-        self.open_files.open(x.0, &mut x.1);
+        self.open_files.open(x.0, &mut x.1).await;
         Ok(x)
     }
     pub async fn check_set_attr(
@@ -773,7 +776,7 @@ impl MetaEngine {
         defer!(self.refresh_atime(ctx, inode));
 
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.open_check(inode) {
+            if let Some(attr) = self.open_files.open_check(inode).await {
                 return Ok(attr);
             }
         }
@@ -805,7 +808,7 @@ impl MetaEngine {
                 LibcSnafu { errno: libc::EPERM }.fail()?;
             }
         }
-        self.open_files.open(inode, &mut attr);
+        self.open_files.open(inode, &mut attr).await;
         Ok(attr)
     }
 
@@ -876,7 +879,8 @@ impl MetaEngine {
         self.update_parent_stats(inode, attr.parent, dir_stat_length, dir_stat_space)?;
 
         // TODO: update the cache
-        if let Some(mut open_file) = self.open_files.files.get_mut(&inode) {
+        let mut write_guard = self.open_files.files.write().await;
+        if let Some(mut open_file) = write_guard.get_mut(&inode) {
             // invalidate the cache.
             open_file.chunks.remove(&chunk_idx);
         }
@@ -963,8 +967,8 @@ impl MetaEngine {
         );
 
         // TODO: update access time
-
-        if let Some(of) = self.open_files.files.get_mut(&inode) {
+        let read_guard = self.open_files.files.read().await;
+        if let Some(of) = read_guard.get(&inode) {
             if let Some(svs) = of.chunks.get(&chunk_index) {
                 debug!(
                     "read ino {} chunk {} slice info from cache, get count {}",
@@ -1048,8 +1052,9 @@ impl MetaEngine {
 
     // Close a file.
     pub async fn close(&self, inode: Ino) -> Result<()> {
-        if self.open_files.close(inode) {
-            if self.removed_files.remove(&inode).is_some() {
+        if self.open_files.close(inode).await {
+            let mut write_guard = self.removed_files.write().await;
+            if write_guard.remove(&inode) {
                 // TODO: doDeleteSustainedInode
             }
         }

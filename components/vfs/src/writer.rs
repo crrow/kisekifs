@@ -62,20 +62,20 @@ impl DataManager {
             .file_writers
             .entry(ino)
             .or_insert_with(|| {
-                let (tx, mut rx) = mpsc::channel(100);
+                let (tx, mut rx) = mpsc::channel(200);
                 let fw = FileWriter {
                     inode: ino,
                     length: AtomicUsize::new(len as usize),
                     chunk_writers: Default::default(),
                     slice_flush_queue: tx,
-                    total_slice_cnt: Arc::new(Default::default()),
-                    sw_done_notify: Arc::new(Default::default()),
+                    total_slice_writer_cnt: Arc::new(Default::default()),
                     cancel_token: CancellationToken::new(),
                     seq_generate: self.id_generator.clone(),
                     ref_count: Arc::new(Default::default()),
                     flush_waiting: Arc::new(Default::default()),
-                    flush_notify: Arc::new(Default::default()),
+                    flush_done_notify: Arc::new(Default::default()),
                     write_waiting: Arc::new(Default::default()),
+                    write_notify: Arc::new(Default::default()),
                     pattern: Default::default(),
                     early_flush_threshold: 0.3,
                     data_manager: Arc::downgrade(self),
@@ -143,33 +143,34 @@ type InternalSliceSeq = u64;
 
 #[derive(Debug, Default)]
 struct WriterPattern {
-    is_seq_count: AtomicIsize,
+    score: AtomicIsize,
     last_write_stop_offset: AtomicUsize,
 }
 
 impl WriterPattern {
-    const LIMIT: isize = 5;
+    const MAX_SEQ_SCORE: isize = 20;
+    const MAX_RANDOM_SCORE: isize = -5;
 
     fn monitor_write_at(&self, offset: usize, size: usize) {
         let last_offset = self
             .last_write_stop_offset
             .swap(offset + size, Ordering::AcqRel);
-        let count = self.is_seq_count.load(Ordering::Acquire);
+        let score = self.score.load(Ordering::Acquire);
         if last_offset == offset {
             // seq
-            if count < Self::LIMIT {
+            if score < Self::MAX_SEQ_SCORE {
                 // add weight on the seq side.
-                self.is_seq_count.fetch_add(1, Ordering::SeqCst);
+                self.score.fetch_add(1, Ordering::AcqRel);
             }
         } else {
-            if count > -Self::LIMIT {
+            if score > Self::MAX_RANDOM_SCORE {
                 // add weight on the random side.
-                self.is_seq_count.fetch_sub(1, Ordering::SeqCst);
+                self.score.fetch_add(-1, Ordering::AcqRel);
             }
         }
     }
     fn is_seq(&self) -> bool {
-        self.is_seq_count.load(Ordering::Acquire) >= 0
+        self.score.load(Ordering::Acquire) >= 0
     }
 }
 
@@ -186,8 +187,6 @@ pub struct FileWriter {
     chunk_writers: RwLock<HashMap<ChunkIndex, Arc<ChunkWriter>>>,
     // we may need to wait on the flush queue to flush the data to the remote storage.
     slice_flush_queue: mpsc::Sender<FlushReq>,
-    total_slice_cnt: Arc<AtomicUsize>,
-    sw_done_notify: Arc<Notify>,
 
     cancel_token: CancellationToken,
     seq_generate: Arc<sonyflake::Sonyflake>,
@@ -196,12 +195,14 @@ pub struct FileWriter {
     // 2. when we close the file, decrease the counter.
     ref_count: Arc<AtomicUsize>,
     flush_waiting: Arc<AtomicUsize>,
-    flush_notify: Arc<Notify>,
+    flush_done_notify: Arc<Notify>,
     write_waiting: Arc<AtomicUsize>,
+    write_notify: Arc<Notify>,
+    total_slice_writer_cnt: Arc<AtomicUsize>,
 
     // random write early flush
     // when we reach the threshold, we should flush some flush to the remote storage.
-    pattern: WriterPattern,
+    pattern: Arc<WriterPattern>,
     // when should we flush the buffer in advance, according to current buffer pool free ratio.
     early_flush_threshold: f64,
 
@@ -236,12 +237,20 @@ impl FileWriter {
         }
 
         self.pattern.monitor_write_at(offset, expected_write_len);
-        while let cnt = self.total_slice_cnt.load(Ordering::Acquire) {
+        while let cnt = self.total_slice_writer_cnt.load(Ordering::Acquire) {
             if cnt < 1000 {
                 break;
             }
+            // we have too many slice writers, we should wait for some to finish.
             yield_now().await;
         }
+
+        // wait for the flush to finish.
+        self.write_waiting.fetch_add(1, Ordering::AcqRel);
+        while self.flush_waiting.load(Ordering::Acquire) > 0 {
+            self.flush_done_notify.notified().await;
+        }
+        self.write_waiting.fetch_sub(1, Ordering::AcqRel);
 
         // 1. find write location.
         let start = Instant::now();
@@ -261,7 +270,7 @@ impl FileWriter {
             write_len += n;
             let sw = sw.clone();
 
-            if let Some(req) = sw.make_flush_req(false).await {
+            if let Some(req) = sw.make_flush_req(self.pattern.is_seq(), false).await {
                 if let Err(e) = self.slice_flush_queue.send(req).await {
                     panic!("failed to send flush request {e}");
                 }
@@ -313,8 +322,8 @@ impl FileWriter {
                     chunk_index: l.chunk_idx,
                     slice_writers: Default::default(),
                     fw: Arc::downgrade(self),
-                    total_slice_count: self.total_slice_cnt.clone(),
-                    slice_done_notify: self.sw_done_notify.clone(),
+                    total_slice_count: self.total_slice_writer_cnt.clone(),
+                    slice_done_notify: Default::default(),
                 }))
                 .clone();
             drop(write_guard);
@@ -329,32 +338,34 @@ impl FileWriter {
     #[instrument(skip(self), fields(self.inode))]
     pub async fn finish(self: &Arc<Self>) -> Result<()> {
         self.flush_waiting.fetch_add(1, Ordering::AcqRel);
-        defer!(self.flush_waiting.fetch_sub(1, Ordering::AcqRel););
+        defer!({
+            self.flush_waiting.fetch_sub(1, Ordering::AcqRel);
+            self.flush_done_notify.notify_waiters();
+        });
 
-        while self.total_slice_cnt.load(Ordering::Acquire) > 0 {
-            let read_guard = self.chunk_writers.read().await;
-            debug!(
-                "flush is waiting for chunk writer finish, alive_chunk_writers: {}",
-                read_guard.len()
-            );
-            if read_guard.is_empty() {
-                return Ok(());
-            }
-            for (_, cw) in read_guard.iter() {
-                let read_guard = cw.slice_writers.read().await;
-                for (_, sw) in read_guard.iter() {
-                    let sw = sw.clone();
-                    let req = sw.make_flush_req(true).await;
-                    if let Some(req) = req {
-                        if let Err(e) = self.slice_flush_queue.send(req).await {
-                            panic!("failed to send flush request {e}");
-                        }
-                    }
-                }
-            }
-            // wait for the flush finished.
-            self.flush_notify.notified().await;
+        let read_guard = self.chunk_writers.read().await;
+        debug!(
+            "flush is waiting for chunk writer finish, alive_chunk_writers: {}",
+            read_guard.len()
+        );
+        if read_guard.is_empty() {
+            return Ok(());
         }
+        let handles = read_guard
+            .iter()
+            .map(|(_, cw)| {
+                let cw = cw.clone();
+                tokio::spawn(async move {
+                    cw.finish().await;
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(read_guard);
+
+        if let Err(e) = futures::future::try_join_all(handles).await {
+            panic!("failed to flush chunk writers {e}");
+        }
+
         Ok(())
     }
 
@@ -381,6 +392,7 @@ impl FileWriter {
 enum FlushReq {
     FlushBulk { sw: Arc<SliceWriter>, offset: usize },
     FlushFull(Arc<SliceWriter>),
+    CommitIdle(Arc<SliceWriter>),
 }
 
 /// FileWriterFlusher flushes the data to the remote storage periodically.
@@ -425,6 +437,11 @@ impl FileWriterFlusher {
                                                 error!("{ino} failed to flush bulk {e}");
                                             }
                                         }
+                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                            // we should not wait for the flush to finish.
+                                            // we should just commit the slice writer.
+                                            panic!("flush full is timeout");
+                                        }
                                         _ = cancel_token.cancelled() => {
                                             return;
                                         }
@@ -432,32 +449,34 @@ impl FileWriterFlusher {
                                 });
                             },
                             FlushReq::FlushFull(sw) => {
-                                let (fl, wl ) = sw.get_flushed_length_and_total_write_length().await;
-                                debug!("Ino({ino}) flush full [{}] flushed_length {}, length: {}",
-                                    sw.slice_id.load(Ordering::Acquire),
-                                    ReadableSize(fl as u64),
-                                    ReadableSize(wl as u64),
-                                );
                                 let fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
                                 let me = meta_engine.clone();
-                                // FIXME: didn't get scheduled
                                 tokio::spawn(async move {
                                     tokio::select! {
-                                        r = sw.flush() => {
+                                        r = sw.flush_and_commit(ino, me) => {
                                             if let Err(e) = r {
-                                                error!("{ino} failed to flush full {e}");
+                                                panic!("{ino} failed to flush full {e}");
                                             }
-                                            sw.commit(ino, me).await;
                                         }
-                                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-                                            panic!("{ino} flush full timeout");
+                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                            // we should not wait for the flush to finish.
+                                            // we should just commit the slice writer.
+                                            panic!("flush full is timeout");
                                         }
                                         _ = cancel_token.cancelled() => {
                                             debug!("{ino} flush full is cancelled");
                                             return;
                                         }
                                     }
+                                });
+                            },
+                            FlushReq::CommitIdle(sw) => {
+                                let fw = self.fw.clone();
+                                let me = meta_engine.clone();
+                                // just commit the idle slice writer.
+                                tokio::spawn(async move {
+                                    sw.commit_partitial(ino, me).await;
                                 });
                             },
                         }
@@ -488,46 +507,44 @@ impl ChunkWriter {
             let read_guard = self.slice_writers.read().await;
             for (idx, (_, sw)) in read_guard.iter().rev().enumerate() {
                 let (flushed, length) = sw.get_flushed_length_and_total_write_length().await;
-
-                debug!(
-                    "chunk_index: {} found {} flushed: {}, length: {}",
-                    l.chunk_idx,
-                    sw,
-                    ReadableSize(flushed as u64),
-                    ReadableSize(length as u64),
-                );
                 let old_state = SliceWriterState::from(sw.state.load(Ordering::Acquire));
                 if !matches!(old_state, SliceWriterState::Idle | SliceWriterState::Dirty) {
                     // we skip the writing state as well since it means we may in random writing.
                     // skip unwritable slice writer.
                     continue;
                 }
-                if !(sw.offset_of_chunk + flushed <= l.chunk_offset
-                    && l.chunk_offset <= sw.offset_of_chunk + length)
-                {
-                    continue;
-                }
 
-                if sw
-                    .state
-                    .compare_exchange(
-                        old_state as u8,
-                        SliceWriterState::Writing as u8,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                    .is_err()
+                if sw.offset_of_chunk + flushed <= l.chunk_offset
+                    && l.chunk_offset <= sw.offset_of_chunk + length
                 {
-                    // someone else has taken the slice writer.
+                    if sw
+                        .state
+                        .compare_exchange(
+                            old_state as u8,
+                            SliceWriterState::Writing as u8,
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        )
+                        .is_err()
+                    {
+                        // someone else has taken the slice writer.
+                        continue;
+                    }
+                    // we win the contention. start to write.
+                    return (sw.clone(), old_state);
+                } else if idx >= 3 {
+                    // try to flush in advance
+                    let sw = sw.clone();
+                    let req = sw.make_flush_req(fw.pattern.is_seq(), true).await;
+                    if let Some(req) = req {
+                        if let Err(e) = fw.slice_flush_queue.send(req).await {
+                            panic!("failed to send flush request {e}");
+                        }
+                    }
                     continue;
                 }
-                debug!("update slice writer state from {:?} to writing", old_state);
-                // we win the contention. start to write.
-                return (sw.clone(), old_state);
             }
         }
-
-        debug!("not found suitable slice writer, create a new one");
 
         // in random mode or we can't find a suitable slice writer.
         // we need to create a new one.
@@ -547,6 +564,85 @@ impl ChunkWriter {
         write_guard.insert(sw._internal_seq, sw.clone());
         (sw, SliceWriterState::Idle)
     }
+
+    async fn finish(self: &Arc<Self>) {
+        let fw = self.fw.upgrade().expect("file writer is dropped");
+        loop {
+            let read_guard = self.slice_writers.read().await;
+            let len = read_guard.len();
+            if len == 0 {
+                return;
+            }
+
+            let mut done = vec![];
+            let sws = read_guard
+                .iter()
+                .map(|(_, sw)| sw.clone())
+                .collect::<Vec<_>>();
+            drop(read_guard);
+            let current_len = sws.len();
+            for sw in sws {
+                let sw = sw.clone();
+                let id = sw._internal_seq.clone();
+                let sid = sw.slice_id.load(Ordering::Acquire);
+                let state = SliceWriterState::from(sw.state.load(Ordering::Acquire));
+                println!(
+                    "find sw in chunk... Ino({}), ChunkIdx({}), SliceWriter({}), Sid({}), state: {:?}, sw_count_in_current_chunk: {} ",
+                    self.inode, self.chunk_index, id, sid, state, current_len
+                );
+                if matches!(
+                    state,
+                    SliceWriterState::Writing | SliceWriterState::Flushing
+                ) {
+                    continue;
+                }
+                if state == SliceWriterState::Done {
+                    // println!("current state is done, skip");
+                    done.push(id);
+                    continue;
+                }
+
+                // actually we don't care if we are in seq or random mode when the flush is called.
+                let req = sw.make_flush_req(false, true).await;
+                if let Some(req) = req {
+                    fw.slice_flush_queue
+                        .send(req)
+                        .await
+                        .expect("failed to send flush request");
+                }
+            }
+
+            let done_len = done.len();
+            if done_len != 0 {
+                let mut write_guard = self.slice_writers.write().await;
+                for sid in done {
+                    write_guard.remove(&sid);
+                }
+                if write_guard.is_empty() {
+                    return;
+                }
+            }
+
+            println!(
+                "Ino({}), ChunkIdx({}), done_count({:?}), remain:({}), waiting...",
+                self.inode,
+                self.chunk_index,
+                done_len,
+                current_len - done_len
+            );
+
+            // wait for the slice writer to finish.
+            tokio::select! {
+                _ = self.slice_done_notify.notified() => {
+                    println!("Ino({}), ChunkIdx({}), notified", self.inode, self.chunk_index);
+                },
+                _= tokio::time::sleep(Duration::from_millis(100)) => {
+                    println!("Ino({}), ChunkIdx({}), waiting timeout, check again",self.inode, self.chunk_index);
+                    // panic!("waiting timeout");
+                },
+            }
+        }
+    }
 }
 
 impl Drop for ChunkWriter {
@@ -555,12 +651,12 @@ impl Drop for ChunkWriter {
             "{} chunk_index: {} is dropped",
             self.inode, self.chunk_index
         );
-        if let Some(fw) = self.fw.upgrade() {
-            // fw.ref_count.fetch_sub(1, Ordering::AcqRel);
-            if fw.flush_waiting.load(Ordering::Acquire) > 0 {
-                fw.flush_notify.notify_waiters();
-            }
-        }
+        // if let Some(fw) = self.fw.upgrade() {
+        //     // fw.ref_count.fetch_sub(1, Ordering::AcqRel);
+        //     if fw.flush_waiting.load(Ordering::Acquire) > 0 {
+        //         fw.flush_notify.notify_waiters();
+        //     }
+        // }
     }
 }
 
@@ -584,6 +680,8 @@ enum SliceWriterState {
     Flushing,
     // in committing process.
     Committing,
+    // commit finished, we need to remove the slice writer from memory.
+    Done,
 }
 
 impl From<u8> for SliceWriterState {
@@ -594,6 +692,7 @@ impl From<u8> for SliceWriterState {
             2 => SliceWriterState::Dirty,
             3 => SliceWriterState::Flushing,
             4 => SliceWriterState::Committing,
+            5 => SliceWriterState::Done,
             _ => panic!("invalid state"),
         }
     }
@@ -687,6 +786,20 @@ impl SliceWriter {
     }
 
     async fn do_flush_bulk(self: &Arc<Self>, offset: usize) -> Result<()> {
+        defer!({
+            if self
+                .state
+                .compare_exchange(
+                    SliceWriterState::Flushing as u8,
+                    SliceWriterState::Idle as u8,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                panic!("failed to change state from flushing to idle after flush bulk");
+            }
+        });
         self.prepare_slice_id().await?;
         let mut write_guard = self.slice_buffer.write().await;
         write_guard
@@ -702,19 +815,66 @@ impl SliceWriter {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(_internal_seq = self._internal_seq))]
-    async fn flush(self: &Arc<Self>) -> Result<()> {
-        self.prepare_slice_id().await?;
+    #[instrument(skip_all, fields(_internal_seq = self._internal_seq))]
+    async fn flush_and_commit(
+        self: &Arc<Self>,
+        inode: Ino,
+        meta_engine_ref: MetaEngineRef,
+    ) -> Result<()> {
+        self.prepare_slice_id().in_current_span().await?;
+        let slice_id = self.slice_id.load(Ordering::Acquire);
         let mut write_guard = self.slice_buffer.write().await;
-        write_guard
+        if let Err(e) = write_guard
             .flush(
                 |bi, bs| -> String {
                     make_slice_object_key(self.slice_id.load(Ordering::Acquire), bi, bs)
                 },
                 self.data_manager.upgrade().unwrap().object_storage.clone(),
             )
-            .in_current_span()
-            .await?;
+            .await
+        {
+            panic!("flush to object storage blocked, {:?}", e);
+        }
+
+        let len = write_guard.length();
+        drop(write_guard);
+
+        // then the sw is done.
+        // write the meta info of this slice.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            meta_engine_ref.write_slice(
+                inode,
+                self.chunk_index,
+                self.offset_of_chunk,
+                kiseki_types::slice::Slice::Owned {
+                    chunk_pos: self.offset_of_chunk as u32,
+                    id: slice_id,
+                    size: len as u32,
+                    _padding: 0,
+                },
+                self.last_modified.load(),
+            ),
+        )
+        .await
+        .expect("write slice meta info blocked")?;
+
+        let cw = self.chunk_writer.upgrade().unwrap();
+        cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
+        if let Err(e) = self.state.compare_exchange(
+            SliceWriterState::Flushing as u8,
+            SliceWriterState::Done as u8,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            panic!(
+                "failed to change state from flushing to idle after flush, new_current_state: {:?}",
+                SliceWriterState::from(e)
+            );
+        };
+        cw.slice_done_notify.notify_waiters(); // notify the chunk writer to check if we are done.
+        cw.slice_done_notify.notify_one();
+
         Ok(())
     }
 
@@ -728,22 +888,47 @@ impl SliceWriter {
             .data_manager
             .upgrade()
             .expect("data manager should not be dropped");
-        let slice_id = data_manager.meta_engine.next_slice_id().await?;
+        let slice_id = data_manager
+            .meta_engine
+            .next_slice_id()
+            .in_current_span()
+            .await?;
         // don't care about the result, since we only care about the first time.
         let _ = self
             .slice_id
-            .compare_exchange(0, slice_id, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(0, slice_id, Ordering::AcqRel, Ordering::Relaxed);
         Ok(())
     }
 
     // make_flush_req try to make flush req if we write enough data.
-    async fn make_flush_req(self: Arc<Self>, finish: bool) -> Option<FlushReq> {
+    async fn make_flush_req(self: Arc<Self>, seq: bool, finish: bool) -> Option<FlushReq> {
         let state = self.state.load(Ordering::Acquire);
         return match SliceWriterState::from(state) {
-            SliceWriterState::Idle
-            | SliceWriterState::Writing
+            SliceWriterState::Idle => {
+                if finish {
+                    // we should try to commit this slice writer.
+                    if self
+                        .state
+                        .compare_exchange(
+                            SliceWriterState::Idle as u8,
+                            SliceWriterState::Committing as u8,
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        )
+                        .is_err()
+                    {
+                        // someone win the contention. we give up
+                        return None;
+                    }
+                    Some(FlushReq::CommitIdle(self.clone()))
+                } else {
+                    None
+                }
+            }
+            SliceWriterState::Writing
             | SliceWriterState::Flushing
-            | SliceWriterState::Committing => {
+            | SliceWriterState::Committing
+            | SliceWriterState::Done => {
                 // Idle: nothing to flush
                 // Writing: someone take the slice writer again, let him cook
                 // Flushing: already in flushing, let it go.
@@ -752,11 +937,27 @@ impl SliceWriter {
             }
             SliceWriterState::Dirty => {
                 if finish {
+                    if let Err(e) = self.state.compare_exchange(
+                        SliceWriterState::Dirty as u8,
+                        SliceWriterState::Flushing as u8,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    ) {
+                        // someone win the contention. we give up
+                        panic!(
+                            "someone change the state {:?}, we expect {:?}",
+                            SliceWriterState::from(e),
+                            SliceWriterState::Dirty
+                        );
+                    }
                     return Some(FlushReq::FlushFull(self.clone()));
                 }
+
                 let read_guard = self.slice_buffer.read().await;
                 let length = read_guard.length();
                 let flushed_len = read_guard.flushed_length();
+                drop(read_guard);
+
                 if length == CHUNK_SIZE {
                     if self
                         .state
@@ -805,18 +1006,27 @@ impl SliceWriter {
         (flushed_len, write_len)
     }
 
-    async fn commit(self: &Arc<Self>, inode: Ino, meta_engine_ref: MetaEngineRef) -> Result<()> {
+    async fn commit_partitial(
+        self: &Arc<Self>,
+        inode: Ino,
+        meta_engine_ref: MetaEngineRef,
+    ) -> Result<()> {
         let cw = self.chunk_writer.upgrade().unwrap();
         defer!({
             cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
+            if let Err(e) = self.state.compare_exchange(
+                SliceWriterState::Committing as u8,
+                SliceWriterState::Done as u8,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                panic!(
+                    "failed to change state from committing to done, origin: {:?}",
+                    SliceWriterState::from(e)
+                );
+            }
             cw.slice_done_notify.notify_waiters();
         });
-        {
-            let mut write_guard = cw.slice_writers.write().await;
-            if let None = write_guard.remove(&self._internal_seq) {
-                panic!("{} has been removed, should not happen!", self);
-            }
-        }
 
         // write slice meta info to meta engine.
         let slice_id = self.slice_id.load(Ordering::Acquire);

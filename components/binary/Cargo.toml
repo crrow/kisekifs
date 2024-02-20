@@ -12,6 +12,7 @@ fuser.workspace = true
 tokio.workspace = true
 rustix = {workspace = true, features = ["mount"]}
 
+#kiseki-utils = {path = "../../components/utils", features = ["tokio-console"]}
 kiseki-utils = {path = "../../components/utils"}
 kiseki-types = {path = "../../components/types"}
 kiseki-storage = {path = "../../components/storage"}

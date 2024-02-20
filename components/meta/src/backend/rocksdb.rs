@@ -295,11 +295,6 @@ impl Backend for RocksdbBackend {
         let key = key::chunk_slices(inode, chunk_index);
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
         assert!(buf.len() > 0, "slices is empty");
-        debug!(
-            "set_raw_chunk_slices: key: {:?}, slices: {:?}",
-            String::from_utf8_lossy(&key),
-            buf.len()
-        );
         Ok(())
     }
 
