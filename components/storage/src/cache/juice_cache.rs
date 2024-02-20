@@ -46,13 +46,6 @@ use crate::{
     cache::Cache,
     err::{ErrStageNoMoreSpaceSnafu, OpenDalSnafu, Result, UnknownIOSnafu},
 };
-// use crate::vfs::{
-//     err::{
-//         CacheIOSnafu, ErrStageNoMoreSpaceSnafu, FailedToHandleSystimeSnafu,
-// OpenDalSnafu, Result,     },
-//     storage::cache::Cache,
-//     VFSError,
-// };
 
 const CACHE_SIZE_PADDING: usize = 4096;
 const MAX_EXPIRE_CNT: usize = 1000;

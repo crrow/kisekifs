@@ -23,44 +23,10 @@ Kiseki is an independent learning project
 and is not endorsed by or affiliated with the Juice company.
 
 # Implementation
-## Write
-Each write is a slice, the slice size range from [64KiB - 4MiB].
+## Backend of Meta Data
+At present, Rocksdb is chosen as the backend of meta data for developing and test purpose.
+In the future, it will be replaced by a more sophisticated and distributed database.
 
-Cache the slice into the cache, and write the slice into the object store.
-
-## Read
-According to the read range, get the slices.
-
-If the file size less than the min slice size, do fast-path: just read the whole file, 
-and cache it.
-
-Slow path: check the current reading process, each if others is reading the range we wanted also,
-read their data and build req for our self.
-
-So will the following case happen ?
-
-```
-Question, do the following case exists? we need to make a SliceReader for just one bit.
-
-insert slice-reader: 0..512
-insert slice-reader: 520..720
-insert slice-reader: 720..1021
-insert slice-reader: 1021..1022
-insert slice-reader: 1022..1023
-invalidate 720 ~ 1021.
-invalidate 1021 ~ 1022.
-
-expect read: 1020..1024
-
-find gap 1023..1024, need to make req
-want: 1020..1024, overlapping but invalid range 720..1021, cut result: 1020..1021
-want: 1020..1024, overlapping but invalid range 1021..1022, cut result: 1021..1022
-after merge: want: 1020..1024, result: 1020..1022
-after merge: want: 1020..1024, result: 1023..1024
-
-```
-
-
-## Concurrent Behavior
-1. For reading, we don't use lock at all, even if there are someone is writing it.
-2. For writing, we just lock the range.
+## Object Storage
+Choose this [ObjectStorage](https://docs.rs/object_store/latest/object_store/trait.ObjectStore.html#tymethod.put_multipart) 
+rather than [OpenDal]() since the later doesn't support multipart upload or append write operation. 

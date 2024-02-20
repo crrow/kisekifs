@@ -5,7 +5,7 @@ use std::{
 
 use kiseki_common::FH;
 use kiseki_meta::MetaEngineRef;
-use kiseki_storage::cache::CacheRef;
+// use kiseki_storage::cache::CacheRef;
 use kiseki_types::ino::Ino;
 use kiseki_utils::object_storage::ObjectStorage;
 use snafu::OptionExt;
@@ -32,7 +32,7 @@ pub(crate) struct DataManager {
     // Dependencies
     pub(crate) meta_engine: MetaEngineRef,
     pub(crate) object_storage: ObjectStorage,
-    pub(crate) data_cache: CacheRef,
+    // pub(crate) data_cache: CacheRef,
 }
 
 impl DataManager {
@@ -42,7 +42,7 @@ impl DataManager {
         chunk_size: usize,
         meta_engine_ref: MetaEngineRef,
         object_storage: ObjectStorage,
-        cache_ref: CacheRef,
+        // cache_ref: CacheRef,
     ) -> Self {
         Self {
             page_size,
@@ -53,7 +53,7 @@ impl DataManager {
             id_generator: Arc::new(sonyflake::Sonyflake::new().unwrap()),
             meta_engine: meta_engine_ref,
             object_storage,
-            data_cache: cache_ref,
+            // data_cache: cache_ref,
         }
     }
 

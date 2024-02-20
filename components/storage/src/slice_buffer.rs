@@ -1,3 +1,4 @@
+use bytes::Buf;
 use std::{
     cmp::{max, min},
     io::Cursor,
@@ -9,11 +10,14 @@ use std::{
 
 use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
 use kiseki_types::slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID};
+use kiseki_utils::object_storage::ObjectStoragePath;
 use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use snafu::ResultExt;
 use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
 use tracing::{debug, instrument, Instrument};
 
+use crate::err::Error::ObjectStorageError;
+use crate::err::ObjectStorageSnafu;
 use crate::{
     err::{InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu},
     pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
@@ -65,7 +69,11 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
         total_read_len += current_block_to_read_len;
 
         let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
-            let block_buf = sto.read(&key).await.context(OpenDalSnafu)?;
+            let path = kiseki_utils::object_storage::ObjectStoragePath::parse(&key).unwrap();
+            let block = sto.get(&path).await.context(ObjectStorageSnafu)?;
+            let block_buf = block.bytes().await.context(ObjectStorageSnafu)?;
+
+            // let block_buf = sto.read(&key).await.context(OpenDalSnafu)?;
             let mut cursor = Cursor::new(dst_slice);
             let n = cursor
                 .write(&block_buf[block_offset..block_offset + current_block_to_read_len])
@@ -379,9 +387,15 @@ impl SliceBuffer {
                 let sto = object_storage.clone();
                 let total_released_page_cnt = total_released_page_cnt.clone();
                 let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
-                    let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
+                    let path = ObjectStoragePath::parse(&key).unwrap();
+                    let (_id, mut writer) =
+                        sto.put_multipart(&path).await.context(ObjectStorageSnafu)?;
+                    // let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
                     let total_flush_data = data_block.length;
                     let mut current_flush_data = 0;
+                    // let mut object_block_buf = vec![0u8; total_flush_data];
+                    // let mut cursor = Cursor::new(&mut object_block_buf);
+
                     while current_flush_data < total_flush_data {
                         let page_idx = current_flush_data / PAGE_SIZE;
                         let page_offset = current_flush_data % PAGE_SIZE;
@@ -394,17 +408,38 @@ impl SliceBuffer {
                                 for _ in 0..to_flush_len {
                                     writer.write_u8(0).await.context(UnknownIOSnafu)?;
                                 }
+                                // cursor.advance(to_flush_len);
+                                // writer
+                                //     .write_all(&vec![0u8; to_flush_len])
+                                //     .await
+                                //     .context(UnknownIOSnafu)?;
                             }
                             Some(page) => {
                                 total_released_page_cnt.fetch_add(1, Ordering::AcqRel);
                                 page.copy_to_writer(page_offset, to_flush_len, &mut writer)
-                                    .await?;
+                                    .await?
                             }
                         }
                         current_flush_data += to_flush_len;
                     }
-                    writer.close().await.context(OpenDalSnafu)?;
-                    debug!("write object to {:?}", key);
+                    // writer.close().await.context(OpenDalSnafu)?;
+                    // sto.write_with(&key, object_block_buf)
+                    //     .concurrent(2)
+                    //     .await
+                    //     .context(OpenDalSnafu)?;
+                    if let Err(e) = writer.flush().await {
+                        panic!(
+                            "close writer failed: {:?}, expect flush len: {}",
+                            e,
+                            ReadableSize(total_flush_data as u64).to_string()
+                        );
+                    }
+                    writer.shutdown().await.context(UnknownIOSnafu)?;
+                    debug!(
+                        "write object to {:?}, len: {:?}",
+                        key,
+                        ReadableSize(total_flush_data as u64).to_string()
+                    );
                     Ok(())
                 });
                 handle
@@ -529,7 +564,7 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt, TryStreamExt};
-    use kiseki_utils::{logger::install_fmt_log, object_storage::new_mem_object_storage};
+    use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
     use tracing::info;
 
     use super::*;
@@ -624,8 +659,7 @@ mod tests {
             key
         };
 
-        let root = &format!("{}", my_id);
-        let object_sto = new_mem_object_storage(root);
+        let object_sto = new_memory_object_store();
 
         slice_buffer
             .flush_bulk(key_gen, object_sto.clone())
@@ -650,7 +684,7 @@ mod tests {
 
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-        // we should be able to write the next block
+                                                                               // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await
@@ -691,9 +725,9 @@ mod tests {
         assert_eq!(slice_buffer.flushed_length, BLOCK_SIZE * 3 + 3);
         assert_eq!(slice_buffer.total_page_cnt, 0);
 
-        let mut lister = object_sto.lister("").await.unwrap();
-        while let Some(entry) = lister.try_next().await.unwrap() {
-            info!("entry: {:?}", entry.path());
+        let mut lister = object_sto.list(None);
+        while let Some(entry) = lister.next().await.transpose().unwrap() {
+            info!("entry: {:?}", entry.location);
         }
     }
 
@@ -715,8 +749,7 @@ mod tests {
             key
         };
 
-        let root = &format!("{}", my_id);
-        let object_sto = new_mem_object_storage(root);
+        let object_sto = new_memory_object_store();
 
         let mut slice_buffer = SliceBuffer::new();
         let data = b"hello world".as_slice();

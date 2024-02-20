@@ -455,6 +455,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-targets 0.52.0",
 ]
@@ -911,6 +912,12 @@ checksum = "442039f5147480ba31067cb00ada1adae6892028e40e45fc5de7b7df6dcc1b5f"
 dependencies = [
  "const-random",
 ]
+
+[[package]]
+name = "doc-comment"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dotenvy"
@@ -1698,7 +1705,7 @@ dependencies = [
  "procfs 0.16.0",
  "regex",
  "rustix 0.38.30",
- "snafu",
+ "snafu 0.8.0",
  "tokio",
  "tracing",
 ]
@@ -1722,7 +1729,7 @@ dependencies = [
  "kiseki-utils",
  "kiseki-vfs",
  "libc",
- "snafu",
+ "snafu 0.8.0",
  "tokio",
  "tracing",
 ]
@@ -1750,7 +1757,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
- "snafu",
+ "snafu 0.8.0",
  "sonyflake",
  "strum",
  "strum_macros",
@@ -1787,7 +1794,7 @@ dependencies = [
  "rustix 0.38.30",
  "scopeguard",
  "serde",
- "snafu",
+ "snafu 0.8.0",
  "sonyflake",
  "tempfile",
  "tokio",
@@ -1812,7 +1819,7 @@ dependencies = [
  "opendal",
  "rangemap",
  "serde",
- "snafu",
+ "snafu 0.8.0",
  "sonyflake",
  "tokio-util",
  "tracing",
@@ -1823,13 +1830,14 @@ name = "kiseki-utils"
 version = "0.1.0"
 dependencies = [
  "backtrace",
+ "bytes",
  "console-subscriber",
  "dotenvy",
  "kiseki-common",
  "lazy_static",
  "num_cpus",
+ "object_store",
  "once_cell",
- "opendal",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
@@ -1841,7 +1849,7 @@ dependencies = [
  "sentry",
  "sentry-tracing",
  "serde",
- "snafu",
+ "snafu 0.8.0",
  "sonyflake",
  "supports-color",
  "syn 1.0.109",
@@ -1854,6 +1862,7 @@ dependencies = [
  "tracing-core",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
  "users",
 ]
 
@@ -1878,7 +1887,7 @@ dependencies = [
  "rangemap",
  "scopeguard",
  "serde",
- "snafu",
+ "snafu 0.8.0",
  "sonyflake",
  "tempfile",
  "tokio",
@@ -2284,6 +2293,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6a622008b6e321afc04970976f62ee297fdbaa6f95318ca343e3eebb9648441"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "object_store"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d139f545f64630e2e3688fd9f81c470888ab01edeb72d13b4e86c566f1130000"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "futures",
+ "humantime",
+ "hyper",
+ "itertools 0.12.1",
+ "parking_lot 0.12.1",
+ "percent-encoding",
+ "quick-xml 0.31.0",
+ "rand 0.8.5",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "snafu 0.7.5",
+ "tokio",
+ "tracing",
+ "url",
+ "walkdir",
 ]
 
 [[package]]
@@ -3820,11 +3858,33 @@ checksum = "2593d31f82ead8df961d8bd23a64c2ccf2eb5dd34b0a34bfb4dd54011c72009e"
 
 [[package]]
 name = "snafu"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4de37ad025c587a29e8f3f5605c00f70b98715ef90b9061a815b9e59e9042d6"
+dependencies = [
+ "doc-comment",
+ "snafu-derive 0.7.5",
+]
+
+[[package]]
+name = "snafu"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d342c51730e54029130d7dc9fd735d28c4cd360f1368c01981d4f03ff207f096"
 dependencies = [
- "snafu-derive",
+ "snafu-derive 0.8.0",
+]
+
+[[package]]
+name = "snafu-derive"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "990079665f075b699031e9c08fd3ab99be5029b96f3b78dc0709e8f77e4efebf"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

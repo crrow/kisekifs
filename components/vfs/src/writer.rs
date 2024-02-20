@@ -28,7 +28,7 @@ use kiseki_common::{
     cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE, FH,
 };
 use kiseki_meta::MetaEngineRef;
-use kiseki_storage::{cache::CacheRef, slice_buffer::SliceBuffer};
+use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     ino::Ino,
     slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
@@ -438,11 +438,11 @@ impl FileWriterFlusher {
                                                 error!("{ino} failed to flush bulk {e}");
                                             }
                                         }
-                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                            // we should not wait for the flush to finish.
-                                            // we should just commit the slice writer.
-                                            panic!("flush full is timeout");
-                                        }
+                                        // _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                        //     // we should not wait for the flush to finish.
+                                        //     // we should just commit the slice writer.
+                                        //     panic!("flush full is timeout");
+                                        // }
                                         _ = cancel_token.cancelled() => {
                                             return;
                                         }
@@ -460,11 +460,11 @@ impl FileWriterFlusher {
                                                 panic!("{ino} failed to flush full {e}");
                                             }
                                         }
-                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                            // we should not wait for the flush to finish.
-                                            // we should just commit the slice writer.
-                                            panic!("flush full is timeout");
-                                        }
+                                        // _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                        //     // we should not wait for the flush to finish.
+                                        //     // we should just commit the slice writer.
+                                        //     panic!("flush full is timeout");
+                                        // }
                                         _ = cancel_token.cancelled() => {
                                             debug!("{ino} flush full is cancelled");
                                             return;
@@ -535,14 +535,14 @@ impl ChunkWriter {
                     return (sw.clone(), old_state);
                 } else if idx >= 3 {
                     // try to flush in advance
-                    let sw = sw.clone();
-                    let req = sw.make_flush_req(fw.pattern.is_seq(), true).await;
-                    if let Some(req) = req {
-                        if let Err(e) = fw.slice_flush_queue.send(req).await {
-                            panic!("failed to send flush request {e}");
-                        }
-                    }
-                    continue;
+                    // let sw = sw.clone();
+                    // let req = sw.make_flush_req(fw.pattern.is_seq(), true).await;
+                    // if let Some(req) = req {
+                    //     if let Err(e) = fw.slice_flush_queue.send(req).await {
+                    //         panic!("failed to send flush request {e}");
+                    //     }
+                    // }
+                    // continue;
                 }
             }
         }
@@ -944,7 +944,7 @@ impl SliceWriter {
                         return None;
                     }
                     Some(FlushReq::FlushFull(self.clone()))
-                } else if length - flushed_len >= BLOCK_SIZE {
+                } else if length - flushed_len >= BLOCK_SIZE && !seq {
                     if self
                         .state
                         .compare_exchange(

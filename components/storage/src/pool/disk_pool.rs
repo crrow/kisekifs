@@ -135,9 +135,10 @@ impl Page {
         let mut reader = guard
             .range_reader(self.page_id as usize * self.pool.page_size + offset, length)
             .context(DiskPoolMmapSnafu)?;
-        tokio::io::copy(&mut reader, writer)
+        let copy_len = tokio::io::copy(&mut reader, writer)
             .await
             .context(UnknownIOSnafu)?;
+        debug_assert_eq!(copy_len as usize, length);
         Ok(())
     }
 
@@ -154,9 +155,10 @@ impl Page {
         let mut writer = guard
             .range_writer(self.cal_offset() + offset, length)
             .context(DiskPoolMmapSnafu)?;
-        tokio::io::copy(reader, &mut writer)
+        let copy_len = tokio::io::copy(reader, &mut writer)
             .await
             .context(UnknownIOSnafu)?;
+        assert_eq!(copy_len as usize, length);
         Ok(())
     }
 

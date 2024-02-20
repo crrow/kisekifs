@@ -14,6 +14,13 @@ pub enum Error {
         location: Location,
         source: opendal::Error,
     },
+
+    ObjectStorageError {
+        #[snafu(implicit)]
+        location: Location,
+        source: kiseki_utils::object_storage::ObjectStorageError,
+    },
+
     StorageError {
         source: kiseki_storage::err::Error,
     },

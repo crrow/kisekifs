@@ -21,7 +21,7 @@ serde = "1.0.195"
 serde_json = "1.0.111"
 criterion = {  version = "0.5.1", features = ["async_tokio","async_futures"] }
 lazy_static = "1.4.0"
-opendal = { version = "0.45.0", features = ["services-sled"]}
+opendal = { version = "0.45.0", features = ["services-sled", "services-s3"]}
 futures = "0.3.30"
 sonyflake = "0.2.0"
 byteorder = "1.5.0"
@@ -42,6 +42,7 @@ bitflags = "2.4.2"
 scopeguard = "1.2.0"
 rustix = "0.38.30"
 rand = "0.8.5"
+
 
 [package]
 name = "kiseki"
