@@ -144,9 +144,10 @@ impl Page {
         let data = data.value();
         let slice = &data.as_slice()[offset..offset + length];
         let mut cursor = Cursor::new(slice);
-        tokio::io::copy(&mut cursor, writer)
+        let copy_len = tokio::io::copy(&mut cursor, writer)
             .await
             .context(UnknownIOSnafu)?;
+        debug_assert_eq!(copy_len as usize, length);
         Ok(())
     }
     pub(crate) async fn copy_from_reader<R>(
@@ -161,9 +162,10 @@ impl Page {
         let mut data = self._pool.pages.get_mut(&self.page_id).unwrap();
         let slice = &mut data.as_mut_slice()[offset..offset + length];
         let mut cursor = Cursor::new(slice);
-        tokio::io::copy(reader, &mut cursor)
+        let copy_len = tokio::io::copy(reader, &mut cursor)
             .await
             .context(UnknownIOSnafu)?;
+        debug_assert_eq!(copy_len as usize, length);
         Ok(())
     }
 

@@ -391,19 +391,27 @@ impl SliceBuffer {
                         );
                         match &data_block.pages[page_idx] {
                             None => {
-                                for _ in 0..to_flush_len {
-                                    writer.write_u8(0).await.context(UnknownIOSnafu)?;
-                                }
+                                writer
+                                    .write_all(&vec![0u8; to_flush_len])
+                                    .await
+                                    .context(UnknownIOSnafu)?;
                             }
                             Some(page) => {
                                 total_released_page_cnt.fetch_add(1, Ordering::AcqRel);
                                 page.copy_to_writer(page_offset, to_flush_len, &mut writer)
-                                    .await?;
+                                    .await?
                             }
                         }
                         current_flush_data += to_flush_len;
                     }
-                    writer.close().await.context(OpenDalSnafu)?;
+                    // writer.close().await.context(OpenDalSnafu)?;
+                    if let Err(e) = writer.close().await {
+                        panic!(
+                            "close writer failed: {:?}, expect flush len: {}",
+                            e,
+                            ReadableSize(total_flush_data as u64).to_string()
+                        );
+                    }
                     debug!("write object to {:?}", key);
                     Ok(())
                 });
@@ -650,7 +658,7 @@ mod tests {
 
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-        // we should be able to write the next block
+                                                                               // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await

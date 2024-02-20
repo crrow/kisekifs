@@ -36,3 +36,55 @@ pub fn new_sled_store<P: AsRef<Path>>(path: P) -> Result<ObjectStorage, opendal:
     let obj = Operator::new(builder)?.finish();
     Ok(obj)
 }
+
+pub fn new_minio_store<P: AsRef<Path>>(path: P) -> Result<ObjectStorage, opendal::Error> {
+    // Create s3 backend builder.
+    let mut builder = opendal::services::S3::default();
+    // Set the root for s3, all operations will happen under this root.
+    //
+    // NOTE: the root must be absolute path.
+    builder.root(path.as_ref().to_string_lossy().as_ref());
+    // Set the bucket name. This is required.
+    builder.bucket("test");
+    // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
+    builder.region("auto");
+    // Set the endpoint.
+    //
+    // For examples:
+    // - "https://s3.amazonaws.com"
+    // - "http://127.0.0.1:9000"
+    // - "https://oss-ap-northeast-1.aliyuncs.com"
+    // - "https://cos.ap-seoul.myqcloud.com"
+    //
+    // Default to "https://s3.amazonaws.com"
+    builder.endpoint("http://127.0.0.1:9000");
+    // Set the access_key_id and secret_access_key.
+    //
+    // OpenDAL will try load credential from the env.
+    // If credential not set and no valid credential in env, OpenDAL will
+    // send request without signing like anonymous user.
+    builder.access_key_id("minioadmin");
+    builder.secret_access_key("minioadmin");
+
+    let op: Operator = Operator::new(builder)?.finish();
+    Ok(op)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn s3() {
+        let op = new_minio_store("/tmp/kiseki.data").unwrap();
+        let key = "test";
+        let data = b"hello world";
+        let mut writer = op.writer(key).await.unwrap();
+        writer.write(data.as_slice()).await.unwrap();
+        writer.write(data.as_slice()).await.unwrap();
+        writer.close().await.unwrap();
+
+        let res = op.read(key).await.unwrap();
+        assert_eq!(res.as_slice(), data.as_slice());
+    }
+}

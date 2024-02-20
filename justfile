@@ -94,6 +94,12 @@ alias sh-f := help-format
 @help-format:
     cargo run --color=always --bin kiseki help format
 
+# ==================================================== MinIO
+
+@minio:
+    docker run -p 9000:9000 -p 9001:9001 \
+      quay.io/minio/minio server /data --console-address ":9001"
+
 # ==================================================== fio test
 
 @clean:
