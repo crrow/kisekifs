@@ -15,7 +15,7 @@ members = [
 snafu = "0.8.0"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-tokio = { version = "1.35.1", features = ["full"]}
+tokio = { version = "1.35.1", features = ["full", "tracing"]}
 features = { version = "0.10.0"}
 serde = "1.0.195"
 serde_json = "1.0.111"
@@ -55,9 +55,12 @@ autobenches = false
 
 [profile.release]
 debug = true
+panic = 'abort'
+
 
 [lib]
 bench = false
 
 [dependencies]
+
 

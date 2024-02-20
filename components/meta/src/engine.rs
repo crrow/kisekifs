@@ -1,5 +1,6 @@
 use std::{
     cmp::{max, min},
+    collections::HashSet,
     fmt::{Display, Formatter},
     ops::Add,
     path::{Component, Path},
@@ -10,8 +11,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use bitflags::bitflags;
 use crossbeam::{atomic::AtomicCell, channel::at};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
 use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::{
@@ -24,10 +26,13 @@ use kiseki_types::{
     stat::{DirStat, FSStat},
     FileType,
 };
-
 use scopeguard::defer;
+use serde::Serialize;
 use snafu::{ensure, ResultExt};
-use tokio::time::{timeout, Instant};
+use tokio::{
+    sync::RwLock,
+    time::{timeout, Instant},
+};
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::{
@@ -44,13 +49,14 @@ pub type MetaEngineRef = Arc<MetaEngine>;
 pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
     let backend = open_backend(&config.dsn)?;
     let format = backend.load_format()?;
+    let open_files = OpenFiles::new(config.open_cache, config.open_cache_limit);
 
     let me = MetaEngine {
-        open_files: OpenFiles::new(config.open_cache, config.open_cache_limit),
         config,
         format,
         root: ROOT_INO,
-        sub_trash: None,
+        open_files,
+        removed_files: Default::default(),
         dir_parents: Default::default(),
         fs_stat: Default::default(),
         dir_stats: Default::default(),
@@ -65,8 +71,8 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
 }
 
 // update_format is used to change the file system's setting.
-pub fn update_format(dsn: String, format: Format, force: bool) -> Result<()> {
-    let backend = open_backend(&dsn)?;
+pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
+    let backend = open_backend(dsn)?;
 
     let mut need_init_root = false;
     match backend.load_format() {
@@ -120,8 +126,10 @@ pub struct MetaEngine {
     config: MetaConfig,
     format: Format,
     root: Ino,
-    sub_trash: Option<InternalNode>,
+
     open_files: OpenFiles,
+    removed_files: RwLock<HashSet<Ino>>,
+
     dir_parents: DashMap<Ino, Ino>,
     fs_stat: AtomicCell<FSStat>,
     dir_stats: DashMap<Ino, DirStat>,
@@ -145,6 +153,7 @@ impl MetaEngine {
         &self.format
     }
 
+    #[instrument(skip(self))]
     pub async fn next_slice_id(&self) -> Result<SliceID> {
         self.free_slices.next().await
     }
@@ -243,7 +252,7 @@ impl MetaEngine {
         let inode = self.check_root(inode);
         // check cache
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.check(inode) {
+            if let Some(attr) = self.open_files.check(inode).await {
                 return Ok(attr);
             }
         }
@@ -252,7 +261,7 @@ impl MetaEngine {
         let mut attr = self.backend.get_attr(inode)?;
 
         // update cache
-        self.open_files.update(inode, &mut attr);
+        self.open_files.update(inode, &mut attr).await;
         if attr.is_filetype(FileType::Directory) && !inode.is_root() && !attr.parent.is_trash() {
             self.dir_parents.insert(inode, attr.parent);
         }
@@ -582,7 +591,7 @@ impl MetaEngine {
             Err(e) => return Err(e),
         };
 
-        self.open_files.open(x.0, &mut x.1);
+        self.open_files.open(x.0, &mut x.1).await;
         Ok(x)
     }
     pub async fn check_set_attr(
@@ -769,7 +778,7 @@ impl MetaEngine {
         defer!(self.refresh_atime(ctx, inode));
 
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.open_check(inode) {
+            if let Some(attr) = self.open_files.open_check(inode).await {
                 return Ok(attr);
             }
         }
@@ -801,7 +810,7 @@ impl MetaEngine {
                 LibcSnafu { errno: libc::EPERM }.fail()?;
             }
         }
-        self.open_files.open(inode, &mut attr);
+        self.open_files.open(inode, &mut attr).await;
         Ok(attr)
     }
 
@@ -822,7 +831,7 @@ impl MetaEngine {
             "slice should be owned for writing slice"
         );
         debug!(
-            "write-slice: with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
+            "write_slice: with inode {:?}, chunk_idx {:?}, off {:?}, slice_id {:?}, mtime {:?}",
             inode, chunk_idx, chunk_pos, slice, mtime
         );
 
@@ -851,7 +860,7 @@ impl MetaEngine {
         let now = SystemTime::now();
         attr.mtime = now;
         attr.ctime = now;
-        let val = slice.encode();
+        let val = bincode::serialize(&slice).unwrap();
         if slices_buf.eq(&val) {
             warn!(
                 "{inode} try to write the same slice {:?} at {chunk_idx}",
@@ -872,7 +881,8 @@ impl MetaEngine {
         self.update_parent_stats(inode, attr.parent, dir_stat_length, dir_stat_space)?;
 
         // TODO: update the cache
-        if let Some(mut open_file) = self.open_files.files.get_mut(&inode) {
+        let mut write_guard = self.open_files.files.write().await;
+        if let Some(mut open_file) = write_guard.get_mut(&inode) {
             // invalidate the cache.
             open_file.chunks.remove(&chunk_idx);
         }
@@ -935,7 +945,7 @@ impl MetaEngine {
     #[allow(clippy::too_many_arguments)]
     pub async fn set_lk(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         inode: Ino,
         owner: u64,
         block: bool,
@@ -959,8 +969,8 @@ impl MetaEngine {
         );
 
         // TODO: update access time
-
-        if let Some(of) = self.open_files.files.get_mut(&inode) {
+        let read_guard = self.open_files.files.read().await;
+        if let Some(of) = read_guard.get(&inode) {
             if let Some(svs) = of.chunks.get(&chunk_index) {
                 debug!(
                     "read ino {} chunk {} slice info from cache, get count {}",
@@ -989,5 +999,81 @@ impl MetaEngine {
             .update_chunk_slices_info(inode, chunk_index, slices.clone());
 
         Ok(Some(slices))
+    }
+
+    // Fallocate preallocate given space for given file.
+    pub async fn fallocate(
+        &self,
+        inode: Ino,
+        offset: usize,
+        length: usize,
+        mode: u8,
+    ) -> Result<()> {
+        let mode = FallocateMode::from_bits(mode).expect("invalid fallocate mode");
+        if mode.contains(FallocateMode::COLLAPSE_RANGE) && mode != FallocateMode::COLLAPSE_RANGE {
+            LibcSnafu {
+                errno: libc::EINVAL,
+            }
+            .fail()?;
+        }
+        if mode.contains(FallocateMode::INSERT_RANGE) && mode != FallocateMode::INSERT_RANGE {
+            LibcSnafu {
+                errno: libc::EINVAL,
+            }
+            .fail()?;
+        }
+        if mode == FallocateMode::INSERT_RANGE || mode == FallocateMode::COLLAPSE_RANGE {
+            LibcSnafu {
+                errno: libc::ENOTSUP,
+            }
+            .fail()?;
+        }
+        if mode.contains(FallocateMode::PUNCH_HOLE) && mode.contains(FallocateMode::KEEP_SIZE) {
+            LibcSnafu {
+                errno: libc::EINVAL,
+            }
+            .fail()?;
+        }
+
+        todo!()
+    }
+
+    pub async fn flock(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        owner: u64,
+        ltype: libc::c_int,
+    ) -> Result<()> {
+        debug!(
+            "TO IMPLEMENT: flock with inode {:?}, owner {:?}, ltype {:?}",
+            inode, owner, ltype
+        );
+        Ok(())
+    }
+
+    // Close a file.
+    pub async fn close(&self, inode: Ino) -> Result<()> {
+        if self.open_files.close(inode).await {
+            let mut write_guard = self.removed_files.write().await;
+            if write_guard.remove(&inode) {
+                // TODO: doDeleteSustainedInode
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallocateMode(pub u8);
+
+bitflags! {
+    impl FallocateMode: u8 {
+        const KEEP_SIZE = 0x01;
+        const PUNCH_HOLE = 0x02;
+        const NO_HIDE_STALE = 0x04;
+        const COLLAPSE_RANGE = 0x08;
+        const ZERO_RANGE = 0x10;
+        const INSERT_RANGE = 0x20;
     }
 }

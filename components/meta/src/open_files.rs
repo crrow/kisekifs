@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use dashmap::DashMap;
 use kiseki_types::{attr::InodeAttr, ino::Ino, slice::Slices};
+use tokio::sync::RwLock;
 
 pub(crate) struct OpenFile {
     pub attr: InodeAttr,
@@ -13,7 +13,7 @@ pub(crate) struct OpenFile {
 pub(crate) struct OpenFiles {
     ttl: Duration,
     limit: usize,
-    pub(crate) files: DashMap<Ino, OpenFile>,
+    pub(crate) files: RwLock<HashMap<Ino, OpenFile>>,
     // TODO: background clean up
 }
 
@@ -26,8 +26,9 @@ impl OpenFiles {
         }
     }
 
-    pub(crate) fn check(&self, ino: Ino) -> Option<InodeAttr> {
-        self.files.get(&ino).and_then(|f| {
+    pub(crate) async fn check(&self, ino: Ino) -> Option<InodeAttr> {
+        let read_guard = self.files.read().await;
+        read_guard.get(&ino).and_then(|f| {
             if f.last_check.elapsed() < self.ttl {
                 Some(f.attr.clone())
             } else {
@@ -36,8 +37,9 @@ impl OpenFiles {
         })
     }
 
-    pub(crate) fn update(&self, ino: Ino, attr: &mut InodeAttr) -> bool {
-        self.files
+    pub(crate) async fn update(&self, ino: Ino, attr: &mut InodeAttr) -> bool {
+        let mut write_guard = self.files.write().await;
+        write_guard
             .get_mut(&ino)
             .map(|mut open_file| {
                 if attr.mtime != open_file.attr.mtime {
@@ -51,10 +53,12 @@ impl OpenFiles {
             })
             .is_some()
     }
-    pub(crate) fn open(&self, inode: Ino, attr: &mut InodeAttr) {
-        match self.files.get_mut(&inode) {
+
+    pub(crate) async fn open(&self, inode: Ino, attr: &mut InodeAttr) {
+        let mut write_guard = self.files.write().await;
+        match write_guard.get_mut(&inode) {
             None => {
-                self.files.insert(
+                write_guard.insert(
                     inode,
                     OpenFile {
                         attr: attr.keep_cache().clone(),
@@ -65,7 +69,6 @@ impl OpenFiles {
                 );
             }
             Some(mut op) => {
-                let op = op.value_mut();
                 if op.attr.mtime == attr.mtime {
                     attr.keep_cache = op.attr.keep_cache;
                 }
@@ -76,9 +79,9 @@ impl OpenFiles {
         }
     }
 
-    pub(crate) fn open_check(&self, ino: Ino) -> Option<InodeAttr> {
-        if let Some(mut of) = self.files.get_mut(&ino) {
-            let of = of.value_mut();
+    pub(crate) async fn open_check(&self, ino: Ino) -> Option<InodeAttr> {
+        let mut write_guard = self.files.write().await;
+        if let Some(mut of) = write_guard.get_mut(&ino) {
             if of.last_check.elapsed() < self.ttl {
                 of.reference_count += 1;
                 return Some(of.attr.clone());
@@ -88,10 +91,25 @@ impl OpenFiles {
         None
     }
 
-    pub(crate) fn update_chunk_slices_info(&self, ino: Ino, chunk_idx: usize, views: Arc<Slices>) {
-        if let Some(mut of) = self.files.get_mut(&ino) {
-            let of = of.value_mut();
+    pub(crate) async fn update_chunk_slices_info(
+        &self,
+        ino: Ino,
+        chunk_idx: usize,
+        views: Arc<Slices>,
+    ) {
+        let mut write_guard = self.files.write().await;
+        if let Some(mut of) = write_guard.get_mut(&ino) {
             of.chunks.insert(chunk_idx, views);
         }
+    }
+
+    /// close a file
+    pub(crate) async fn close(&self, ino: Ino) -> bool {
+        let mut write_guard = self.files.write().await;
+        if let Some(mut of) = write_guard.get_mut(&ino) {
+            of.reference_count -= 1;
+            return of.reference_count <= 0;
+        }
+        true
     }
 }

@@ -3,6 +3,7 @@ use std::{
     time::SystemTime,
 };
 
+use kiseki_common::FH;
 use kiseki_meta::MetaEngineRef;
 use kiseki_storage::cache::CacheRef;
 use kiseki_types::ino::Ino;
@@ -56,18 +57,13 @@ impl DataManager {
         }
     }
 
-    /// Checks whether the file handle is writable.
-    pub(crate) fn file_writer_exists(&self, ino: Ino) -> bool {
-        self.file_writers.contains_key(&ino)
-    }
-
     pub(crate) fn find_file_writer(&self, ino: Ino) -> Option<Arc<FileWriter>> {
         self.file_writers.get(&ino).map(|r| r.value().clone())
     }
 
     pub(crate) fn get_length(self: &Arc<Self>, ino: Ino) -> u64 {
         self.file_writers
-            .get(&ino)
+            .get(&(ino))
             .map_or(0, |w| w.value().get_length() as u64)
     }
 

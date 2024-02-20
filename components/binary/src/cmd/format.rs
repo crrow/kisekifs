@@ -104,7 +104,7 @@ impl FormatArgs {
             .clone()
             .expect("meta_dsn should be validated in the argument parser");
         let format = self.generate_format();
-        kiseki_meta::update_format(dsn, format, true).unwrap();
+        kiseki_meta::update_format(&dsn, format, true).unwrap();
         info!("format file system {:?} success", self.name);
         Ok(())
     }

@@ -1,6 +1,9 @@
 use std::{
     cmp::min,
-    sync::{atomic::AtomicBool, Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
 };
 
 use dashmap::DashMap;
@@ -43,8 +46,8 @@ impl DataManager {
             .or_insert_with(|| {
                 let fr = FileReader {
                     data_engine: Arc::downgrade(&self),
-                    fh,
                     ino: inode,
+                    fh,
                     length,
                     chunks: Default::default(),
                     closing: Default::default(),
@@ -55,18 +58,11 @@ impl DataManager {
             .clone()
     }
 
-    pub(crate) fn find_file_reader(
-        self: &Arc<Self>,
-        inode: Ino,
-        fh: FH,
-    ) -> Option<Arc<FileReader>> {
-        self.file_readers
-            .get(&(inode, fh))
-            .map(|m| m.value().clone())
-    }
-
     pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
-        debug!("DO NOTHING: truncate inode {} to {}", inode, length);
+        debug!(
+            "DO NOTHING: truncate reader: {:?}, length: {}",
+            inode, length
+        );
     }
 }
 
@@ -77,10 +73,9 @@ pub(crate) type FileReadersRef = Arc<DashMap<(Ino, FH), Arc<FileReader>>>;
 #[derive(Debug)]
 pub(crate) struct FileReader {
     data_engine: Weak<DataManager>,
-    // The file handle.
-    fh: FH,
     // The file inode.
     ino: Ino,
+    fh: FH,
     // The max file read length, it was set when we crate the file handle.
     length: usize,
     // A file be divided into multiple chunks,
@@ -153,7 +148,7 @@ impl FileReader {
             // make a virtual slice map to record the slice and hole.
             let mut virtual_slice_map = RangeMap::new();
             {
-                let overlap = raw_slices.overlook();
+                // let overlap = raw_slices.overlook();
                 // let overlap_slices = overlap.iter().collect_vec();
                 // println!("overlap_slices: {:?}", overlap_slices);
             }
@@ -200,6 +195,23 @@ impl FileReader {
         }
 
         Ok(total_read_len)
+    }
+
+    pub(crate) fn close(self: &Arc<Self>) {
+        if self
+            .closing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            debug!("someone else win the close contention: {:?}", self.ino);
+            return;
+        }
+
+        let engine = self
+            .data_engine
+            .upgrade()
+            .expect("engine should not be dropped");
+        engine.file_readers.remove(&(self.ino, self.fh));
     }
 }
 
@@ -271,7 +283,7 @@ mod tests {
 
         let meta_config = MetaConfig::default();
         let format = Format::default();
-        kiseki_meta::update_format(meta_config.dsn.clone(), format.clone(), true).unwrap();
+        kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
 
         let meta_engine = kiseki_meta::open(meta_config).unwrap();
         let fuse_ctx = FuseContext::background();
@@ -291,7 +303,7 @@ mod tests {
             cache,
         ));
 
-        data_manager.new_file_writer(inode, 0);
+        data_manager.open_file_writer(inode, 0);
         let data = b"hello world" as &[u8];
 
         let write_len = data_manager
@@ -301,7 +313,7 @@ mod tests {
             .unwrap();
 
         let fw = data_manager.find_file_writer(inode).unwrap();
-        fw.flush().await.unwrap();
+        fw.finish().await.unwrap();
 
         let file_reader = data_manager.new_file_reader(inode, 0, write_len);
 
@@ -319,7 +331,7 @@ mod tests {
             .unwrap();
         assert_eq!(write_len, data.len());
 
-        fw.flush().await.unwrap();
+        fw.finish().await.unwrap();
 
         let mut read_data = vec![0u8; 11];
 

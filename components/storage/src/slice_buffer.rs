@@ -96,62 +96,6 @@ fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: Block
     min(length - block_idx * block_size, block_size)
 }
 
-pub struct SliceBufferWrapper {
-    slice_id: SliceID,
-    inner: SliceBuffer,
-    object_storage: ObjectStorage,
-}
-
-impl SliceBufferWrapper {
-    pub fn new(object_storage: ObjectStorage) -> Self {
-        Self {
-            slice_id: EMPTY_SLICE_ID,
-            inner: SliceBuffer::new(),
-            object_storage,
-        }
-    }
-    pub fn set_slice_id(&mut self, sid: SliceID) {
-        self.slice_id = sid;
-    }
-
-    pub fn get_slice_id(&self) -> SliceID {
-        self.slice_id
-    }
-
-    pub async fn write_at(&mut self, offset: usize, data: &[u8]) -> Result<usize> {
-        self.inner.write_at(offset, data).in_current_span().await
-    }
-
-    pub async fn flush_to(&mut self, offset: usize) -> Result<()> {
-        let sid = self.slice_id;
-
-        let key_gen = move |idx, size| -> String { make_slice_object_key(sid, idx, size) };
-        let _ = self
-            .inner
-            .flush_bulk_to(offset, key_gen, self.object_storage.clone())
-            .await?;
-        Ok(())
-    }
-
-    pub async fn finish(&mut self) -> Result<()> {
-        let sid = self.slice_id;
-        let key_gen = move |idx, size| -> String { make_slice_object_key(sid, idx, size) };
-        let _ = self
-            .inner
-            .flush(key_gen, self.object_storage.clone())
-            .await?;
-        Ok(())
-    }
-
-    pub fn length(&self) -> usize {
-        self.inner.length
-    }
-
-    pub fn flushed_length(&self) -> usize {
-        self.inner.flushed_length
-    }
-}
-
 /// SliceAppendOnlyBuffer is a buffer that handle the write requests.
 ///
 /// Random write requests may hit the same slice buffer.
@@ -413,27 +357,27 @@ impl SliceBuffer {
                 Block::Empty => false,
                 Block::Data(..) => {
                     let block_idx = *idx;
+                    // let start = block_idx * BLOCK_SIZE;
                     let end = (block_idx + 1) * BLOCK_SIZE;
+                    // dummy_flushed_length = end;
                     end <= offset
                 }
             })
             .map(|(idx, _)| idx)
             .collect::<Vec<_>>();
 
-        let mut total_released_page_cnt = 0usize;
+        let total_released_page_cnt = Arc::new(AtomicUsize::new(0));
         let handles = pending_block_idxes
             .into_iter()
             .map(|idx| {
                 let data_block = std::mem::take(&mut self.block_slots[idx]);
-                if matches!(data_block, Block::Data { .. }) {
-                    total_released_page_cnt += 1;
-                }
                 (idx, data_block.get_data_block())
             })
             .map(|(idx, data_block)| {
                 self.flushed_length += data_block.length;
                 let key = key_gen(idx, data_block.length);
                 let sto = object_storage.clone();
+                let total_released_page_cnt = total_released_page_cnt.clone();
                 let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
                     let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
                     let total_flush_data = data_block.length;
@@ -452,6 +396,7 @@ impl SliceBuffer {
                                 }
                             }
                             Some(page) => {
+                                total_released_page_cnt.fetch_add(1, Ordering::AcqRel);
                                 page.copy_to_writer(page_offset, to_flush_len, &mut writer)
                                     .await?;
                             }
@@ -459,6 +404,7 @@ impl SliceBuffer {
                         current_flush_data += to_flush_len;
                     }
                     writer.close().await.context(OpenDalSnafu)?;
+                    debug!("write object to {:?}", key);
                     Ok(())
                 });
                 handle
@@ -469,7 +415,12 @@ impl SliceBuffer {
             r.context(JoinErrSnafu)??;
         }
 
+        let total_released_page_cnt = total_released_page_cnt.load(Ordering::Relaxed);
         self.total_page_cnt -= total_released_page_cnt;
+        debug!(
+            "flushed length: {}, total_released_page: {}",
+            self.flushed_length, total_released_page_cnt
+        );
         Ok(total_released_page_cnt)
     }
 }
@@ -542,7 +493,11 @@ impl Block {
                 db.pages[page_idx] = Some(page);
                 new_one = true;
             };
-            debug!("get a page from block, cost: {:?}", start.elapsed());
+            debug!(
+                "get a page from block, new: {}, cost: {:?}",
+                new_one,
+                start.elapsed(),
+            );
             (db.pages[page_idx].as_mut().unwrap(), new_one)
         } else {
             panic!("Block is empty");
@@ -685,11 +640,14 @@ mod tests {
         assert_eq!(write_len, BLOCK_SIZE);
         assert_eq!(slice_buffer.length, BLOCK_SIZE);
         assert_eq!(slice_buffer.total_page_cnt, BLOCK_SIZE / PAGE_SIZE);
+
         let released_page_cnt = slice_buffer
             .flush_bulk(key_gen, object_sto.clone())
             .await
             .unwrap();
-        assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE);
+        assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE); // we should flush all the pages.
+        assert_eq!(slice_buffer.total_page_cnt, 0); // we should flush all the pages.
+
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
         // we should be able to write the next block
@@ -709,13 +667,28 @@ mod tests {
         assert_eq!(slice_buffer.flushed_length, BLOCK_SIZE * 2);
         assert_eq!(slice_buffer.total_page_cnt, 0);
 
+        let write_len = slice_buffer
+            .write_at(BLOCK_SIZE * 2 + 3, vec![1u8; BLOCK_SIZE].as_slice())
+            .await
+            .unwrap();
+        assert_eq!(write_len, BLOCK_SIZE);
+        assert_eq!(slice_buffer.length, BLOCK_SIZE * 3 + 3);
+        assert_eq!(slice_buffer.total_page_cnt, BLOCK_SIZE / PAGE_SIZE + 1);
+        let released_page_cnt = slice_buffer
+            .flush(key_gen, object_sto.clone())
+            .await
+            .unwrap(); // try to flush all
+        assert_eq!(released_page_cnt, BLOCK_SIZE / PAGE_SIZE + 1);
+        assert_eq!(slice_buffer.flushed_length, BLOCK_SIZE * 3 + 3);
+        assert_eq!(slice_buffer.total_page_cnt, 0);
+
         // we can flush it again, but we have nothing to flush.
         let released_page_cnt = slice_buffer
             .flush(key_gen, object_sto.clone())
             .await
             .unwrap(); // try to flush all
         assert_eq!(released_page_cnt, 0);
-        assert_eq!(slice_buffer.flushed_length, BLOCK_SIZE * 2);
+        assert_eq!(slice_buffer.flushed_length, BLOCK_SIZE * 3 + 3);
         assert_eq!(slice_buffer.total_page_cnt, 0);
 
         let mut lister = object_sto.lister("").await.unwrap();

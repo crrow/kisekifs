@@ -112,6 +112,7 @@ impl ToErrno for Error {
             Error::Unknown { .. } => libc::EINTR,
             Error::UnsupportedMetaDSN { .. } => libc::EINTR,
             Error::TokioJoinError { .. } => libc::EINTR,
+            #[cfg(feature = "meta-rocksdb")]
             Error::RocksdbError { .. } => libc::EINTR,
             Error::ModelError { source, .. } => {
                 if source.is_not_found() {

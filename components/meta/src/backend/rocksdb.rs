@@ -294,6 +294,7 @@ impl Backend for RocksdbBackend {
     ) -> Result<()> {
         let key = key::chunk_slices(inode, chunk_index);
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
+        assert!(buf.len() > 0, "slices is empty");
         Ok(())
     }
 
@@ -313,12 +314,14 @@ impl Backend for RocksdbBackend {
                 key: String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
-        let slices = bincode::deserialize::<Slices>(&buf)
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::ChunkSlices,
-                key: String::from_utf8_lossy(&key).to_string(),
-            })
-            .context(ModelSnafu)?;
+        let slices = Slices::decode(&buf).unwrap();
+
+        assert!(buf.len() > 0, "slices is empty");
+        assert!(slices.0.len() > 0, "slices is empty");
+        debug!("get_chunk_slices: key: {:?}", String::from_utf8_lossy(&key));
+        for slice in slices.0.iter() {
+            debug!("get_chunk_slices: slice: {:?}", slice);
+        }
         Ok(slices)
     }
 

@@ -1,7 +1,8 @@
+mod disk_eviction;
 mod juice_cache;
 mod moka_cache;
+mod page_cache;
 mod partitioned_cache;
-mod write_cache;
 
 use std::{fmt::Debug, hash::Hash, sync::Arc};
 

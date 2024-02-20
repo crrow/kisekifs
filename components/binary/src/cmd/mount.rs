@@ -82,7 +82,7 @@ pub struct MountArgs {
     long,
     help = "Number of threads to use for tokio async runtime",
     help_heading = MOUNT_OPTIONS_HEADER,
-    default_value = "8",
+    default_value = "10",
     )]
     pub async_work_threads: usize,
 
@@ -206,6 +206,7 @@ impl MountArgs {
             otlp_endpoint: self.otlp_endpoint.clone(),
             tracing_sample_ratio: self.tracing_sample_ratio,
             append_stdout: self.append_stdout,
+            tokio_console_addr: Some(kiseki_utils::logger::DEFAULT_TOKIO_CONSOLE_ADDR.to_string()),
         };
         Some(opts)
     }
@@ -215,6 +216,9 @@ impl MountArgs {
     }
 
     pub fn run(self) -> Result<(), Whatever> {
+        human_panic::setup_panic!();
+        kiseki_utils::panic_hook::set_panic_hook();
+
         if self.foreground {
             let (_guard, _sentry_guard) = if let Some(opts) = self.load_logging_opts() {
                 kiseki_utils::logger::init_global_logging_without_runtime("kiseki-fuse", &opts)
@@ -240,32 +244,32 @@ impl MountArgs {
     }
 }
 
-pub fn log_versions() {
+pub fn print_versions() {
     // Report app version as gauge.
     // APP_VERSION
     //     .with_label_values(&[short_version(), full_version()])
     //     .inc();
 
     // Log version and argument flags.
-    info!(
+    println!(
         "PKG_VERSION: {}, FULL_VERSION: {}",
         build_info::PKG_VERSION,
         build_info::FULL_VERSION,
     );
 
-    log_env_flags();
+    print_args();
 }
 
-fn log_env_flags() {
-    info!("command line arguments");
+fn print_args() {
+    println!("command line arguments");
     for argument in std::env::args() {
-        info!("argument: {}", argument);
+        println!("argument: {}", argument);
     }
 }
 
 fn mount(args: MountArgs) -> Result<(), Whatever> {
     info!("try to mount kiseki on {:?}", &args.mount_point);
-    log_versions();
+    print_versions();
 
     validate_mount_point(&args.mount_point)?;
 

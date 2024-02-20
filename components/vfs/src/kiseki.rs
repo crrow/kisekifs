@@ -13,8 +13,12 @@
 // limitations under the License.
 
 use std::{
+    collections::HashMap,
     fmt::{Debug, Display, Formatter},
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -23,11 +27,7 @@ use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
-use kiseki_storage::{
-    cache::CacheRef,
-    raw_buffer::ReadBuffer,
-    slice_buffer::{SliceBuffer, SliceBufferWrapper},
-};
+use kiseki_storage::{cache::CacheRef, raw_buffer::ReadBuffer, slice_buffer::SliceBuffer};
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
@@ -37,19 +37,20 @@ use kiseki_types::{
     ToErrno,
 };
 use kiseki_utils::object_storage::ObjectStorage;
-use libc::{mode_t, EACCES, EBADF, EFBIG, EINVAL, EPERM};
-use snafu::{location, Location, OptionExt, ResultExt};
-use tokio::time::Instant;
+use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
+use scopeguard::defer;
+use snafu::{ensure, location, Location, OptionExt, ResultExt};
+use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
 
-use crate::err::Error;
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
     err::{
-        Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result, StorageSnafu,
+        Error, Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result,
+        StorageSnafu,
     },
-    handle::Handle,
+    handle::{FileHandleWriteGuard, Handle, HandleTable, HandleTableRef},
     reader::FileReadersRef,
     writer::{FileWriter, FileWritersRef},
 };
@@ -60,8 +61,7 @@ pub struct KisekiVFS {
     // Runtime status
     internal_nodes: InternalNodeTable,
     modified_at: DashMap<Ino, std::time::Instant>,
-    pub(crate) _next_fh: AtomicU64,
-    pub(crate) handles: DashMap<Ino, DashMap<FH, Arc<Handle>>>,
+    pub(crate) handle_table: HandleTableRef,
     pub(crate) data_manager: DataManagerRef,
 
     // Dependencies
@@ -92,8 +92,11 @@ impl KisekiVFS {
         }
 
         let object_storage =
-            kiseki_utils::object_storage::new_fs_store(&vfs_config.object_storage_dsn)
+            kiseki_utils::object_storage::new_sled_store(&vfs_config.object_storage_dsn)
                 .context(OpenDalSnafu)?;
+        // let object_storage =
+        // kiseki_utils::object_storage::new_mem_object_storage("");
+
         let data_manager = Arc::new(DataManager::new(
             vfs_config.page_size,
             vfs_config.block_size,
@@ -109,8 +112,7 @@ impl KisekiVFS {
             config: vfs_config,
             internal_nodes,
             modified_at: DashMap::new(),
-            _next_fh: AtomicU64::new(1),
-            handles: DashMap::new(),
+            handle_table: HandleTable::new(data_manager.clone()),
             data_manager,
             meta,
         };
@@ -138,11 +140,13 @@ impl KisekiVFS {
     ) -> Result<kiseki_types::stat::FSStat> {
         let ino = ino.into();
         trace!("fs:stat_fs with ino {:?}", ino);
-        let cloned_self = self.clone();
-        let h = tokio::task::spawn_blocking(move || cloned_self.meta.stat_fs(ctx, ino))
-            .await
-            .context(JoinErrSnafu)??;
-
+        let meta = self.meta.clone();
+        let h = tokio::spawn(async move {
+            let h = meta.stat_fs(ctx, ino)?;
+            Ok::<kiseki_types::stat::FSStat, Error>(h)
+        })
+        .await
+        .context(JoinErrSnafu)??;
         Ok(h)
     }
 
@@ -211,7 +215,7 @@ impl KisekiVFS {
         ctx: &FuseContext,
         inode: I,
         flags: i32,
-    ) -> Result<u64> {
+    ) -> Result<FH> {
         let inode = inode.into();
         trace!("vfs:open_dir with inode {:?}", inode);
         if ctx.check_permission {
@@ -225,7 +229,7 @@ impl KisekiVFS {
             let attr = self.meta.get_attr(inode).await?;
             ctx.check(inode, &attr, mmask)?;
         }
-        Ok(self.new_handle(inode))
+        Ok(self.handle_table.new_dir_handle(inode))
     }
 
     pub async fn read_dir<I: Into<Ino>>(
@@ -242,16 +246,11 @@ impl KisekiVFS {
             inode, fh, offset
         );
 
-        let h = match self.find_handle(inode, fh) {
-            None => {
-                error!(
-                    "fs:readdir with ino {:?} fh {:?} offset {:?} failed",
-                    inode, fh, offset
-                );
-                return LibcSnafu { errno: EBADF }.fail()?;
-            }
-            Some(h) => h,
-        };
+        let h = self
+            .handle_table
+            .find_handle(inode, fh)
+            .context(LibcSnafu { errno: EBADF })?;
+        let h = h.as_dir_handle().context(LibcSnafu { errno: EBADF })?;
 
         let mut read_guard = h.inner.read().await;
         if read_guard.children.is_empty() || offset == 0 {
@@ -333,7 +332,7 @@ impl KisekiVFS {
         mode: u16,
         cumask: u16,
         flags: libc::c_int,
-    ) -> Result<(FullEntry, u64)> {
+    ) -> Result<(FullEntry, FH)> {
         debug!("fs:create with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
             return LibcSnafu {
@@ -356,7 +355,9 @@ impl KisekiVFS {
 
         let mut e = FullEntry::new(inode, name, attr);
         self.update_length(inode, &mut e.attr);
-        let fh = self.new_file_handle(inode, e.attr.length, flags)?;
+        let fh = self
+            .handle_table
+            .new_file_handle(inode, e.attr.length, flags)?;
         Ok((e, fh))
     }
 
@@ -526,7 +527,9 @@ impl KisekiVFS {
             .await
             .context(MetaSnafu)?;
         self.update_length(inode, &mut attr);
-        let opened_fh = self.new_file_handle(inode, attr.length, flags)?;
+        let opened_fh = self
+            .handle_table
+            .new_file_handle(inode, attr.length, flags)?;
         // TODO: review me
         let entry = FullEntry::new(inode, "", attr);
 
@@ -548,7 +551,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn read(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         fh: u64,
         offset: i64,
@@ -569,23 +572,29 @@ impl KisekiVFS {
         // TODO: review me, is it correct? it may be negative.
         let offset = offset as u64;
         let size = size as u64;
+        ensure!(
+            offset + size < MAX_FILE_SIZE as u64,
+            LibcSnafu { errno: EFBIG }
+        );
 
-        let _handle = self
+        let handle = self
+            .handle_table
             .find_handle(ino, fh)
             .context(LibcSnafu { errno: EBADF })?;
-        if offset >= MAX_FILE_SIZE as u64 || offset + size >= MAX_FILE_SIZE as u64 {
-            return LibcSnafu { errno: EFBIG }.fail()?;
-        }
-        let fr = self
-            .data_manager
-            .find_file_reader(ino, fh)
-            .ok_or(LibcError {
-                errno: libc::EBADF,
-                location: location!(),
-            })?;
-        self.data_manager.flush_if_exists(ino).await?;
+        let file_handle = handle
+            .as_file_handle()
+            .context(LibcSnafu { errno: EBADF })?;
+
         let mut buf = vec![0u8; size as usize];
-        let _read_len = fr.read(offset as usize, buf.as_mut_slice()).await?;
+        let read_guard = file_handle
+            .read_lock(ctx.clone())
+            .await
+            .context(LibcSnafu { errno: EINTR })?; // failed to lock
+
+        self.data_manager.direct_flush(ino).await?;
+
+        let _read_len = read_guard.read(offset as usize, buf.as_mut_slice()).await?;
+        file_handle.remove_operation(&ctx).await;
         debug!(
             "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: {:?}",
             ino, fh, offset, size, _read_len
@@ -596,7 +605,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn write(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         fh: u64,
         offset: i64,
@@ -612,54 +621,76 @@ impl KisekiVFS {
         );
 
         let offset = offset as usize;
-        if offset >= MAX_FILE_SIZE || offset + size >= MAX_FILE_SIZE {
-            return LibcSnafu { errno: libc::EFBIG }.fail()?;
-        }
+        ensure!(offset + size < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+
         let _handle = self
+            .handle_table
             .find_handle(ino, fh)
-            .context(LibcSnafu { errno: libc::EBADF })?;
+            .context(LibcSnafu { errno: EBADF })?;
         if ino == CONTROL_INODE {
             todo!()
         }
 
-        return if let Some(fw) = self.data_manager.find_file_writer(ino) {
-            debug!("find file write");
-            let l = fw.write(offset, data).await?;
-            Ok(l as u32)
-        } else {
-            error!(
-                "fs:write with ino {:?} fh {:?} offset {:?} size {:?} failed; maybe open flag contains problem",
-                ino, fh, offset, size
-            );
-            LibcSnafu { errno: libc::EBADF }.fail()?
-        };
+        let handle = _handle
+            .as_file_handle()
+            .context(LibcSnafu { errno: EBADF })?;
+
+        let write_guard = handle
+            .write_lock(ctx.clone())
+            .await
+            .context(LibcSnafu { errno: EINTR })?;
+        let write_len = write_guard.write(offset, data).await?;
+        handle.remove_operation(&ctx).await;
+
+        self.data_manager
+            .truncate_reader(ino, write_guard.get_length() as u64);
+
+        Ok(write_len as u32)
     }
 
     #[instrument(skip(self), fields(ino, fh))]
-    pub async fn flush(&self, ctx: &FuseContext, ino: Ino, fh: u64, lock_owner: u64) -> Result<()> {
+    pub async fn flush(
+        &self,
+        ctx: Arc<FuseContext>,
+        ino: Ino,
+        fh: u64,
+        lock_owner: u64,
+    ) -> Result<()> {
         let h = self
+            .handle_table
             .find_handle(ino, fh)
-            .context(LibcSnafu { errno: libc::EBADF })?;
+            .context(LibcSnafu { errno: ENOENT })?;
+        let h = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
         if ino.is_special() {
             return Ok(());
         };
 
-        if let Some(fw) = self.data_manager.find_file_writer(ino) {
-            debug!("find file write, spawn task to flush it");
-            tokio::spawn(async move {
-                fw.flush().in_current_span().await?;
-                Ok::<(), Error>(())
-            })
-            .await
-            .context(JoinErrSnafu)??;
+        if h.has_writer() {
+            let guard = loop {
+                match h.write_lock(ctx.clone()).await {
+                    Some(guard) => break Some(guard),
+                    None => {
+                        if !ctx.is_cancelled() {
+                            // as long as it's not cancelled, we should continue to wait
+                            h.cancel_operations(&ctx.pid).await;
+                            continue; // go back to acquire lock again.
+                        } else {
+                            // we get cancelled while waiting for the lock
+                            break None;
+                        }
+                    }
+                }
+            };
+            let guard = guard.context(LibcSnafu { errno: EINTR })?;
+            guard.flush().await?;
+            h.remove_operation(&ctx).await;
+        } else {
+            // still need to cancel
+            h.cancel_operations(&ctx.pid).await;
         }
-        debug!("file writer flush finished");
 
-        if lock_owner != h.get_ofd_owner().await {
-            h.set_ofd_owner(0).await;
-        }
-
-        if h.locks & 2 != 0 {
+        h.try_set_ofd_owner(lock_owner);
+        if h.locks.load(Ordering::Acquire) & 2 != 0 {
             self.meta
                 .set_lk(
                     ctx,
@@ -679,7 +710,7 @@ impl KisekiVFS {
     #[instrument(skip(self), fields(ino, fh))]
     pub async fn fsync(
         &self,
-        _ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         fh: u64,
         _data_sync: bool,
@@ -688,13 +719,95 @@ impl KisekiVFS {
             return Ok(());
         }
 
-        self.find_handle(ino, fh)
-            .context(LibcSnafu { errno: libc::EBADF })?;
-        if let Some(fw) = self.data_manager.find_file_writer(ino) {
-            fw.flush().await?;
-        }
+        let handle = self
+            .handle_table
+            .find_handle(ino, fh)
+            .context(LibcSnafu { errno: EBADF })?;
+        if let Some(fh) = handle.as_file_handle() {
+            let write_guard = fh
+                .write_lock(ctx.clone())
+                .await
+                .context(LibcSnafu { errno: EINTR })?;
 
+            write_guard.flush().await?;
+            fh.remove_operation(&ctx).await;
+        }
         Ok(())
+    }
+
+    #[instrument(skip(self), fields(ino, fh))]
+    pub async fn fallocate(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        fh: FH,
+        offset: i64,
+        length: i64,
+        mode: u8,
+    ) -> Result<()> {
+        ensure!(offset >= 0 && length > 0, LibcSnafu { errno: EINVAL });
+        ensure!(!inode.is_special(), LibcSnafu { errno: EPERM });
+        let offset = offset as usize;
+        let length = length as usize;
+        ensure!(offset + length < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+        let h = self
+            .handle_table
+            .find_handle(inode, fh)
+            .context(LibcSnafu { errno: EBADF })?;
+        let _ = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
+        self.meta.fallocate(inode, offset, length, mode).await?;
+
+        todo!()
+    }
+
+    pub async fn release(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        fh: FH,
+    ) -> Result<JoinHandle<()>> {
+        if inode.is_special() {
+            todo!()
+        }
+        if let Some(handle) = self.handle_table.find_handle(inode, fh) {
+            handle.wait_all_operations_done(ctx.clone()).await?;
+            if let Some(fh) = handle.as_file_handle() {
+                if fh.has_writer() {
+                    fh.unsafe_flush().await?;
+                    self.invalidate_length(inode);
+                }
+                let (locks, fowner, powner) = fh.get_posix_lock_info();
+                if locks & 1 != 0 {
+                    self.meta
+                        .flock(ctx.clone(), inode, fowner, libc::F_UNLCK)
+                        .await?;
+                }
+                if locks & 2 != 0 && powner != 0 {
+                    self.meta
+                        .set_lk(
+                            ctx,
+                            inode,
+                            powner,
+                            false,
+                            libc::F_UNLCK,
+                            0,
+                            0x7FFFFFFFFFFFFFFF,
+                        )
+                        .await?;
+                }
+            }
+        }
+        self.meta.close(inode).await?;
+        let ht = self.handle_table.clone();
+        Ok(tokio::spawn(async move {
+            ht.release_file_handle(inode, fh).await;
+        }))
+    }
+
+    fn invalidate_length(&self, ino: Ino) {
+        self.modified_at
+            .get_mut(&ino)
+            .map(|mut v| *v = std::time::Instant::now());
     }
 }
 
@@ -716,60 +829,106 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
         libc::S_IFBLK => Ok(FileType::BlockDevice),
         libc::S_IFDIR => Ok(FileType::Directory),
         libc::S_IFCHR => Ok(FileType::CharDevice),
-        _ => LibcSnafu { errno: libc::EPERM }.fail()?,
+        _ => LibcSnafu { errno: EPERM }.fail()?,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // use super::*;
-    // use crate::{
-    //     common::install_fmt_log,
-    //     meta::{Format, MetaConfig},
-    // };
-    //
-    // async fn make_vfs() -> KisekiVFS {
-    //     let meta_engine = MetaConfig::test_config().open().unwrap();
-    //     let format = Format::default();
-    //     meta_engine.init(format, false).await.unwrap();
-    //     KisekiVFS::new(VFSConfig::default(), meta_engine).unwrap()
-    // }
-    //
-    // #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    // async fn setup_tests() {
-    //     install_fmt_log();
-    //
-    //     let vfs = make_vfs().await;
-    //     basic_write(&vfs).await;
-    // }
-    //
-    // async fn basic_write(vfs: &KisekiVFS) {
-    //     let meta_ctx = MetaContext::background();
-    //     let (entry, fh) = vfs
-    //         .create(&meta_ctx, ROOT_INO, "f", 0o755, 0, libc::O_RDWR)
-    //         .await
-    //         .unwrap();
-    //
-    //     let write_len = vfs
-    //         .write(&meta_ctx, entry.inode, fh, 0, b"hello", 0, 0, None)
-    //         .await
-    //         .unwrap();
-    //     assert_eq!(write_len, 5);
-    //
-    //     vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
-    //
-    //     let write_len = vfs
-    //         .write(&meta_ctx, entry.inode, fh, 100 << 20, b"world", 0, 0,
-    // None)         .await
-    //         .unwrap();
-    //     assert_eq!(write_len, 5);
-    //
-    //     vfs.fsync(&meta_ctx, entry.inode, fh, true).await.unwrap();
-    //
-    //     sequential_write(vfs, entry.inode, fh).await;
-    // }
-    // async fn sequential_write(vfs: &KisekiVFS, inode: Ino, fh: FH) {
-    //     let meta_ctx = MetaContext::background();
+    use kiseki_utils::logger::install_fmt_log;
+    use tracing::debug;
+
+    use super::*;
+
+    async fn make_vfs() -> KisekiVFS {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut meta_config = kiseki_meta::MetaConfig::default();
+        meta_config.with_dsn(&format!("rocksdb://:{}", tempdir.path().to_str().unwrap()));
+        let mut format = kiseki_types::setting::Format::default();
+        format.with_name("test-kiseki");
+        kiseki_meta::update_format(&meta_config.dsn, format, true).unwrap();
+
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let vfs_config = Config::default();
+        KisekiVFS::new(vfs_config, meta_engine).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vfs_basic_io() {
+        install_fmt_log();
+
+        let vfs = Arc::new(make_vfs().await);
+        let ctx = Arc::new(FuseContext::background());
+
+        let (entry, fh) = vfs
+            .create(&ctx, ROOT_INO, "f", 0o755, 0, libc::O_RDWR)
+            .await
+            .unwrap();
+
+        let write_len = vfs
+            .write(ctx.clone(), entry.inode, fh, 0, b"hello", 0, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(write_len, 5);
+
+        vfs.fsync(ctx.clone(), entry.inode, fh, true).await.unwrap();
+
+        let write_len = vfs
+            .write(
+                ctx.clone(),
+                entry.inode,
+                fh,
+                100 << 20,
+                b"world",
+                0,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(write_len, 5);
+
+        vfs.fsync(ctx.clone(), entry.inode, fh, true).await.unwrap();
+        let fw = vfs.data_manager.find_file_writer(entry.inode).unwrap();
+        assert_eq!(fw.get_reference_count(), 1);
+
+        {
+            // small write
+            let buf = vec![1u8; 5 << 10];
+            for i in 32..0 {
+                let write_len = vfs
+                    .write(
+                        ctx.clone(),
+                        entry.inode,
+                        fh,
+                        i * (4 << 10),
+                        &buf,
+                        0,
+                        0,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(write_len, buf.len() as u32);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let release_waiter = vfs.release(ctx, entry.inode, fh).await.unwrap();
+        // wait for the release to finish
+        release_waiter.await.unwrap();
+        assert_eq!(fw.get_reference_count(), 0);
+        assert_eq!(
+            vfs.data_manager.file_writers.contains_key(&entry.inode),
+            false
+        );
+
+        // sequential_write(&vfs, entry.inode, fh).await;
+    }
+
+    // async fn sequential_write(vfs: &Arc<KisekiVFS>, inode: Ino, fh: FH) {
+    //     let meta_ctx = FuseContext::background();
     //     let data = vec![0u8; 128 << 10];
     //     for _i in 0..=1000 {
     //         let write_len = vfs
