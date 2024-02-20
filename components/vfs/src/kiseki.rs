@@ -94,7 +94,8 @@ impl KisekiVFS {
         let object_storage =
             kiseki_utils::object_storage::new_sled_store(&vfs_config.object_storage_dsn)
                 .context(OpenDalSnafu)?;
-        // let object_storage = kiseki_utils::object_storage::new_mem_object_storage("");
+        // let object_storage =
+        // kiseki_utils::object_storage::new_mem_object_storage("");
 
         let data_manager = Arc::new(DataManager::new(
             vfs_config.page_size,
