@@ -9,7 +9,8 @@ use std::{
 use dashmap::DashMap;
 use kiseki_common::{ChunkIndex, FH};
 use kiseki_meta::MetaEngineRef;
-use kiseki_storage::raw_buffer::ReadBuffer;
+// use kiseki_storage::raw_buffer::ReadBuffer;
+use kiseki_types::slice::make_slice_object_key;
 use kiseki_types::{
     ino::Ino,
     slice::{OverlookedSlicesRef, Slice, SliceID},
@@ -25,15 +26,15 @@ use crate::{
 };
 
 impl DataManager {
-    fn new_read_buffer(&self, sid: SliceID, length: usize) -> ReadBuffer {
-        ReadBuffer::new(
-            self.block_size,
-            self.chunk_size,
-            self.object_storage.clone(),
-            sid,
-            length,
-        )
-    }
+    // fn new_read_buffer(&self, sid: SliceID, length: usize) -> ReadBuffer {
+    //     ReadBuffer::new(
+    //         self.block_size,
+    //         self.chunk_size,
+    //         self.object_storage.clone(),
+    //         sid,
+    //         length,
+    //     )
+    // }
     /// Get the file reader for the given inode and file handle.
     pub(crate) fn new_file_reader(
         self: &Arc<Self>,
@@ -184,8 +185,20 @@ impl FileReader {
                             "find slice in chunk: {:?}, range: {:?}, slice: {:?}, write buf [{start}, {end}]",
                             chunk_idx, r, s
                         );
-                        let rb = engine.new_read_buffer(s.get_id(), s.get_underlying_size());
-                        rb.read_at(0, &mut dst[start..end]).context(StorageSnafu)?;
+                        let sid = s.get_id();
+
+                        let read_len =
+                            kiseki_storage::slice_buffer::read_slice_from_object_storage(
+                                |bi, bs| -> String { make_slice_object_key(sid, bi, bs) },
+                                engine.object_storage.clone(),
+                                s.get_underlying_size(),
+                                0,
+                                &mut dst[start..end],
+                            )
+                            .await?;
+
+                        // let rb = engine.new_read_buffer(s.get_id(), s.get_underlying_size());
+                        // rb.read_at(0, &mut dst[start..end]).context(StorageSnafu)?;
                     }
                 }
                 total_read_len += len;
@@ -225,7 +238,7 @@ enum VirtualSlice {
 mod tests {
     use kiseki_meta::{context::FuseContext, MetaConfig};
     use kiseki_types::{ino::ROOT_INO, setting::Format};
-    use kiseki_utils::{logger::install_fmt_log, object_storage::new_mem_object_storage};
+    use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
 
     use super::*;
 
@@ -292,15 +305,15 @@ mod tests {
             .await
             .unwrap();
 
-        let sto_engine = new_mem_object_storage("");
-        let cache = kiseki_storage::cache::new_juice_builder().build().unwrap();
+        let sto_engine = new_memory_object_store();
+        // let cache = kiseki_storage::cache::new_juice_builder().build().unwrap();
         let data_manager = Arc::new(DataManager::new(
             format.page_size,
             format.block_size,
             format.chunk_size,
             meta_engine,
             sto_engine,
-            cache,
+            // cache,
         ));
 
         data_manager.open_file_writer(inode, 0);

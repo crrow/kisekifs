@@ -27,7 +27,7 @@ use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
-use kiseki_storage::{cache::CacheRef, raw_buffer::ReadBuffer, slice_buffer::SliceBuffer};
+use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
@@ -36,6 +36,7 @@ use kiseki_types::{
     slice::SliceID,
     ToErrno,
 };
+use kiseki_utils::object_storage;
 use kiseki_utils::object_storage::ObjectStorage;
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
 use scopeguard::defer;
@@ -43,6 +44,7 @@ use snafu::{ensure, location, Location, OptionExt, ResultExt};
 use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
 
+use crate::err::ObjectStorageSnafu;
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
@@ -94,13 +96,13 @@ impl KisekiVFS {
         // let object_storage =
         //     kiseki_utils::object_storage::new_sled_store(&vfs_config.object_storage_dsn)
         //         .context(OpenDalSnafu)?;
-        // kiseki_utils::object_storage::new_minio_store(&vfs_config.object_storage_dsn)
-        //     .context(OpenDalSnafu)?;
+        let object_storage =
+            kiseki_utils::object_storage::new_minio_store().context(ObjectStorageSnafu)?;
 
-        let object_storage = kiseki_utils::object_storage::new_mem_object_storage("");
+        // let object_storage = kiseki_utils::object_storage::new_memory_object_store();
         // let object_storage =
-        //     kiseki_utils::object_storage::new_fs_store(&vfs_config.object_storage_dsn)
-        //         .context(OpenDalSnafu)?;
+        //     kiseki_utils::object_storage::new_local_object_store(&vfs_config.object_storage_dsn)
+        //         .context(ObjectStorageSnafu)?;
 
         let data_manager = Arc::new(DataManager::new(
             vfs_config.page_size,
@@ -108,9 +110,9 @@ impl KisekiVFS {
             vfs_config.chunk_size,
             meta.clone(),
             object_storage,
-            kiseki_storage::cache::new_juice_builder()
-                .build()
-                .context(StorageSnafu)?,
+            // kiseki_storage::cache::new_juice_builder()
+            //     .build()
+            //     .context(StorageSnafu)?,
         ));
 
         let vfs = Self {

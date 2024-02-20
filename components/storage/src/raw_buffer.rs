@@ -6,29 +6,27 @@ use std::{
 
 use kiseki_common::{BlockSize, ChunkSize, PageSize};
 use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
+use kiseki_utils::object_storage::ObjectStorage;
 use kiseki_utils::readable_size::ReadableSize;
 use opendal::Operator;
 use snafu::{ensure, ResultExt};
 use tracing::debug;
 
-use crate::{
-    cache::CacheRef,
-    err::{OpenDalSnafu, Result},
-};
+use crate::err::{OpenDalSnafu, Result};
 
 pub struct ReadBuffer {
     block_size: usize,
     chunk_size: usize,
     slice_id: SliceID,
     length: usize,
-    object_storage: Operator,
+    object_storage: ObjectStorage,
 }
 
 impl ReadBuffer {
     pub fn new(
         block_size: BlockSize,
         chunk_size: ChunkSize,
-        object_storage: Operator,
+        object_storage: ObjectStorage,
         slice_id: SliceID,
         length: usize,
     ) -> ReadBuffer {
@@ -140,8 +138,8 @@ pub(crate) struct WriteBuffer {
     flushed_length: usize,
     // the buffer is divided into blocks.
     block_slots: Vec<Block>,
-    cache: CacheRef,
-    object_storage: Operator,
+    // cache: CacheRef,
+    object_storage: ObjectStorage,
 }
 
 impl WriteBuffer {
@@ -149,8 +147,8 @@ impl WriteBuffer {
         page_size: PageSize,
         block_size: BlockSize,
         chunk_size: ChunkSize,
-        cache: CacheRef,
-        object_storage: Operator,
+        // cache: CacheRef,
+        object_storage: ObjectStorage,
     ) -> WriteBuffer {
         WriteBuffer {
             page_size,
@@ -163,7 +161,7 @@ impl WriteBuffer {
             length: 0,
             flushed_length: 0,
             object_storage,
-            cache,
+            // cache,
         }
     }
 
@@ -343,11 +341,13 @@ impl WriteBuffer {
             .into_iter()
             .map(|(k, v)| {
                 let sto = self.object_storage.clone(); // Clone sto within the closure
-                // let cache = self.cache.clone();
+                                                       // let cache = self.cache.clone();
                 async move {
                     debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
                     let path = k.gen_path_for_object_sto();
-                    let _ = sto.write(&path, v).await;
+                    let path =
+                        kiseki_utils::object_storage::ObjectStoragePath::parse(&path).unwrap();
+                    let _ = sto.put(&path, bytes::Bytes::from(v)).await;
                     // let _ = cache.stage(k, Arc::new(v), true).await;
                 }
             })
@@ -388,17 +388,17 @@ fn cal_object_block_size(length: usize, block_size: usize, block_idx: usize) -> 
 #[cfg(test)]
 mod tests {
     use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
-    use kiseki_utils::object_storage::new_mem_object_storage;
+    use kiseki_utils::object_storage::new_memory_object_store;
     use rand::RngCore;
 
     use super::*;
-    use crate::cache::new_juice_builder;
+    // use crate::cache::new_juice_builder;
 
     #[test]
     fn buffer_write() {
-        let sto = new_mem_object_storage("");
-        let cache = new_juice_builder().build().unwrap();
-        let mut wb = WriteBuffer::new(PAGE_SIZE, BLOCK_SIZE, CHUNK_SIZE, cache, sto);
+        let sto = new_memory_object_store();
+        // let cache = new_juice_builder().build().unwrap();
+        let mut wb = WriteBuffer::new(PAGE_SIZE, BLOCK_SIZE, CHUNK_SIZE, sto);
 
         let write_data = b"hello" as &[u8];
         let expected_write_len = write_data.len();
@@ -436,9 +436,9 @@ mod tests {
         use kiseki_utils::logger::install_fmt_log;
 
         install_fmt_log();
-        let sto = new_mem_object_storage("");
-        let cache = new_juice_builder().build().unwrap();
-        let mut wb = WriteBuffer::new(PAGE_SIZE, BLOCK_SIZE, CHUNK_SIZE, cache, sto.clone());
+        let sto = new_memory_object_store();
+        // let cache = new_juice_builder().build().unwrap();
+        let mut wb = WriteBuffer::new(PAGE_SIZE, BLOCK_SIZE, CHUNK_SIZE, sto.clone());
         wb.set_slice_id(1);
 
         let data = b"hello world" as &[u8];
@@ -472,9 +472,9 @@ mod tests {
         use kiseki_utils::logger::install_fmt_log;
         install_fmt_log();
 
-        let sto = new_mem_object_storage("");
-        let cache = new_juice_builder().build().unwrap();
-        let mut wb = WriteBuffer::new(PAGE_SIZE, BLOCK_SIZE, CHUNK_SIZE, cache, sto.clone());
+        let sto = new_memory_object_store();
+        // let cache = new_juice_builder().build().unwrap();
+        let mut wb = WriteBuffer::new(PAGE_SIZE, BLOCK_SIZE, CHUNK_SIZE, sto.clone());
         wb.set_slice_id(1);
 
         let data = vec![0u8; 65 << 10];

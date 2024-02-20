@@ -28,7 +28,7 @@ use kiseki_common::{
     cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE, FH,
 };
 use kiseki_meta::MetaEngineRef;
-use kiseki_storage::{cache::CacheRef, slice_buffer::SliceBuffer};
+use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     ino::Ino,
     slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
