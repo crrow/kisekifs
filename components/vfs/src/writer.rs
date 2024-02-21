@@ -438,11 +438,11 @@ impl FileWriterFlusher {
                                                 error!("{ino} failed to flush bulk {e}");
                                             }
                                         }
-                                        // _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                        //     // we should not wait for the flush to finish.
-                                        //     // we should just commit the slice writer.
-                                        //     panic!("flush full is timeout");
-                                        // }
+                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                            // we should not wait for the flush to finish.
+                                            // we should just commit the slice writer.
+                                            panic!("flush full is timeout");
+                                        }
                                         _ = cancel_token.cancelled() => {
                                             return;
                                         }
@@ -460,11 +460,11 @@ impl FileWriterFlusher {
                                                 panic!("{ino} failed to flush full {e}");
                                             }
                                         }
-                                        // _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                        //     // we should not wait for the flush to finish.
-                                        //     // we should just commit the slice writer.
-                                        //     panic!("flush full is timeout");
-                                        // }
+                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                            // we should not wait for the flush to finish.
+                                            // we should just commit the slice writer.
+                                            panic!("flush full is timeout");
+                                        }
                                         _ = cancel_token.cancelled() => {
                                             debug!("{ino} flush full is cancelled");
                                             return;
@@ -535,14 +535,14 @@ impl ChunkWriter {
                     return (sw.clone(), old_state);
                 } else if idx >= 3 {
                     // try to flush in advance
-                    // let sw = sw.clone();
-                    // let req = sw.make_flush_req(fw.pattern.is_seq(),
-                    // true).await; if let Some(req) = req {
-                    //     if let Err(e) = fw.slice_flush_queue.send(req).await
-                    // {         panic!("failed to send
-                    // flush request {e}");     }
-                    // }
-                    // continue;
+                    let sw = sw.clone();
+                    let req = sw.make_flush_req(fw.pattern.is_seq(), true).await;
+                    if let Some(req) = req {
+                        if let Err(e) = fw.slice_flush_queue.send(req).await {
+                            panic!("failed to send flush request {e}");
+                        }
+                    }
+                    continue;
                 }
             }
         }
@@ -585,7 +585,6 @@ impl ChunkWriter {
             for sw in sws {
                 let sw = sw.clone();
                 let id = sw._internal_seq.clone();
-                let sid = sw.slice_id.load(Ordering::Acquire);
                 let state = SliceWriterState::from(sw.state.load(Ordering::Acquire));
                 if matches!(
                     state,
@@ -619,14 +618,8 @@ impl ChunkWriter {
                     return;
                 }
             }
-
             // wait for the slice writer to finish.
-            tokio::select! {
-                _ = self.slice_done_notify.notified() => {
-                },
-                _= tokio::time::sleep(Duration::from_millis(100)) => {
-                },
-            }
+            self.slice_done_notify.notified().await;
         }
     }
 }
@@ -803,7 +796,6 @@ impl SliceWriter {
     ) -> Result<()> {
         let slice_id = self.prepare_slice_id().in_current_span().await?;
         let mut write_guard = self.slice_buffer.write().await;
-
         if let Err(e) = write_guard
             .flush_v2(
                 slice_id,

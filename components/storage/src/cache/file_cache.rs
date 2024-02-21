@@ -199,14 +199,16 @@ async fn copy_from_buffer_to_local(
         let to_flush_len = min(PAGE_SIZE - page_offset, block_length - current_flush_length);
         match &pages[page_idx] {
             None => {
-                for _ in 0..to_flush_len {
-                    writer.write_u8(0).await.context(UnknownIOSnafu)?;
-                }
+                let buf = vec![0u8; to_flush_len];
+                writer.write_all(&buf).await.context(UnknownIOSnafu)?;
+                // for _ in 0..to_flush_len {
+                //     writer.write_u8(0).await.context(UnknownIOSnafu)?;
+                // }
             }
             Some(page) => {
                 total_released_page_cnt += 1;
                 page.copy_to_writer(page_offset, to_flush_len, writer)
-                    .await?
+                    .await?;
             }
         }
         current_flush_length += to_flush_len;
