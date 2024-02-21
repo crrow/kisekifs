@@ -36,21 +36,19 @@ use kiseki_types::{
     slice::SliceID,
     ToErrno,
 };
-use kiseki_utils::object_storage;
-use kiseki_utils::object_storage::ObjectStorage;
+use kiseki_utils::{object_storage, object_storage::ObjectStorage};
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
 use scopeguard::defer;
 use snafu::{ensure, location, Location, OptionExt, ResultExt};
 use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
 
-use crate::err::ObjectStorageSnafu;
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
     err::{
-        Error, Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, OpenDalSnafu, Result,
-        StorageSnafu,
+        Error, Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, ObjectStorageSnafu,
+        OpenDalSnafu, Result, StorageSnafu,
     },
     handle::{FileHandleWriteGuard, Handle, HandleTable, HandleTableRef},
     reader::FileReadersRef,
@@ -94,15 +92,15 @@ impl KisekiVFS {
         }
 
         // let object_storage =
-        //     kiseki_utils::object_storage::new_sled_store(&vfs_config.object_storage_dsn)
-        //         .context(OpenDalSnafu)?;
+        //     kiseki_utils::object_storage::new_sled_store(&vfs_config.
+        // object_storage_dsn)         .context(OpenDalSnafu)?;
         let object_storage =
             kiseki_utils::object_storage::new_minio_store().context(ObjectStorageSnafu)?;
 
         // let object_storage = kiseki_utils::object_storage::new_memory_object_store();
         // let object_storage =
-        //     kiseki_utils::object_storage::new_local_object_store(&vfs_config.object_storage_dsn)
-        //         .context(ObjectStorageSnafu)?;
+        //     kiseki_utils::object_storage::new_local_object_store(&vfs_config.
+        // object_storage_dsn)         .context(ObjectStorageSnafu)?;
 
         let data_manager = Arc::new(DataManager::new(
             vfs_config.page_size,

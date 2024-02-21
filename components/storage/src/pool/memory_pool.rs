@@ -1,3 +1,6 @@
+use std::cell::UnsafeCell;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU8;
 use std::{
     fmt::{Display, Formatter},
     io::{Cursor, Write},
@@ -13,6 +16,7 @@ use dashmap::DashMap;
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
 use snafu::ResultExt;
+use tokio::sync::RwLock;
 use tokio::{io::AsyncReadExt, sync::Notify, time::Instant};
 use tracing::debug;
 
@@ -22,8 +26,45 @@ pub struct MemoryPagePool {
     page_size: usize,
     capacity: usize,
     queue: ArrayQueue<u64>,
-    pages: DashMap<u64, Vec<u8>>,
+    raw_pages: Box<[Slot]>,
     notify: Notify,
+}
+
+struct Slot {
+    inner: UnsafeCell<&'static mut [u8]>,
+    page_size: usize,
+}
+
+unsafe impl Send for Slot {}
+unsafe impl Sync for Slot {}
+impl Slot {
+    fn get_inner_slice(&self, offset: usize, len: usize) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                ((&*self.inner.get()).as_ptr() as usize + offset) as *const u8,
+                len,
+            )
+        }
+    }
+
+    fn get_mut_inner_slice(&self, offset: usize, len: usize) -> &mut [u8] {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                ((&mut *self.inner.get()).as_mut_ptr() as usize + offset) as *mut u8,
+                len,
+            )
+        }
+    }
+
+    fn clear(&self) {
+        unsafe {
+            let mut slice = std::slice::from_raw_parts_mut(
+                ((&mut *self.inner.get()).as_mut_ptr() as usize) as *mut u8,
+                self.page_size,
+            );
+            slice.fill(0);
+        };
+    }
 }
 
 impl MemoryPagePool {
@@ -40,17 +81,25 @@ impl MemoryPagePool {
             ReadableSize(capacity as u64)
         );
         let page_cnt = capacity / page_size;
+
+        let page_buffer = Box::leak(vec![0u8; page_cnt * page_size].into_boxed_slice());
+        let slots = page_buffer
+            .chunks_exact_mut(page_size)
+            .map(|chunk| {
+                let buf: &mut [u8] = chunk.try_into().unwrap();
+                Slot {
+                    inner: UnsafeCell::new(buf),
+                    page_size,
+                }
+            })
+            .collect();
+
         let pool = Arc::new(Self {
             page_size,
             capacity,
             queue: ArrayQueue::new(page_cnt),
-            pages: DashMap::with_capacity(page_cnt),
+            raw_pages: slots,
             notify: Default::default(),
-        });
-
-        (0..page_cnt as u64).for_each(|page_id| {
-            pool.queue.push(page_id).unwrap();
-            pool.pages.insert(page_id, vec![0; page_size]);
         });
 
         debug!(
@@ -69,14 +118,14 @@ impl MemoryPagePool {
     }
 
     pub async fn acquire_page(self: &Arc<Self>) -> Page {
-        let mut r = self.queue.pop();
-        while let None = r {
+        loop {
+            if let Some(page_id) = self.queue.pop() {
+                return Page {
+                    page_id,
+                    _pool: self.clone(),
+                };
+            }
             self.notify.notified().await;
-            r = self.queue.pop();
-        }
-        Page {
-            page_id: r.unwrap(),
-            _pool: self.clone(),
         }
     }
 
@@ -85,11 +134,8 @@ impl MemoryPagePool {
     }
 
     fn recycle(self: &Arc<Self>, page_id: u64) {
-        let mut data = self.pages.get_mut(&page_id).unwrap();
-        data.clear();
-        unsafe {
-            data.set_len(self.page_size);
-        }
+        let slot = &self.raw_pages[page_id as usize];
+        slot.clear();
         self.queue.push(page_id).unwrap();
         self.notify_page_ready();
     }
@@ -140,9 +186,8 @@ impl Page {
     where
         W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
-        let data = self._pool.pages.get(&self.page_id).unwrap();
-        let data = data.value();
-        let slice = &data.as_slice()[offset..offset + length];
+        let slot = &self._pool.raw_pages[self.page_id as usize];
+        let slice = slot.get_inner_slice(offset, length);
         let mut cursor = Cursor::new(slice);
         let copy_len = tokio::io::copy(&mut cursor, writer)
             .await
@@ -159,8 +204,8 @@ impl Page {
     where
         R: tokio::io::AsyncRead + Unpin + ?Sized,
     {
-        let mut data = self._pool.pages.get_mut(&self.page_id).unwrap();
-        let slice = &mut data.as_mut_slice()[offset..offset + length];
+        let slot = &self._pool.raw_pages[self.page_id as usize];
+        let slice = slot.get_mut_inner_slice(offset, length);
         let mut cursor = Cursor::new(slice);
         let copy_len = tokio::io::copy(reader, &mut cursor)
             .await
@@ -188,6 +233,29 @@ mod tests {
     use tracing::info;
 
     use super::*;
+
+    #[test]
+    fn slot() {
+        let page_size = 1024;
+        let page_cnt = 10;
+        let page_buffer = Box::leak(vec![0u8; page_cnt * page_size].into_boxed_slice());
+        let slots: Box<[Slot]> = page_buffer
+            .chunks_exact_mut(page_size)
+            .map(|chunk| {
+                let buf: &mut [u8] = chunk.try_into().unwrap();
+                Slot {
+                    inner: UnsafeCell::new(buf),
+                    page_size,
+                }
+            })
+            .collect();
+
+        let slot = &slots[0];
+        let mut buf = slot.get_mut_inner_slice(0, 5);
+        buf.write_all(b"hello").unwrap();
+        let slice = slot.get_inner_slice(0, 5);
+        assert_eq!(slice, b"hello");
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {

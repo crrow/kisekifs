@@ -7,7 +7,7 @@ pub fn get_pool_free_ratio() -> f64 {
 
 pub mod slice_buffer;
 
-// pub mod cache;
+pub mod cache;
 
 // pub mod raw_buffer;
 

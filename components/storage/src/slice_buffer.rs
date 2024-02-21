@@ -1,4 +1,3 @@
-use bytes::Buf;
 use std::{
     cmp::{max, min},
     io::Cursor,
@@ -8,18 +7,27 @@ use std::{
     },
 };
 
+use bytes::{Buf, Bytes};
 use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
-use kiseki_types::slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID};
-use kiseki_utils::object_storage::ObjectStoragePath;
-use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
+use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
+use kiseki_utils::{
+    object_storage::{LocalStorage, ObjectStorage, ObjectStoragePath},
+    readable_size::ReadableSize,
+};
 use snafu::ResultExt;
-use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    task::JoinHandle,
+    time::Instant,
+};
 use tracing::{debug, instrument, Instrument};
 
-use crate::err::Error::ObjectStorageError;
-use crate::err::ObjectStorageSnafu;
 use crate::{
-    err::{InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, OpenDalSnafu, Result, UnknownIOSnafu},
+    cache,
+    err::{
+        Error::ObjectStorageError, InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu,
+        ObjectStorageSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
+    },
     pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
 };
 
@@ -458,6 +466,87 @@ impl SliceBuffer {
         );
         Ok(total_released_page_cnt)
     }
+
+    /// flush all written data to the storage.
+    #[instrument(skip_all)]
+    pub async fn flush_v2(
+        &mut self,
+        sid: SliceID,
+        cache: cache::file_cache::FileCacheRef,
+    ) -> Result<usize> {
+        self.stage(
+            sid,
+            ((self.length - 1) / BLOCK_SIZE + 1) * BLOCK_SIZE,
+            cache,
+        )
+        .await
+    }
+
+    // stage blocks to the local file system.
+    pub async fn stage(
+        &mut self,
+        sid: SliceID,
+        offset: usize,
+        cache: cache::file_cache::FileCacheRef,
+    ) -> Result<usize> {
+        assert!(
+            self.flushed_length <= offset,
+            "offset should be greater than flushed length {}, {}",
+            self.flushed_length,
+            offset
+        );
+
+        let pending_block_idxes = self
+            .block_slots
+            .iter()
+            .enumerate()
+            .filter(|(idx, block)| match block {
+                Block::Empty => false,
+                Block::Data(..) => {
+                    let block_idx = *idx;
+                    // let start = block_idx * BLOCK_SIZE;
+                    let end = (block_idx + 1) * BLOCK_SIZE;
+                    // dummy_flushed_length = end;
+                    end <= offset
+                }
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+
+        let total_released_page_cnt = Arc::new(AtomicUsize::new(0));
+        let handles = pending_block_idxes
+            .into_iter()
+            .map(|idx| {
+                let data_block = std::mem::take(&mut self.block_slots[idx]);
+                (idx, data_block.get_data_block())
+            })
+            .map(|(idx, data_block)| {
+                self.flushed_length += data_block.length;
+                let cache = cache.clone();
+                let total_released_page_cnt = total_released_page_cnt.clone();
+                let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
+                    let (_, total_free_page_cnt) = cache
+                        .stage(sid, offset, data_block.length, data_block.pages)
+                        .await?;
+                    total_released_page_cnt.fetch_add(total_free_page_cnt, Ordering::AcqRel);
+                    Ok(())
+                });
+                handle
+            })
+            .collect::<Vec<_>>();
+
+        for r in futures::future::join_all(handles).await.into_iter() {
+            r.context(JoinErrSnafu)??;
+        }
+
+        let total_released_page_cnt = total_released_page_cnt.load(Ordering::Relaxed);
+        self.total_page_cnt -= total_released_page_cnt;
+        debug!(
+            "flushed length: {}, total_released_page: {}",
+            self.flushed_length, total_released_page_cnt
+        );
+        Ok(total_released_page_cnt)
+    }
 }
 
 #[derive(Debug)]
@@ -493,6 +582,53 @@ struct DataBlock {
     // the written len of the block
     length: usize,
     pages: Box<[Option<Page>]>,
+}
+
+impl DataBlock {
+    // pub async fn copy_to_writer<W>(
+    //     self,
+    //     sid: SliceID,
+    //     block_index: BlockIndex,
+    //     writer: &mut W,
+    // ) -> Result<(usize, usize)>
+    // where
+    //     W: AsyncWrite + Unpin + Send,
+    // {
+    //     let mut total_released_page_cnt = 0;
+    //     let total_flush_length = self.length;
+    //     let mut current_flush_length = 0;
+    //
+    //     while current_flush_length < total_flush_length {
+    //         let page_idx = current_flush_length / PAGE_SIZE;
+    //         let page_offset = current_flush_length % PAGE_SIZE;
+    //         let to_flush_len = min(
+    //             PAGE_SIZE - page_offset,
+    //             total_flush_length - current_flush_length,
+    //         );
+    //         match &self.pages[page_idx] {
+    //             None => {
+    //                 for _ in 0..to_flush_len {
+    //                     writer.write_u8(0).await.context(UnknownIOSnafu)?;
+    //                 }
+    //             }
+    //             Some(page) => {
+    //                 total_released_page_cnt += 1;
+    //                 page.copy_to_writer(page_offset, to_flush_len, writer)
+    //                     .await?
+    //             }
+    //         }
+    //         current_flush_length += to_flush_len;
+    //     }
+    //     if let Err(e) = writer.flush().await {
+    //         panic!(
+    //             "close writer failed: {:?}, expect flush len: {}",
+    //             e,
+    //             ReadableSize(total_flush_length as u64).to_string()
+    //         );
+    //     }
+    //     writer.shutdown().await.context(UnknownIOSnafu)?;
+    //     Ok((total_flush_length, total_released_page_cnt))
+    // }
 }
 
 impl Default for Block {

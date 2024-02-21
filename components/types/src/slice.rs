@@ -9,6 +9,7 @@ use std::{
 };
 
 use bincode::serialize;
+use kiseki_utils::object_storage::ObjectStoragePath;
 use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
@@ -243,6 +244,10 @@ impl SliceKey {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         hasher.finish()
+    }
+
+    pub fn make_object_storage_path(&self) -> ObjectStoragePath {
+        ObjectStoragePath::from(self.gen_path_for_object_sto())
     }
 }
 
