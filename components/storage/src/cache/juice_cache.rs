@@ -52,6 +52,25 @@ const MAX_EXPIRE_CNT: usize = 1000;
 const RAW_CACHE_DIR: &'static str = "raw";
 const STAGE_CACHE_DIR: &'static str = "stage";
 
+/// The exposed cache trait.
+#[async_trait]
+pub trait Cache: Send + Sync + Debug + Unpin + 'static {
+    /// The cache operation is called for [WriteBehind].
+    async fn cache(&self, key: SliceKey, block: Arc<Vec<u8>>) -> bool;
+    async fn get(&self, key: SliceKey) -> Option<Reader>;
+    async fn wait_on_all_flush_finish(&self);
+    /// close the cache and wait on all background task exit.
+    async fn close(&self);
+    /// Remove the slice from the cache.
+    async fn remove(&self, key: SliceKey);
+    /// Stage is used for [WriteBack], in this case, we flush data to
+    /// the remote in the background.
+    ///
+    /// When we flush the stage data to the remote, we should remove the stage
+    /// date.
+    async fn stage(&self, key: SliceKey, data: Arc<Vec<u8>>, keep_cache: bool) -> Result<()>;
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CacheEviction {
     Disable, // disable the eviction

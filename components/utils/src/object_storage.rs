@@ -1,6 +1,6 @@
-use object_store::aws::AmazonS3Builder;
-use object_store::ObjectStore;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
+
+use object_store::{aws::AmazonS3Builder, ObjectStore};
 
 pub type ObjectStorage = Arc<dyn ObjectStore>;
 
@@ -10,6 +10,8 @@ pub type ObjectStorageError = object_store::Error;
 
 pub type ObjectStoragePath = object_store::path::Path;
 
+pub type ObjectReader = object_store::GetResult;
+
 pub fn is_not_found_error(e: &ObjectStorageError) -> bool {
     matches!(e, ObjectStorageError::NotFound { .. })
 }
@@ -18,8 +20,12 @@ pub fn new_memory_object_store() -> ObjectStorage {
     Arc::new(object_store::memory::InMemory::new())
 }
 
-pub fn new_local_object_store(path: &str) -> Result<ObjectStorage, object_store::Error> {
+pub fn new_local_object_store<P: AsRef<Path>>(
+    path: P,
+) -> Result<ObjectStorage, object_store::Error> {
+    let path = path.as_ref();
     std::fs::create_dir_all(path).unwrap();
+    let path = path.to_str().unwrap();
     let object_sto: Arc<dyn ObjectStore> =
         Arc::new(object_store::local::LocalFileSystem::new_with_prefix(path)?);
     Ok(object_sto)
@@ -41,17 +47,18 @@ pub fn new_minio_store() -> Result<ObjectStorage, ObjectStorageError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{path::Path, ObjectStore};
     use tokio::io::AsyncWriteExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn basic() {
         // let object_sto = debug_minio_store().unwrap();
         // let object_sto =
-        //     new_local_object_store(kiseki_common::KISEKI_DEBUG_OBJECT_STORAGE).unwrap();
+        //     new_local_object_store(kiseki_common::KISEKI_DEBUG_OBJECT_STORAGE).
+        // unwrap();
         let object_sto = new_memory_object_store();
 
         let bytes = Bytes::from_static(b"hello");

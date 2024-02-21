@@ -6,6 +6,8 @@ use std::{
 use kiseki_common::FH;
 use kiseki_meta::MetaEngineRef;
 // use kiseki_storage::cache::CacheRef;
+use kiseki_storage::cache;
+use kiseki_storage::cache::file_cache::{FileCache, FileCacheRef};
 use kiseki_types::ino::Ino;
 use kiseki_utils::object_storage::ObjectStorage;
 use snafu::OptionExt;
@@ -32,6 +34,7 @@ pub(crate) struct DataManager {
     // Dependencies
     pub(crate) meta_engine: MetaEngineRef,
     pub(crate) object_storage: ObjectStorage,
+    pub(crate) file_cache: FileCacheRef,
     // pub(crate) data_cache: CacheRef,
 }
 
@@ -44,6 +47,7 @@ impl DataManager {
         object_storage: ObjectStorage,
         // cache_ref: CacheRef,
     ) -> Self {
+        let remote_storage = object_storage.clone();
         Self {
             page_size,
             block_size,
@@ -54,6 +58,9 @@ impl DataManager {
             meta_engine: meta_engine_ref,
             object_storage,
             // data_cache: cache_ref,
+            file_cache: Arc::new(
+                FileCache::new(cache::file_cache::Config::default(), remote_storage).unwrap(),
+            ),
         }
     }
 

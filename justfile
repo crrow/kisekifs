@@ -109,6 +109,8 @@ alias sh-f := help-format
     echo "Done: remove meta dir"
     - rm -r /tmp/kiseki.cache/
     echo "Done: remove cache dir"
+    - rm -r /tmp/kiseki.stage_cache/
+    echo "Done: remove stage cache dir"
     - rm -r /tmp/kiseki.data/
     echo "Done: remove data dir"
     - rm -r /tmp/kiseki.log/
