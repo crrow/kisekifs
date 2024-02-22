@@ -13,44 +13,45 @@ use std::{
     io::Cursor,
     ops::Range,
     sync::{
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        Arc, Weak,
+        Arc,
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering}, Weak,
     },
     time::Duration,
 };
 
 use crossbeam::atomic::AtomicCell;
 use dashmap::{
-    mapref::one::{Ref, RefMut},
     DashMap,
+    mapref::one::{Ref, RefMut},
 };
-use kiseki_common::{
-    cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE, FH,
-};
-use kiseki_meta::MetaEngineRef;
-use kiseki_storage::slice_buffer::SliceBuffer;
-use kiseki_types::{
-    ino::Ino,
-    slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
-};
-use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use libc::EBADF;
 use rangemap::RangeMap;
 use scopeguard::defer;
 use snafu::{OptionExt, ResultExt};
 use tokio::{
-    sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock},
-    task::{yield_now, JoinHandle},
+    sync::{mpsc, Mutex, Notify, OnceCell, oneshot, RwLock},
+    task::{JoinHandle, yield_now},
     time::{error::Elapsed, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn, Instrument};
+use tracing::{debug, error, info, instrument, Instrument, warn};
+
+use kiseki_common::{
+    BLOCK_SIZE, cal_chunk_idx, cal_chunk_offset, CHUNK_SIZE, ChunkIndex, FH, FileOffset,
+};
+use kiseki_meta::MetaEngineRef;
+use kiseki_storage::slice_buffer::SliceBuffer;
+use kiseki_types::{
+    ino::Ino,
+    slice::{EMPTY_SLICE_ID, make_slice_object_key, SliceID},
+};
+use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 
 use crate::{
     data_manager::DataManager,
     err::{JoinErrSnafu, LibcSnafu, Result},
-    reader::FileReader,
     KisekiVFS,
+    reader::FileReader,
 };
 
 impl DataManager {
@@ -109,11 +110,11 @@ impl DataManager {
             .file_writers
             .get(&ino)
             .context(LibcSnafu { errno: EBADF })?;
-        debug!("{} get file write success", ino);
+        debug!("Ino({}) get file write success", ino);
         let write_len = fw.write(offset, data).await?;
         let current_len = fw.get_length();
         debug!(
-            "{} write len: {}, current_len: {}",
+            "Ino({}) write len: {}, current_len: {}",
             ino,
             ReadableSize(write_len as u64),
             ReadableSize(current_len as u64),
@@ -253,12 +254,12 @@ impl FileWriter {
 
         // 1. find write location.
         let start = Instant::now();
-        debug!("try to find slice writer {:?}", start.elapsed());
+        debug!("Ino({}) try to find slice writer {:?}", self.inode, start.elapsed());
         let slice_writers = self
             .find_writable_slice_writer(offset, expected_write_len)
             .in_current_span()
             .await;
-        debug!("find slice writer success {:?}", start.elapsed());
+        debug!("Ino({}) find slice writer success {:?}",self.inode, start.elapsed());
 
         let mut write_len = 0;
         for (sw, state, l) in slice_writers.iter() {
@@ -283,12 +284,12 @@ impl FileWriter {
         if may_new_len > old_len {
             // give up if someone's length is larger.
             loop {
-                debug!("try to update file length");
+                debug!("Ino({}) try to update file length from {} to {}", self.inode, old_len, may_new_len);
                 match self.length.compare_exchange(
                     old_len,
                     may_new_len,
-                    Ordering::Release,
-                    Ordering::Acquire,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => break,
                     Err(new_old_len) => {
@@ -344,7 +345,8 @@ impl FileWriter {
 
         let read_guard = self.chunk_writers.read().await;
         debug!(
-            "flush is waiting for chunk writer finish, alive_chunk_writers: {}",
+            "Ino({}) flush is waiting for all chunk writer finish, cnt: {}",
+            self.inode,
             read_guard.len()
         );
         if read_guard.is_empty() {
@@ -477,7 +479,7 @@ impl FileWriterFlusher {
                                 let me = meta_engine.clone();
                                 // just commit the idle slice writer.
                                 tokio::spawn(async move {
-                                    sw.commit_partitial(ino, me).await;
+                                    sw.commit_partial(ino, me).await;
                                 });
                             },
                         }
@@ -688,6 +690,7 @@ struct SliceWriter {
     slice_buffer: RwLock<SliceBuffer>,
     last_modified: AtomicCell<Instant>,
 }
+
 impl Display for SliceWriter {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "SliceWriter[{}]", self._internal_seq)
@@ -766,16 +769,6 @@ impl SliceWriter {
         });
         let slice_id = self.prepare_slice_id().await?;
         let mut write_guard = self.slice_buffer.write().await;
-        // write_guard
-        //     .flush_bulk_to(
-        //         offset,
-        //         |bi, bs| -> String {
-        //             make_slice_object_key(self.slice_id.load(Ordering::Acquire), bi, bs)
-        //         },
-        //         self.data_manager.upgrade().unwrap().object_storage.clone(),
-        //     )
-        //     .await
-        //     .expect("flush bulk to object storage blocked");
         write_guard
             .stage(
                 slice_id,
@@ -806,26 +799,13 @@ impl SliceWriter {
             panic!("flush to object storage blocked, {:?}", e);
         }
 
-        // if let Err(e) = write_guard
-        //     .flush(
-        //         |bi, bs| -> String {
-        //             make_slice_object_key(self.slice_id.load(Ordering::Acquire), bi, bs)
-        //         },
-        //         self.data_manager.upgrade().unwrap().object_storage.clone(),
-        //     )
-        //     .await
-        // {
-        //     panic!("flush to object storage blocked, {:?}", e);
-        // }
-
         let len = write_guard.length();
         drop(write_guard);
 
         // then the sw is done.
         // write the meta info of this slice.
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            meta_engine_ref.write_slice(
+        let _ = meta_engine_ref
+            .write_slice(
                 inode,
                 self.chunk_index,
                 self.offset_of_chunk,
@@ -836,10 +816,8 @@ impl SliceWriter {
                     _padding: 0,
                 },
                 self.last_modified.load(),
-            ),
-        )
-        .await
-        .expect("write slice meta info blocked")?;
+            )
+            .await?;
 
         let cw = self.chunk_writer.upgrade().unwrap();
         cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
@@ -988,7 +966,7 @@ impl SliceWriter {
         (flushed_len, write_len)
     }
 
-    async fn commit_partitial(
+    async fn commit_partial(
         self: &Arc<Self>,
         inode: Ino,
         meta_engine_ref: MetaEngineRef,
@@ -1075,10 +1053,15 @@ fn locate_chunk(chunk_size: usize, offset: usize, expect_write_len: usize) -> Ve
     (start_chunk_idx..=end_chunk_idx)
         .map(move |idx| {
             let max_can_write = min(chunk_size - chunk_pos, left);
-            // debug!(
-            //     "chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max
-            // can write: {}",     self.chunk_size, idx, chunk_pos, left,
-            // buf_start_at, max_can_write, );
+            debug!(
+                "offset: {}, chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max can write: {}",
+                ReadableSize(offset as u64),
+                ReadableSize(chunk_size as u64),
+                idx,
+                chunk_pos,
+                ReadableSize(left as u64),
+                ReadableSize(buf_start_at as u64),
+                ReadableSize(max_can_write as u64));
 
             let ctx = ChunkWriteCtx {
                 file_offset: offset + buf_start_at,
@@ -1093,18 +1076,4 @@ fn locate_chunk(chunk_size: usize, offset: usize, expect_write_len: usize) -> Ve
             ctx
         })
         .collect::<Vec<_>>()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn enum_repr() {
-        assert_eq!(SliceWriterState::Idle as u8, 0);
-        assert_eq!(SliceWriterState::Writing as u8, 1);
-        assert_eq!(SliceWriterState::Dirty as u8, 2);
-        assert_eq!(SliceWriterState::Flushing as u8, 3);
-        assert_eq!(SliceWriterState::Committing as u8, 4);
-    }
 }

@@ -6,30 +6,29 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-kiseki-utils = {path = "../../components/utils"}
-kiseki-types = {path = "../../components/types"}
-kiseki-storage = {path = "../../components/storage"}
-kiseki-common = {path = "../../components/common"}
-kiseki-meta = {path = "../../components/meta", features = ["meta-rocksdb"]}
+kiseki-common = { path = "../../components/common" }
+kiseki-meta = { path = "../../components/meta", features = ["meta-rocksdb"] }
+kiseki-storage = { path = "../../components/storage" }
+kiseki-types = { path = "../../components/types" }
+kiseki-utils = { path = "../../components/utils" }
 
-tokio.workspace = true
-futures.workspace = true
-snafu.workspace = true
-dashmap.workspace = true
-tracing.workspace = true
-rangemap.workspace = true
-crossbeam-queue.workspace = true
-crossbeam.workspace = true
-sonyflake.workspace = true
-tokio-util.workspace = true
-libc.workspace = true
-bytes.workspace = true
 bincode.workspace = true
+bytes.workspace = true
+crossbeam.workspace = true
+crossbeam-queue.workspace = true
+dashmap.workspace = true
 fuser.workspace = true
-serde.workspace = true
-scopeguard.workspace = true
+futures.workspace = true
+libc.workspace = true
 opendal.workspace = true
-
+rangemap.workspace = true
+scopeguard.workspace = true
+serde.workspace = true
+snafu.workspace = true
+sonyflake.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,6 +1,8 @@
 use snafu::{Location, Snafu};
 use tracing::error;
 
+use kiseki_types::slice::SliceKey;
+
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -19,6 +21,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: kiseki_utils::object_storage::ObjectStorageError,
+    },
+
+    ObjectBlockNotFound {
+        #[snafu(implicit)]
+        location: Location,
+        key: SliceKey,
     },
 
     StorageError {
@@ -43,6 +51,7 @@ impl From<kiseki_meta::Error> for Error {
         Self::MetaError { source: value }
     }
 }
+
 impl From<kiseki_storage::err::Error> for Error {
     fn from(value: kiseki_storage::err::Error) -> Self {
         Self::StorageError { source: value }

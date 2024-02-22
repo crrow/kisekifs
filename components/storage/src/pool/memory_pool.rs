@@ -1,24 +1,27 @@
-use std::cell::UnsafeCell;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicU8;
 use std::{
+    cell::UnsafeCell,
+    collections::HashMap,
     fmt::{Display, Formatter},
     io::{Cursor, Write},
     mem,
     ops::{Deref, DerefMut},
     ptr,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU8},
 };
 
 use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
-use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
 use snafu::ResultExt;
-use tokio::sync::RwLock;
-use tokio::{io::AsyncReadExt, sync::Notify, time::Instant};
+use tokio::{
+    io::AsyncReadExt,
+    sync::{Notify, RwLock},
+    time::Instant,
+};
 use tracing::debug;
+
+use kiseki_utils::readable_size::ReadableSize;
 
 use crate::err::{DiskPoolMmapSnafu, UnknownIOSnafu};
 
@@ -36,7 +39,9 @@ struct Slot {
 }
 
 unsafe impl Send for Slot {}
+
 unsafe impl Sync for Slot {}
+
 impl Slot {
     fn get_inner_slice(&self, offset: usize, len: usize) -> &[u8] {
         unsafe {
@@ -94,12 +99,17 @@ impl MemoryPagePool {
             })
             .collect();
 
+
         let pool = Arc::new(Self {
             page_size,
             capacity,
             queue: ArrayQueue::new(page_cnt),
             raw_pages: slots,
             notify: Default::default(),
+        });
+
+        (0..page_cnt as u64).for_each(|page_id| {
+            pool.queue.push(page_id).unwrap();
         });
 
         debug!(
@@ -183,8 +193,8 @@ impl Page {
         length: usize,
         writer: &mut W,
     ) -> crate::err::Result<()>
-    where
-        W: tokio::io::AsyncWrite + Unpin + ?Sized,
+        where
+            W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
         let slot = &self._pool.raw_pages[self.page_id as usize];
         let slice = slot.get_inner_slice(offset, length);
@@ -201,8 +211,8 @@ impl Page {
         length: usize,
         reader: &mut R,
     ) -> crate::err::Result<()>
-    where
-        R: tokio::io::AsyncRead + Unpin + ?Sized,
+        where
+            R: tokio::io::AsyncRead + Unpin + ?Sized,
     {
         let slot = &self._pool.raw_pages[self.page_id as usize];
         let slice = slot.get_mut_inner_slice(offset, length);
@@ -229,8 +239,9 @@ impl Drop for Page {
 mod tests {
     use std::{io::Write, time::Duration};
 
-    use kiseki_utils::logger::install_fmt_log;
     use tracing::info;
+
+    use kiseki_utils::logger::install_fmt_log;
 
     use super::*;
 

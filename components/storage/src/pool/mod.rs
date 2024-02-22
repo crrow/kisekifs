@@ -1,11 +1,11 @@
 pub mod disk_pool;
 pub mod memory_pool;
 
-use std::time::Duration;
 use std::{
     fmt::{Debug, Display, Formatter},
     sync::Arc,
     thread,
+    time::Duration,
 };
 
 use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};

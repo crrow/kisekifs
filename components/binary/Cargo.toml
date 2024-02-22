@@ -6,30 +6,29 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-snafu.workspace = true
-tracing.workspace = true
 fuser.workspace = true
+rustix = { workspace = true, features = ["mount"] }
+snafu.workspace = true
 tokio.workspace = true
-rustix = {workspace = true, features = ["mount"]}
+tracing.workspace = true
 
 #kiseki-utils = {path = "../../components/utils", features = ["tokio-console"]}
-kiseki-utils = {path = "../../components/utils"}
-kiseki-types = {path = "../../components/types"}
-kiseki-storage = {path = "../../components/storage"}
-kiseki-common = {path = "../../components/common"}
-kiseki-meta = {path = "../../components/meta", features = ["meta-rocksdb"]}
+kiseki-common = { path = "../../components/common" }
 kiseki-fuse = { path = "../../components/fuse" }
-kiseki-vfs  = { path = "../../components/vfs" }
+kiseki-meta = { path = "../../components/meta", features = ["meta-rocksdb"] }
+kiseki-storage = { path = "../../components/storage" }
+kiseki-types = { path = "../../components/types" }
+kiseki-utils = { path = "../../components/utils" }
+kiseki-vfs = { path = "../../components/vfs" }
 
-clap = { version = "4.4.16", features = ["derive"]}
+clap = { version = "4.4.16", features = ["derive"] }
 clap-num = "1.0.2"
-procfs = "0.16.0"
-regex = "1.10.2"
 const_format = "0.2.32"
 ctrlc = "3.4.2"
 human-panic = "1.2.3"
-
+procfs = "0.16.0"
+regex = "1.10.2"
 
 [build-dependencies]
-built = {version = "0.7.1", features= ["git2"]}
+built = { version = "0.7.1", features = ["git2"] }
 const_format = "0.2.32"

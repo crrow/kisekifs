@@ -6,20 +6,19 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-fuser.workspace = true
-tracing.workspace = true
-opendal.workspace = true
-byteorder.workspace = true
-serde.workspace = true
 bincode.workspace = true
+bitflags.workspace = true
+byteorder.workspace = true
+fuser.workspace = true
 lazy_static.workspace = true
-snafu.workspace = true
+libc.workspace = true
+opendal.workspace = true
 rangemap.workspace = true
+serde.workspace = true
+snafu.workspace = true
 sonyflake.workspace = true
 tokio-util.workspace = true
-bitflags.workspace = true
-libc.workspace = true
+tracing.workspace = true
 
-kiseki-common = {path = "../../components/common"}
-kiseki-utils = {path = "../../components/utils"}
-
+kiseki-common = { path = "../../components/common" }
+kiseki-utils = { path = "../../components/utils" }

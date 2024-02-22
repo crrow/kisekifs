@@ -1,19 +1,24 @@
 use std::{
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{Arc, atomic::AtomicUsize},
     time::SystemTime,
 };
 
-use kiseki_common::FH;
-use kiseki_meta::MetaEngineRef;
-// use kiseki_storage::cache::CacheRef;
-use kiseki_storage::cache;
-use kiseki_storage::cache::file_cache::{FileCache, FileCacheRef};
-use kiseki_types::ino::Ino;
-use kiseki_utils::object_storage::ObjectStorage;
 use snafu::OptionExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
+
+use kiseki_common::FH;
+use kiseki_meta::MetaEngineRef;
+use kiseki_storage::{
+    cache,
+    cache::{
+        file_cache::{FileCache, FileCacheRef},
+        mem_cache::{MemCache, MemCacheRef},
+    },
+};
+use kiseki_types::ino::Ino;
+use kiseki_utils::object_storage::ObjectStorage;
 
 use crate::{
     err::Result,
@@ -35,6 +40,7 @@ pub(crate) struct DataManager {
     pub(crate) meta_engine: MetaEngineRef,
     pub(crate) object_storage: ObjectStorage,
     pub(crate) file_cache: FileCacheRef,
+    pub(crate) mem_cache: MemCacheRef,
     // pub(crate) data_cache: CacheRef,
 }
 
@@ -45,7 +51,6 @@ impl DataManager {
         chunk_size: usize,
         meta_engine_ref: MetaEngineRef,
         object_storage: ObjectStorage,
-        // cache_ref: CacheRef,
     ) -> Self {
         let remote_storage = object_storage.clone();
         Self {
@@ -57,9 +62,11 @@ impl DataManager {
             id_generator: Arc::new(sonyflake::Sonyflake::new().unwrap()),
             meta_engine: meta_engine_ref,
             object_storage,
-            // data_cache: cache_ref,
             file_cache: Arc::new(
-                FileCache::new(cache::file_cache::Config::default(), remote_storage).unwrap(),
+                FileCache::new(cache::file_cache::Config::default(), remote_storage.clone()).unwrap(),
+            ),
+            mem_cache: Arc::new(
+                MemCache::new(cache::mem_cache::Config::default(), remote_storage),
             ),
         }
     }

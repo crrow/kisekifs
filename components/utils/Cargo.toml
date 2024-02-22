@@ -9,32 +9,40 @@ edition = "2021"
 tokio-console = ["console-subscriber", "tokio/tracing"]
 
 [dependencies]
-snafu.workspace = true
-tokio.workspace = true
-serde.workspace = true
+bytes.workspace = true
 lazy_static.workspace = true
+serde.workspace = true
+snafu.workspace = true
 sonyflake.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-bytes.workspace = true
 
-kiseki-common = {path = "../../components/common"}
+kiseki-common = { path = "../../components/common" }
 
+backtrace = "0.3.60"
 console-subscriber = { version = "0.2", optional = true }
-num_cpus = "1.14.0"
-sentry-tracing = "0.32.2"
 dotenvy = "0.15.7"
+num_cpus = "1.14.0"
+object_store = { version = "0.9.0", features = ["aws"] }
 once_cell = "1.19.0"
-supports-color = "3.0.0"
-sentry = "0.32.1"
 opentelemetry = { version = "0.21.0" }
-opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.14.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client", "grpc-tonic"] }
+opentelemetry-otlp = { version = "0.14.0", default_features = false, features = [
+    "http-proto",
+    "trace",
+    "http",
+    "reqwest-client",
+    "grpc-tonic",
+] }
 opentelemetry-semantic-conventions = "0.13.0"
-tracing-opentelemetry = "0.22.0"
-tracing-appender = "0.2.3"
+opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 proc-macro2 = "1.0.66"
+pyroscope = "0.5.7"
+pyroscope_pprofrs = "0.2.7"
 quote = "1.0"
+sentry = "0.32.1"
+sentry-tracing = "0.32.2"
+supports-color = "3.0.0"
 syn = "1.0"
 syn2 = { version = "2.0", package = "syn", features = [
     "derive",
@@ -45,15 +53,12 @@ syn2 = { version = "2.0", package = "syn", features = [
     "extra-traits",
     "full",
 ] }
-pyroscope = "0.5.7"
-pyroscope_pprofrs = "0.2.7"
-users = "0.11.0"
 toml = "0.8.9"
+tracing-appender = "0.2.3"
 tracing-core = "0.1.32"
-backtrace = "0.3.60"
+tracing-opentelemetry = "0.22.0"
 url = "2.5.0"
-object_store = {version = "0.9.0", features = ["aws"]}
-
+users = "0.11.0"
 
 [dev-dependencies]
 tempfile.workspace = true
