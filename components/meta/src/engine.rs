@@ -1016,6 +1016,12 @@ impl MetaEngine {
         }
         Ok(())
     }
+
+    /// [rmdir] removes an empty subdirectory.
+    pub async fn rmdir(&self, parent: Ino, name: &str) -> Result<()>{
+        let parent = self.check_root(parent);
+        todo!()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

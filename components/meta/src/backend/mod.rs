@@ -76,4 +76,6 @@ pub trait Backend: Send + Sync + 'static {
 
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()>;
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat>;
+
+    fn do_rmdir(&self, parent: Ino, name: &str) -> Result<Ino>;
 }

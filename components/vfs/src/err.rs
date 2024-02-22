@@ -8,24 +8,24 @@ pub enum Error {
     JoinErr {
         #[snafu(implicit)]
         location: Location,
-        source: tokio::task::JoinError,
+        source:   tokio::task::JoinError,
     },
     OpenDalError {
         #[snafu(implicit)]
         location: Location,
-        source: opendal::Error,
+        source:   opendal::Error,
     },
 
     ObjectStorageError {
         #[snafu(implicit)]
         location: Location,
-        source: kiseki_utils::object_storage::ObjectStorageError,
+        source:   kiseki_utils::object_storage::ObjectStorageError,
     },
 
     ObjectBlockNotFound {
         #[snafu(implicit)]
         location: Location,
-        key: SliceKey,
+        key:      SliceKey,
     },
 
     StorageError {
@@ -37,7 +37,7 @@ pub enum Error {
 
     // ====VFS====
     LibcError {
-        errno: libc::c_int,
+        errno:    libc::c_int,
         #[snafu(implicit)]
         location: Location,
     },

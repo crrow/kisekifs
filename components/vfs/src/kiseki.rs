@@ -25,7 +25,7 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
+use kiseki_common::{DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
@@ -42,6 +42,7 @@ use scopeguard::defer;
 use snafu::{ensure, location, Location, OptionExt, ResultExt};
 use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
+use kiseki_types::internal_nodes::TRASH_INODE_NAME;
 
 use crate::{
     config::Config,
@@ -505,6 +506,25 @@ impl KisekiVFS {
             .await
             .context(MetaSnafu)?;
         Ok(FullEntry::new(ino, name, attr))
+    }
+
+    pub async fn rmdir(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
+        debug!("fs:rmdir with parent {:?} name {:?}", parent, name);
+        ensure!(name != DOT, LibcSnafu { errno: EINVAL });
+        ensure!(name != DOT_DOT, LibcSnafu { errno: EINVAL });
+        ensure!(
+            name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+        if parent == ROOT_INO && name == TRASH_INODE_NAME || parent.is_trash() && ctx.uid != 0 {
+            return LibcSnafu { errno: EPERM }.fail()?;
+        }
+
+        self.meta.rmdir(parent, name).await.context(MetaSnafu)?;
+
+        Ok(())
     }
 
     pub async fn open(&self, ctx: &FuseContext, inode: Ino, flags: i32) -> Result<Opened> {

@@ -47,16 +47,16 @@ pub(crate) type HandleTableRef = Arc<HandleTable>;
 
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
-    handles: DashMap<Ino, DashMap<FH, Handle>>,
-    _next_fh: AtomicU64,
+    handles:      DashMap<Ino, DashMap<FH, Handle>>,
+    _next_fh:     AtomicU64,
 }
 
 impl HandleTable {
     pub(crate) fn new(data_manager_ref: DataManagerRef) -> HandleTableRef {
         Arc::new(HandleTable {
             data_manager: data_manager_ref,
-            handles: DashMap::new(),
-            _next_fh: AtomicU64::new(1),
+            handles:      DashMap::new(),
+            _next_fh:     AtomicU64::new(1),
         })
     }
 
@@ -71,8 +71,8 @@ impl HandleTable {
                 fh,
                 inode,
                 inner: RwLock::new(DirHandleInner {
-                    children: Vec::new(),
-                    read_at: None,
+                    children:  Vec::new(),
+                    read_at:   None,
                     ofd_owner: 0,
                 }),
             })),
@@ -173,30 +173,30 @@ impl Handle {
 }
 
 pub(crate) struct FileHandle {
-    fh: FH,
+    fh:    FH,
     // cannot be changed
     inode: Ino, // cannot be changed
 
-    reader: Arc<FileReader>,
-    reader_cnt: Arc<AtomicUsize>,
+    reader:        Arc<FileReader>,
+    reader_cnt:    Arc<AtomicUsize>,
     reader_notify: Arc<Notify>,
 
     // The underlying data structure for flushing and writing.
-    writer: Option<Arc<FileWriter>>,
+    writer:                Option<Arc<FileWriter>>,
     // record how many write operations are waiting
-    write_wait_cnt: Arc<AtomicUsize>,
+    write_wait_cnt:        Arc<AtomicUsize>,
     // is someone holding the exclusive lock right now?
-    exclusive_locking: Arc<AtomicBool>,
+    exclusive_locking:     Arc<AtomicBool>,
     // notify when exclusive lock is released
     exclusive_lock_notify: Arc<Notify>,
     // pid -> FuseContext
-    operations: RwLock<HashMap<u32, HashMap<u64, Arc<FuseContext>>>>,
+    operations:            RwLock<HashMap<u32, HashMap<u64, Arc<FuseContext>>>>,
 
     // posix-lock
     pub(crate) locks: AtomicU8,
-    flock_owner: AtomicU64,
+    flock_owner:      AtomicU64,
     // kernel 3.1- does not pass lock_owner in release()
-    ofd_owner: AtomicU64,
+    ofd_owner:        AtomicU64,
 
     closed: AtomicBool,
 }
@@ -416,10 +416,10 @@ impl FileHandle {
 }
 
 pub(crate) struct FileHandleWriteGuard {
-    file_writer: Arc<FileWriter>,
-    exclusive_locking: Arc<AtomicBool>,
+    file_writer:           Arc<FileWriter>,
+    exclusive_locking:     Arc<AtomicBool>,
     exclusive_lock_notify: Arc<Notify>,
-    ctx: Arc<FuseContext>,
+    ctx:                   Arc<FuseContext>,
 }
 
 impl FileHandleWriteGuard {
@@ -441,10 +441,10 @@ impl Drop for FileHandleWriteGuard {
 }
 
 pub(crate) struct FileHandleReadGuard {
-    reader: Arc<FileReader>,
-    reader_cnt: Arc<AtomicUsize>,
+    reader:        Arc<FileReader>,
+    reader_cnt:    Arc<AtomicUsize>,
     reader_notify: Arc<Notify>,
-    ctx: Arc<FuseContext>,
+    ctx:           Arc<FuseContext>,
 }
 
 impl FileHandleReadGuard {
@@ -462,13 +462,13 @@ impl Drop for FileHandleReadGuard {
 }
 
 pub(crate) struct DirHandle {
-    fh: FH,
-    inode: Ino,
+    fh:               FH,
+    inode:            Ino,
     pub(crate) inner: RwLock<DirHandleInner>,
 }
 
 pub(crate) struct DirHandleInner {
-    pub(crate) children: Vec<Entry>,
-    pub(crate) read_at: Option<Instant>,
+    pub(crate) children:  Vec<Entry>,
+    pub(crate) read_at:   Option<Instant>,
     pub(crate) ofd_owner: u64, // OFD lock
 }
