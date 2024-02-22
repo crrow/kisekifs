@@ -6,6 +6,8 @@ use std::{
     },
 };
 use std::cell::UnsafeCell;
+use std::cmp::max;
+use std::fmt::Debug;
 use std::io::Cursor;
 
 use dashmap::DashMap;
@@ -24,6 +26,7 @@ use kiseki_types::{
 };
 use kiseki_types::slice::SliceKey;
 use kiseki_utils::object_storage::ObjectStorage;
+use kiseki_utils::readable_size::ReadableSize;
 
 use crate::{
     data_manager::{DataManager, DataManagerRef},
@@ -108,7 +111,7 @@ impl FileReader {
 
         debug!(
             "{:?}, actual can read length: {}",
-            self.ino, expected_read_len
+            self.ino, ReadableSize(expected_read_len as u64)
         );
 
         // get the slice inside the chunk.
@@ -164,7 +167,9 @@ impl FileReader {
                 virtual_slice_map.insert(x, VirtualSlice::Hole);
             }
             for (r, s) in range_map.overlapping(&current_read_range) {
-                virtual_slice_map.insert(r.clone(), VirtualSlice::Slice(s.clone()));
+                let new_r = (max(r.start, current_read_range.start)..min(r.end, current_read_range.end));
+                debug!("find overlapping slice in chunk: {:?}, range: {:?}, new_range: {:?}, slice: {:?}", chunk_idx, r, new_r, s);
+                virtual_slice_map.insert(new_r, VirtualSlice::Slice(s.clone()));
             }
             drop(range_map);
 
@@ -172,6 +177,10 @@ impl FileReader {
                 let start = total_read_len + r.start - chunk_pos;
                 let end = total_read_len + r.end - chunk_pos;
                 let len = end - start;
+
+                // assert!(start <= end, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs, ReadableSize(start as u64), ReadableSize(end as u64), ReadableSize(expected_read_len as u64));
+                // assert!(start < expected_read_len, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs, ReadableSize(start as u64), ReadableSize(end as u64), ReadableSize(expected_read_len as u64));
+                // assert!(end <= expected_read_len, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs, ReadableSize(start as u64), ReadableSize(end as u64), ReadableSize(expected_read_len as u64));
 
                 match vs {
                     VirtualSlice::Hole => {
@@ -447,10 +456,14 @@ mod tests {
         assert_eq!(write_len, data.len());
 
         fw.finish().await.unwrap();
+        let file_len = fw.get_length();
+        assert_eq!(file_len, chunk_size + 8);
 
         let mut read_data = vec![0u8; 11];
 
-        let file_reader = data_manager.new_file_reader(inode, 0, chunk_size + 8);
+        data_manager.file_readers.remove(&(inode, 0));
+
+        let file_reader = data_manager.new_file_reader(inode, 0, file_len);
         let read_len = file_reader
             .read(chunk_size - 3, read_data.as_mut_slice())
             .await
@@ -458,5 +471,59 @@ mod tests {
         assert_eq!(read_len, 11);
         println!("{}", String::from_utf8_lossy(&read_data));
         assert!(read_data.starts_with(b"hello world"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_write_1_g() {
+        install_fmt_log();
+
+        let mut meta_config = MetaConfig::default();
+        let tempdir = tempfile::tempdir().unwrap();
+        let format = Format::default();
+        let temppath = tempdir.path().to_str().unwrap();
+        meta_config.dsn = format!("rocksdb://:{}", temppath);
+        kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
+
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let fuse_ctx = FuseContext::background();
+        let (inode, _attr) = meta_engine
+            .create(&fuse_ctx, ROOT_INO, "a", 0o650, 0, 0)
+            .await
+            .unwrap();
+
+        let data_manager = Arc::new(DataManager::new(
+            format.page_size,
+            format.block_size,
+            format.chunk_size,
+            meta_engine,
+            new_memory_object_store(),
+        ));
+
+        data_manager.open_file_writer(inode, 0);
+        let step_size: usize = 4 << 20;
+        let total_step: usize = 1 << 30 / step_size;
+        let data = vec![1u8; step_size];
+
+        let fw = data_manager.find_file_writer(inode).unwrap();
+        for i in 0..total_step {
+            let write_len = fw
+                .write(i * step_size, &data)
+                .await.unwrap();
+            assert_eq!(write_len, step_size);
+        }
+        fw.finish().await.unwrap();
+
+        let file_reader = data_manager.new_file_reader(inode, 0, total_step * step_size);
+        let page_size: usize = 128 << 10;
+        let total_read_step = 1 << 30 / page_size;
+        let expect_read_content = vec![1u8; page_size];
+        for i in 0..total_read_step {
+            let mut read_data = vec![0u8; page_size];
+            let read_len = file_reader
+                .read(i * page_size, &mut read_data)
+                .await.unwrap();
+            assert_eq!(read_len, page_size);
+            assert_eq!(read_data, expect_read_content);
+        }
     }
 }

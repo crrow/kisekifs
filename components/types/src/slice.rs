@@ -7,13 +7,15 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use std::fmt::Debug;
 
-use bincode::serialize;
-use kiseki_utils::object_storage::ObjectStoragePath;
 use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, Location, ResultExt, Snafu};
+
+use kiseki_utils::object_storage::ObjectStoragePath;
+use kiseki_utils::readable_size::ReadableSize;
 
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
@@ -97,7 +99,7 @@ impl Slices {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Slice {
     /// Owned means this slice is built by write operation.
     Owned {
@@ -122,6 +124,34 @@ pub enum Slice {
         /// The length of the borrowed slice.
         len: u32,
     },
+}
+
+impl Debug for Slice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Slice::Owned {
+                chunk_pos,
+                id,
+                size,
+                _padding,
+            } => write!(
+                f,
+                "Slice::Owned {{ chunk_pos: {}, id: {}, size: {}, _padding: {} }}",
+                chunk_pos, id, ReadableSize(*size as u64), _padding
+            ),
+            Slice::Borrowed {
+                chunk_pos,
+                id,
+                size,
+                off,
+                len,
+            } => write!(
+                f,
+                "Slice::Borrowed {{ chunk_pos: {}, id: {}, size: {}, off: {}, len: {} }}",
+                chunk_pos, id, ReadableSize(*size as u64), off, len
+            ),
+        }
+    }
 }
 
 impl Slice {

@@ -1053,10 +1053,15 @@ fn locate_chunk(chunk_size: usize, offset: usize, expect_write_len: usize) -> Ve
     (start_chunk_idx..=end_chunk_idx)
         .map(move |idx| {
             let max_can_write = min(chunk_size - chunk_pos, left);
-            // debug!(
-            //     "chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max
-            // can write: {}",     self.chunk_size, idx, chunk_pos, left,
-            // buf_start_at, max_can_write, );
+            debug!(
+                "offset: {}, chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max can write: {}",
+                ReadableSize(offset as u64),
+                ReadableSize(chunk_size as u64),
+                idx,
+                chunk_pos,
+                ReadableSize(left as u64),
+                ReadableSize(buf_start_at as u64),
+                ReadableSize(max_can_write as u64));
 
             let ctx = ChunkWriteCtx {
                 file_offset: offset + buf_start_at,
