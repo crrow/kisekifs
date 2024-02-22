@@ -137,3 +137,9 @@ alias sr := seq-read
     - rm -r /tmp/kiseki/fio
     mkdir -p /tmp/kiseki/fio
     fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=read --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+
+alias rr := random-read
+@random-read:
+    - rm -r /tmp/kiseki/fio
+    mkdir -p /tmp/kiseki/fio
+    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=randread --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
