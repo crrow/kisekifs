@@ -108,9 +108,6 @@ impl KisekiVFS {
             vfs_config.chunk_size,
             meta.clone(),
             object_storage,
-            // kiseki_storage::cache::new_juice_builder()
-            //     .build()
-            //     .context(StorageSnafu)?,
         ));
 
         let vfs = Self {
@@ -138,20 +135,14 @@ impl KisekiVFS {
         Ok(())
     }
 
-    pub async fn stat_fs<I: Into<Ino>>(
+    pub fn stat_fs<I: Into<Ino>>(
         self: &Arc<Self>,
         ctx: Arc<FuseContext>,
         ino: I,
     ) -> Result<kiseki_types::stat::FSStat> {
         let ino = ino.into();
         trace!("fs:stat_fs with ino {:?}", ino);
-        let meta = self.meta.clone();
-        let h = tokio::spawn(async move {
-            let h = meta.stat_fs(ctx, ino)?;
-            Ok::<kiseki_types::stat::FSStat, Error>(h)
-        })
-            .await
-            .context(JoinErrSnafu)??;
+        let h = self.meta.stat_fs(ctx, ino)?;
         Ok(h)
     }
 
@@ -176,6 +167,7 @@ impl KisekiVFS {
         })
     }
 
+    /// [get_entry_ttl]
     pub fn get_entry_ttl(&self, kind: FileType) -> &Duration {
         if kind == FileType::Directory {
             &self.config.dir_entry_timeout
@@ -184,14 +176,16 @@ impl KisekiVFS {
         }
     }
 
-    pub fn update_length(&self, inode: Ino, attr: &mut InodeAttr) {
+    /// [try_update_file_reader_length] is used for checking and update the file
+    /// reader length.
+    pub async fn try_update_file_reader_length(&self, inode: Ino, attr: &mut InodeAttr) {
         if attr.is_file() {
             let len = self.data_manager.get_length(inode);
             if len > attr.length {
                 attr.length = len;
             }
             if len < attr.length {
-                self.data_manager.truncate_reader(inode, attr.length);
+                self.data_manager.truncate_reader(inode, attr.length).await;
             }
         }
     }
@@ -290,7 +284,7 @@ impl KisekiVFS {
 
     pub async fn mknod(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: String,
         mode: mode_t,
@@ -331,7 +325,7 @@ impl KisekiVFS {
 
     pub async fn create(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
         mode: u16,
@@ -359,10 +353,11 @@ impl KisekiVFS {
             .context(MetaSnafu)?;
 
         let mut e = FullEntry::new(inode, name, attr);
-        self.update_length(inode, &mut e.attr);
+        self.try_update_file_reader_length(inode, &mut e.attr).await;
         let fh = self
             .handle_table
-            .new_file_handle(inode, e.attr.length, flags).await?;
+            .new_file_handle(inode, e.attr.length, flags)
+            .await?;
         Ok((e, fh))
     }
 
@@ -470,7 +465,7 @@ impl KisekiVFS {
             .await
             .context(MetaSnafu)?;
 
-        self.update_length(ino, &mut new_attr);
+        self.try_update_file_reader_length(ino, &mut new_attr).await;
 
         // TODO: invalid open_file cache
 
@@ -485,7 +480,7 @@ impl KisekiVFS {
 
     pub async fn mkdir(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
         mode: u16,
@@ -531,10 +526,11 @@ impl KisekiVFS {
             .open_inode(ctx, inode, flags)
             .await
             .context(MetaSnafu)?;
-        self.update_length(inode, &mut attr);
+        self.try_update_file_reader_length(inode, &mut attr).await;
         let opened_fh = self
             .handle_table
-            .new_file_handle(inode, attr.length, flags).await?;
+            .new_file_handle(inode, attr.length, flags)
+            .await?;
         // TODO: review me
         let entry = FullEntry::new(inode, "", attr);
 
@@ -865,7 +861,7 @@ mod tests {
         let ctx = Arc::new(FuseContext::background());
 
         let (entry, fh) = vfs
-            .create(&ctx, ROOT_INO, "f", 0o755, 0, libc::O_RDWR)
+            .create(ctx.clone(), ROOT_INO, "f", 0o755, 0, libc::O_RDWR)
             .await
             .unwrap();
 
@@ -931,15 +927,19 @@ mod tests {
         // sequential_write(&vfs, entry.inode, fh).await;
     }
 
-    // async fn sequential_write(vfs: &Arc<KisekiVFS>, inode: Ino, fh: FH) {
-    //     let meta_ctx = FuseContext::background();
-    //     let data = vec![0u8; 128 << 10];
-    //     for _i in 0..=1000 {
-    //         let write_len = vfs
-    //             .write(&meta_ctx, inode, fh, 128 << 10, &data, 0, 0, None)
-    //             .await
-    //             .unwrap();
-    //         assert_eq!(write_len, 128 << 10);
-    //     }
-    // }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vfs_basic() -> Result<()> {
+        install_fmt_log();
+
+        let vfs = Arc::new(make_vfs().await);
+        let ctx = Arc::new(FuseContext::background());
+
+        let stat = vfs.stat_fs(ctx.clone(), ROOT_INO)?;
+        debug!("{:?}", stat);
+
+        let dir1 = vfs.mkdir(ctx.clone(), ROOT_INO, "d1", 0o755, 0).await?;
+        let dir2 = vfs.mkdir(ctx.clone(), dir1.inode, "d2", 0o755, 0).await?;
+
+        Ok(())
+    }
 }

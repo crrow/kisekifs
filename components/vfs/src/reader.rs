@@ -1,45 +1,45 @@
 use std::{
-    cmp::min,
+    cell::UnsafeCell,
+    cmp::{max, min},
+    collections::HashMap,
+    fmt::Debug,
+    io::Cursor,
+    ops::Deref,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering}, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering}, Weak,
     },
 };
-use std::cell::UnsafeCell;
-use std::cmp::max;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::io::Cursor;
 
 use dashmap::DashMap;
 use rangemap::RangeMap;
 use snafu::ResultExt;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-use tracing::{debug, instrument};
+use tokio::{sync::RwLock, task::JoinHandle};
+use tracing::{debug, error, instrument};
 
 use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, ChunkIndex, FH};
 use kiseki_meta::MetaEngineRef;
-use kiseki_storage::cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef};
-use kiseki_storage::err::{JoinErrSnafu, ObjectStorageSnafu, UnknownIOSnafu};
+use kiseki_storage::{
+    cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef},
+    err::{JoinErrSnafu, ObjectStorageSnafu, UnknownIOSnafu},
+};
 use kiseki_types::{
     ino::Ino,
-    slice::{make_slice_object_key, OverlookedSlicesRef, Slice, SliceID},
+    slice::{make_slice_object_key, OverlookedSlicesRef, Slice, SliceID, SliceKey},
 };
-use kiseki_types::slice::SliceKey;
-use kiseki_utils::object_storage::ObjectStorage;
-use kiseki_utils::readable_size::ReadableSize;
+use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 
 use crate::{
     data_manager::{DataManager, DataManagerRef},
-    err::{Result, StorageSnafu},
+    err::{ObjectBlockNotFoundSnafu, Result, StorageSnafu},
+    handle::HandleTable,
     KisekiVFS,
 };
-use crate::err::ObjectBlockNotFoundSnafu;
 
 impl DataManager {
-    /// Get the file reader for the given inode and file handle.
-    pub(crate) async fn new_file_reader(
+    /// [open_file_reader] will create [FileReader] for the given [Ino] and [FH]
+    /// if not exists.
+    pub(crate) async fn open_file_reader(
         self: &Arc<Self>,
         inode: Ino,
         fh: FH,
@@ -83,7 +83,7 @@ impl DataManager {
             data_engine: Arc::downgrade(&self),
             ino: inode,
             fh,
-            length,
+            length: AtomicUsize::new(length),
             file_cache: self.file_cache.clone(),
             mem_cache: self.mem_cache.clone(),
             chunks: Default::default(),
@@ -93,11 +93,29 @@ impl DataManager {
         return fr;
     }
 
-    pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
-        debug!(
-            "DO NOTHING: truncate reader: {:?}, length: {}",
-            inode, length
-        );
+    /// [truncate_reader] is called when we modify the file length.
+    /// Invoke this method to truncate the file reader's length.
+    pub(crate) async fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
+        /// It's possible that the [FileReader] doesn't exist, even if we create
+        /// the FileReader in the [HandleTable::new_file_handle].
+        /// Since there are some other operation that can modify the file
+        /// length, such as [set_attr], etc. Especially when we haven't
+        /// open the file handle yet.
+        let out_read_guard = self.file_readers.read().await;
+        if let Some(inner_map) = out_read_guard.get(&inode) {
+            let inner_map = inner_map.clone();
+            // drop the outer lock before we try to acquire the inner lock.
+            drop(out_read_guard);
+
+            // acquire the inner lock.
+            let mut inner_read_guard = inner_map.read().await;
+            for (_, fr) in inner_read_guard.iter() {
+                // TODO: review me, should we use compare and swap?
+                fr.length.store(length as usize, Ordering::Release);
+            }
+        } else {
+            error!("not found any file reader under: {:?}", inode);
+        }
     }
 }
 
@@ -109,7 +127,7 @@ pub(crate) struct FileReader {
     ino: Ino,
     fh: FH,
     // The max file read length, it was set when we crate the file handle.
-    length: usize,
+    length: AtomicUsize,
     // the write back cache.
     file_cache: FileCacheRef,
     // the read-only cache.
@@ -124,23 +142,26 @@ pub(crate) struct FileReader {
 }
 
 impl FileReader {
+    /// [read] will read the content of file from the specified [offset].
     pub(crate) async fn read(self: &Arc<Self>, offset: usize, dst: &mut [u8]) -> Result<usize> {
         let expected_read_len = dst.len();
+        let length = self.length.load(Ordering::Acquire);
         // read offset should not exceed the file length.
-        if offset >= self.length || expected_read_len == 0 {
+        if offset >= length || expected_read_len == 0 {
             return Ok(0);
         }
 
         // cal the real read length.
-        let expected_read_len = if offset + expected_read_len > self.length {
-            self.length - offset
+        let expected_read_len = if offset + expected_read_len > length {
+            length - offset
         } else {
             expected_read_len
         };
 
         debug!(
             "{:?}, actual can read length: {}",
-            self.ino, ReadableSize(expected_read_len as u64)
+            self.ino,
+            ReadableSize(expected_read_len as u64)
         );
 
         // get the slice inside the chunk.
@@ -196,8 +217,12 @@ impl FileReader {
                 virtual_slice_map.insert(x, VirtualSlice::Hole);
             }
             for (r, s) in range_map.overlapping(&current_read_range) {
-                let new_r = (max(r.start, current_read_range.start)..min(r.end, current_read_range.end));
-                debug!("find overlapping slice in chunk: {:?}, range: {:?}, new_range: {:?}, slice: {:?}", chunk_idx, r, new_r, s);
+                let new_r =
+                    (max(r.start, current_read_range.start)..min(r.end, current_read_range.end));
+                debug!(
+                    "find overlapping slice in chunk: {:?}, range: {:?}, new_range: {:?}, slice: {:?}",
+                    chunk_idx, r, new_r, s
+                );
                 virtual_slice_map.insert(new_r, VirtualSlice::Slice(s.clone()));
             }
             drop(range_map);
@@ -207,9 +232,15 @@ impl FileReader {
                 let end = total_read_len + r.end - chunk_pos;
                 let len = end - start;
 
-                // assert!(start <= end, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs, ReadableSize(start as u64), ReadableSize(end as u64), ReadableSize(expected_read_len as u64));
-                // assert!(start < expected_read_len, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs, ReadableSize(start as u64), ReadableSize(end as u64), ReadableSize(expected_read_len as u64));
-                // assert!(end <= expected_read_len, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs, ReadableSize(start as u64), ReadableSize(end as u64), ReadableSize(expected_read_len as u64));
+                // assert!(start <= end, "VS: {:?}, start: {}, end: {}, expected_read_len: {}",
+                // vs, ReadableSize(start as u64), ReadableSize(end as u64),
+                // ReadableSize(expected_read_len as u64)); assert!(start <
+                // expected_read_len, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs,
+                // ReadableSize(start as u64), ReadableSize(end as u64),
+                // ReadableSize(expected_read_len as u64)); assert!(end <=
+                // expected_read_len, "VS: {:?}, start: {}, end: {}, expected_read_len: {}", vs,
+                // ReadableSize(start as u64), ReadableSize(end as u64),
+                // ReadableSize(expected_read_len as u64));
 
                 match vs {
                     VirtualSlice::Hole => {
@@ -229,16 +260,15 @@ impl FileReader {
                         );
                         let sid = s.get_id();
 
-                        let read_len =
-                            read_slice_from_cache(
-                                sid,
-                                engine.file_cache.clone(),
-                                engine.mem_cache.clone(),
-                                s.get_underlying_size(),
-                                0,
-                                &mut dst[start..end],
-                            )
-                                .await?;
+                        let read_len = read_slice_from_cache(
+                            sid,
+                            engine.file_cache.clone(),
+                            engine.mem_cache.clone(),
+                            s.get_underlying_size(),
+                            0,
+                            &mut dst[start..end],
+                        )
+                            .await?;
 
                         // let rb = engine.new_read_buffer(s.get_id(),
                         // s.get_underlying_size());
@@ -294,7 +324,6 @@ enum VirtualSlice {
     Slice(Slice),
 }
 
-
 #[instrument(skip_all, fields(length, offset))]
 async fn read_slice_from_cache(
     slice_id: SliceID,
@@ -344,10 +373,15 @@ async fn read_slice_from_cache(
         let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
             let key = SliceKey::new(slice_id, block_idx, obj_block_size);
             // 1. first of all, try to get block from file-cache
-            if let Some(mut block_reader) = file_cache_clone.get_range(&key, block_offset, current_block_to_read_len).await? {
+            if let Some(mut block_reader) = file_cache_clone
+                .get_range(&key, block_offset, current_block_to_read_len)
+                .await?
+            {
                 let mut slice = block_reader.as_ref();
                 // copy to the writer
-                let copy_len = tokio::io::copy(&mut slice, &mut writer).await.context(UnknownIOSnafu)?;
+                let copy_len = tokio::io::copy(&mut slice, &mut writer)
+                    .await
+                    .context(UnknownIOSnafu)?;
                 return Ok(copy_len as usize);
             }
 
@@ -356,14 +390,14 @@ async fn read_slice_from_cache(
                 // copy to the writer
                 let reader = block.slice(block_offset..block_offset + current_block_to_read_len);
                 let mut slice = reader.as_ref();
-                let copy_len = tokio::io::copy(&mut slice, &mut writer).await.context(UnknownIOSnafu)?;
+                let copy_len = tokio::io::copy(&mut slice, &mut writer)
+                    .await
+                    .context(UnknownIOSnafu)?;
                 return Ok(copy_len as usize);
             }
 
             // 3. report not found error
-            return ObjectBlockNotFoundSnafu {
-                key,
-            }.fail()?;
+            return ObjectBlockNotFoundSnafu { key }.fail()?;
         });
         hanldes.push(handle);
     }
@@ -453,9 +487,9 @@ mod tests {
         kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
 
         let meta_engine = kiseki_meta::open(meta_config).unwrap();
-        let fuse_ctx = FuseContext::background();
+        let fuse_ctx = Arc::new(FuseContext::background());
         let (inode, _attr) = meta_engine
-            .create(&fuse_ctx, ROOT_INO, "a", 0o650, 0, 0)
+            .create(fuse_ctx, ROOT_INO, "a", 0o650, 0, 0)
             .await
             .unwrap();
 
@@ -479,7 +513,7 @@ mod tests {
         let fw = data_manager.find_file_writer(inode).unwrap();
         fw.finish().await.unwrap();
 
-        let file_reader = data_manager.new_file_reader(inode, 0, write_len).await;
+        let file_reader = data_manager.open_file_reader(inode, 0, write_len).await;
 
         let mut read_data = vec![0u8; 11];
         let read_len = file_reader.read(0, read_data.as_mut_slice()).await;
@@ -505,7 +539,7 @@ mod tests {
 
         file_reader.close().await;
 
-        let file_reader = data_manager.new_file_reader(inode, 0, file_len).await;
+        let file_reader = data_manager.open_file_reader(inode, 0, file_len).await;
         let read_len = file_reader
             .read(chunk_size - 3, read_data.as_mut_slice())
             .await
@@ -527,9 +561,9 @@ mod tests {
         kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
 
         let meta_engine = kiseki_meta::open(meta_config).unwrap();
-        let fuse_ctx = FuseContext::background();
+        let fuse_ctx = Arc::new(FuseContext::background());
         let (inode, _attr) = meta_engine
-            .create(&fuse_ctx, ROOT_INO, "a", 0o650, 0, 0)
+            .create(fuse_ctx, ROOT_INO, "a", 0o650, 0, 0)
             .await
             .unwrap();
 
@@ -548,14 +582,14 @@ mod tests {
 
         let fw = data_manager.find_file_writer(inode).unwrap();
         for i in 0..total_step {
-            let write_len = fw
-                .write(i * step_size, &data)
-                .await.unwrap();
+            let write_len = fw.write(i * step_size, &data).await.unwrap();
             assert_eq!(write_len, step_size);
         }
         fw.finish().await.unwrap();
 
-        let file_reader = data_manager.new_file_reader(inode, 0, total_step * step_size).await;
+        let file_reader = data_manager
+            .open_file_reader(inode, 0, total_step * step_size)
+            .await;
         let page_size: usize = 128 << 10;
         let total_read_step = 1 << 30 / page_size;
         let expect_read_content = vec![1u8; page_size];
@@ -563,7 +597,8 @@ mod tests {
             let mut read_data = vec![0u8; page_size];
             let read_len = file_reader
                 .read(i * page_size, &mut read_data)
-                .await.unwrap();
+                .await
+                .unwrap();
             assert_eq!(read_len, page_size);
             assert_eq!(read_data, expect_read_content);
         }

@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod config;
-mod err;
-pub mod null;
-
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
@@ -23,28 +19,34 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-pub use config::FuseConfig;
 use fuser::{
-    FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    Filesystem, FileType, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow,
 };
+use libc::{__u64, c_int};
+use snafu::{ResultExt, Snafu, Whatever};
+use tokio::runtime;
+use tracing::{debug, error, field, info, instrument, Instrument};
+
+pub use config::FuseConfig;
 use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
-use kiseki_meta::context::{FuseContext, EMPTY_CONTEXT};
+use kiseki_meta::context::{EMPTY_CONTEXT, FuseContext};
 use kiseki_types::{
     attr::InodeAttr,
     entry::{Entry, FullEntry},
     ino::Ino,
     ToErrno,
 };
+use kiseki_types::stat::FSStat;
 use kiseki_utils::readable_size::ReadableSize;
 use kiseki_vfs::KisekiVFS;
-use libc::{__u64, c_int};
-use snafu::{ResultExt, Snafu, Whatever};
-use tokio::runtime;
-use tracing::{debug, error, field, info, instrument, Instrument};
 
 use crate::err::Error;
+
+mod config;
+mod err;
+pub mod null;
 
 #[derive(Debug)]
 pub struct KisekiFuse {
@@ -93,8 +95,12 @@ impl KisekiFuse {
                 }
             }
         }
+        self.runtime.block_on(
+            self.vfs
+                .try_update_file_reader_length(inode, &mut entry.attr)
+                .in_current_span(),
+        );
 
-        self.vfs.update_length(inode, &mut entry.attr);
         reply.entry(
             self.vfs.get_entry_ttl(entry.attr.kind),
             &entry.attr.to_fuse_attr(entry.inode),
@@ -129,7 +135,11 @@ impl KisekiFuse {
                     debug!("failed to refresh attr for {:?} {:?}", inode, e);
                 }
             }
-            self.vfs.update_length(inode, &mut attr);
+            self.runtime.block_on(
+                self.vfs
+                    .try_update_file_reader_length(inode, &mut attr)
+                    .in_current_span(),
+            );
         }
 
         reply.attr(self.vfs.get_entry_ttl(attr.kind), &attr.to_fuse_attr(inode))
@@ -154,7 +164,7 @@ impl Filesystem for KisekiFuse {
         }
         Ok(())
     }
-    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = FuseContext::from(_req);
         let name = match name.to_str() {
@@ -188,7 +198,7 @@ impl Filesystem for KisekiFuse {
         self.reply_entry(&ctx, reply, entry);
     }
 
-    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=ino, name=field::Empty))]
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, name = field::Empty))]
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         match self
             .runtime
@@ -203,7 +213,7 @@ impl Filesystem for KisekiFuse {
         };
     }
 
-    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = _ino, name = field::Empty))]
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         // 	http://man.he.net/man2/statfs
         // struct statfs {
@@ -225,11 +235,8 @@ impl Filesystem for KisekiFuse {
         // };
 
         let ctx = Arc::new(FuseContext::from(_req));
-        // FIXME: use a better way
-        let state = self
-            .runtime
-            .block_on(self.vfs.stat_fs(ctx, _ino).in_current_span())
-            .unwrap();
+        // in case we can't get the stat_fs, we just return a default one.
+        let state = self.vfs.stat_fs(ctx, _ino).unwrap_or(FSStat::default());
 
         // Compute the total number of available blocks
         let total_blocks = max(state.total_size / BLOCK_SIZE as u64, 1);
@@ -264,7 +271,7 @@ impl Filesystem for KisekiFuse {
     // Optionally opendir may also return an arbitrary filehandle in the
     // fuse_file_info structure, which will be passed to readdir, releasedir and
     // fsyncdir.
-    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=_ino, name=field::Empty))]
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = _ino, name = field::Empty))]
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
         let ctx = FuseContext::from(_req);
         match self
@@ -276,7 +283,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, offset = offset))]
     fn readdir(
         &mut self,
         _req: &Request<'_>,
@@ -315,7 +322,7 @@ impl Filesystem for KisekiFuse {
         reply.ok();
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
     fn mknod(
         &mut self,
         _req: &Request<'_>,
@@ -327,13 +334,13 @@ impl Filesystem for KisekiFuse {
         reply: ReplyEntry,
     ) {
         // mode_t is u32 on Linux but u16 on macOS, so cast it here
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         let name = name.to_string_lossy().to_string();
 
         match self.runtime.block_on(
             self.vfs
                 .mknod(
-                    &ctx,
+                    ctx.clone(),
                     Ino(parent),
                     name,
                     mode as libc::mode_t,
@@ -347,7 +354,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
     fn create(
         &mut self,
         _req: &Request<'_>,
@@ -358,12 +365,12 @@ impl Filesystem for KisekiFuse {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         let name = name.to_string_lossy().to_string();
 
         match self.runtime.block_on(
             self.vfs
-                .create(&ctx, Ino(parent), &name, mode as u16, umask as u16, flags)
+                .create(ctx.clone(), Ino(parent), &name, mode as u16, umask as u16, flags)
                 .in_current_span(),
         ) {
             Ok((entry, fh)) => reply.created(
@@ -377,7 +384,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, name=field::Empty))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, name = field::Empty))]
     fn setattr(
         &mut self,
         _req: &Request<'_>,
@@ -418,7 +425,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
     fn mkdir(
         &mut self,
         _req: &Request<'_>,
@@ -428,11 +435,11 @@ impl Filesystem for KisekiFuse {
         umask: u32,
         reply: ReplyEntry,
     ) {
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         let name = name.to_string_lossy().to_string();
         match self.runtime.block_on(
             self.vfs
-                .mkdir(&ctx, Ino(parent), &name, mode as u16, umask as u16)
+                .mkdir(ctx.clone(), Ino(parent), &name, mode as u16, umask as u16)
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
@@ -440,7 +447,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=_ino, pid=_req.pid(), name=field::Empty))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = _ino, pid = _req.pid(), name = field::Empty))]
     fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
         let ctx = FuseContext::from(_req);
         match self
@@ -452,7 +459,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, size=size, name=field::Empty))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, offset = offset, size = size, name = field::Empty))]
     fn read(
         &mut self,
         _req: &Request<'_>,
@@ -490,7 +497,7 @@ impl Filesystem for KisekiFuse {
         );
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=ReadableSize(offset as u64).to_string(), length=ReadableSize(data.len() as u64).to_string(), pid=_req.pid(), name=field::Empty))]
+    #[instrument(level = "debug", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, offset = ReadableSize(offset as u64).to_string(), length = ReadableSize(data.len() as u64).to_string(), pid = _req.pid(), name = field::Empty))]
     // #[instrument(fields(req=_req.unique(), ino=ino, fh=fh, offset=offset,
     // length=data.len(), pid=_req.pid(), name=field::Empty))]
     fn write(
@@ -527,7 +534,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, fh=fh, pid=req.pid(), name=field::Empty))]
+    #[instrument(level = "info", skip_all, fields(req = req.unique(), ino = ino, fh = fh, pid = req.pid(), name = field::Empty))]
     fn flush(&mut self, req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
         let ctx = Arc::new(FuseContext::from(req));
         match self.runtime.block_on(
@@ -540,7 +547,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="info", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync, name=field::Empty))]
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, datasync = datasync, name = field::Empty))]
     fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, _reply: ReplyEmpty) {
         let ctx = Arc::new(FuseContext::from(_req));
         match self.runtime.block_on(
@@ -553,7 +560,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, name=field::Empty))]
+    #[instrument(level = "info", skip_all, fields(req = req.unique(), ino = ino, name = field::Empty))]
     fn fallocate(
         &mut self,
         req: &Request<'_>,
@@ -575,7 +582,7 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    #[instrument(level="info", skip_all, fields(req=req.unique(), ino=ino, fh=fh, name=field::Empty))]
+    #[instrument(level = "info", skip_all, fields(req = req.unique(), ino = ino, fh = fh, name = field::Empty))]
     fn release(
         &mut self,
         req: &Request<'_>,

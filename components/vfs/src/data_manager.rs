@@ -1,13 +1,8 @@
 use std::{
-    sync::{Arc, atomic::AtomicUsize},
+    collections::HashMap,
+    sync::{atomic::AtomicUsize, Arc},
     time::SystemTime,
 };
-use std::collections::HashMap;
-
-use snafu::OptionExt;
-use tokio::sync::{mpsc, RwLock};
-use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
 use kiseki_common::FH;
 use kiseki_meta::MetaEngineRef;
@@ -20,12 +15,16 @@ use kiseki_storage::{
 };
 use kiseki_types::ino::Ino;
 use kiseki_utils::object_storage::ObjectStorage;
+use snafu::OptionExt;
+use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use crate::{
     err::Result,
+    reader::FileReader,
     writer::{FileWriter, FileWritersRef},
 };
-use crate::reader::FileReader;
 
 pub(crate) type DataManagerRef = Arc<DataManager>;
 
@@ -64,11 +63,13 @@ impl DataManager {
             meta_engine: meta_engine_ref,
             object_storage,
             file_cache: Arc::new(
-                FileCache::new(cache::file_cache::Config::default(), remote_storage.clone()).unwrap(),
+                FileCache::new(cache::file_cache::Config::default(), remote_storage.clone())
+                    .unwrap(),
             ),
-            mem_cache: Arc::new(
-                MemCache::new(cache::mem_cache::Config::default(), remote_storage),
-            ),
+            mem_cache: Arc::new(MemCache::new(
+                cache::mem_cache::Config::default(),
+                remote_storage,
+            )),
         }
     }
 

@@ -17,12 +17,16 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        Arc,
     },
 };
 
 use dashmap::DashMap;
+use kiseki_common::FH;
+use kiseki_meta::context::FuseContext;
+use kiseki_types::{entry::Entry, ino::Ino};
+use kiseki_utils::readable_size::ReadableSize;
 use libc::clone;
 use snafu::ResultExt;
 use tokio::{
@@ -31,11 +35,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, instrument, Instrument};
-
-use kiseki_common::FH;
-use kiseki_meta::context::FuseContext;
-use kiseki_types::{entry::Entry, ino::Ino};
-use kiseki_utils::readable_size::ReadableSize;
 
 use crate::{
     data_manager::DataManagerRef,
@@ -85,18 +84,20 @@ impl HandleTable {
     pub(crate) async fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<FH> {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => {
-                FileHandle::new(
-                    inode,
-                    fh,
-                    self.data_manager.new_file_reader(inode, fh, length as usize).await,
-                    None,
-                )
-            }
+            libc::O_RDONLY => FileHandle::new(
+                inode,
+                fh,
+                self.data_manager
+                    .open_file_reader(inode, fh, length as usize)
+                    .await,
+                None,
+            ),
             libc::O_WRONLY | libc::O_RDWR => FileHandle::new(
                 inode,
                 fh,
-                self.data_manager.new_file_reader(inode, fh, length as usize).await,
+                self.data_manager
+                    .open_file_reader(inode, fh, length as usize)
+                    .await,
                 Some(self.data_manager.open_file_writer(inode, length)),
             ),
             _ => LibcSnafu { errno: libc::EPERM }.fail()?,

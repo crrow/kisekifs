@@ -12,9 +12,11 @@ pub const KISEKI_DEBUG_STAGE_CACHE: &str = "/tmp/kiseki.stage_cache";
 pub const KISEKI_DEBUG_CACHE: &str = "/tmp/kiseki.cache";
 pub const KISEKI_DEBUG_OBJECT_STORAGE: &str = "/tmp/kiseki.data";
 
-pub const PAGE_BUFFER_SIZE: usize = 300 << 20; // 300MiB
+pub const PAGE_BUFFER_SIZE: usize = 300 << 20;
+// 300MiB
 // pub const PAGE_SIZE: usize = 64 << 10;
-pub const PAGE_SIZE: usize = 128 << 10; // 128 KiB
+pub const PAGE_SIZE: usize = 128 << 10;
+// 128 KiB
 // The max block size is 4MB.
 pub const BLOCK_SIZE: usize = 4 << 20; // 4 MiB
 
@@ -25,7 +27,9 @@ pub const MAX_BLOCK_SIZE: usize = 16 << 20; // 16 MB
 // The max size of a slice buffer can grow.
 pub const CHUNK_SIZE: usize = 64 << 20; // 64 MiB
 
-pub const MAX_FILE_SIZE: usize = CHUNK_SIZE << 31; // 2 TiB
+pub const MAX_FILE_SIZE: usize = CHUNK_SIZE << 31; // 64 MiB * 2^31 = 64 PiB
+
+pub const MIN_FILE_SYSTEM_CAPACITY: usize = 1 << 30; // 1 GiB
 
 pub fn cal_chunk_idx(offset: usize, chunk_size: usize) -> usize {
     offset / chunk_size

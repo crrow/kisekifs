@@ -23,18 +23,17 @@ use std::{cmp::min, io::BufRead, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::{FutureExt, TryStreamExt};
-use snafu::{location, ResultExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio_stream::StreamExt;
-use tokio_util::io::StreamReader;
-use tracing::{debug, error, warn};
-
 use kiseki_common::{BlockIndex, ChunkIndex, PAGE_SIZE};
 use kiseki_types::slice::{SliceID, SliceKey};
 use kiseki_utils::{
     object_storage::{LocalStorage, ObjectReader, ObjectStorage, ObjectStoragePath},
     readable_size::ReadableSize,
 };
+use snafu::{location, ResultExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_stream::StreamExt;
+use tokio_util::io::StreamReader;
+use tracing::{debug, error, warn};
 
 use crate::{
     err::{CacheSnafu, Error::CacheError, ObjectStorageSnafu, Result, UnknownIOSnafu},
@@ -104,7 +103,7 @@ impl FileCache {
                         v.slice_key.block_size,
                         &k,
                     )
-                        .await
+                    .await
                     {
                         error!("Failed to flush the block to the remote storage: {:?}", e);
                         return;
@@ -150,7 +149,12 @@ impl FileCache {
         };
     }
 
-    pub async fn get_range(self: &Arc<Self>, slice_key: &SliceKey, offset: usize, length: usize) -> Result<Option<Bytes>> {
+    pub async fn get_range(
+        self: &Arc<Self>,
+        slice_key: &SliceKey,
+        offset: usize,
+        length: usize,
+    ) -> Result<Option<Bytes>> {
         return match self.index.get(slice_key).await {
             None => {
                 warn!("block not found in the stage cache: {:?}", slice_key);
@@ -158,7 +162,10 @@ impl FileCache {
             }
             Some(_) => {
                 let path = slice_key.make_object_storage_path();
-                debug!("find block in the stage cache: {:?}, try to use path: {:?} to load", slice_key, &path);
+                debug!(
+                    "find block in the stage cache: {:?}, try to use path: {:?} to load",
+                    slice_key, &path
+                );
                 let bytes = self
                     .local_storage
                     .get_range(&path, offset..offset + length)
@@ -282,9 +289,8 @@ struct CacheIndex {
 mod tests {
     use kiseki_common::BLOCK_SIZE;
 
-    use crate::pool;
-
     use super::*;
+    use crate::pool;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {
