@@ -1,12 +1,8 @@
 use std::{
-    sync::{Arc, atomic::AtomicUsize},
+    collections::HashMap,
+    sync::{atomic::AtomicUsize, Arc},
     time::SystemTime,
 };
-
-use snafu::OptionExt;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
 use kiseki_common::FH;
 use kiseki_meta::MetaEngineRef;
@@ -19,10 +15,14 @@ use kiseki_storage::{
 };
 use kiseki_types::ino::Ino;
 use kiseki_utils::object_storage::ObjectStorage;
+use snafu::OptionExt;
+use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use crate::{
     err::Result,
-    reader::FileReadersRef,
+    reader::FileReader,
     writer::{FileWriter, FileWritersRef},
 };
 
@@ -34,7 +34,7 @@ pub(crate) struct DataManager {
     pub(crate) block_size: usize,
     pub(crate) chunk_size: usize,
     pub(crate) file_writers: FileWritersRef,
-    pub(crate) file_readers: FileReadersRef,
+    pub(crate) file_readers: RwLock<HashMap<Ino, Arc<RwLock<HashMap<FH, Arc<FileReader>>>>>>,
     pub(crate) id_generator: Arc<sonyflake::Sonyflake>,
     // Dependencies
     pub(crate) meta_engine: MetaEngineRef,
@@ -58,16 +58,18 @@ impl DataManager {
             block_size,
             chunk_size,
             file_writers: Arc::new(Default::default()),
-            file_readers: Arc::new(Default::default()),
+            file_readers: Default::default(),
             id_generator: Arc::new(sonyflake::Sonyflake::new().unwrap()),
             meta_engine: meta_engine_ref,
             object_storage,
             file_cache: Arc::new(
-                FileCache::new(cache::file_cache::Config::default(), remote_storage.clone()).unwrap(),
+                FileCache::new(cache::file_cache::Config::default(), remote_storage.clone())
+                    .unwrap(),
             ),
-            mem_cache: Arc::new(
-                MemCache::new(cache::mem_cache::Config::default(), remote_storage),
-            ),
+            mem_cache: Arc::new(MemCache::new(
+                cache::mem_cache::Config::default(),
+                remote_storage,
+            )),
         }
     }
 

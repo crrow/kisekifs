@@ -5,38 +5,41 @@ use std::{
     ops::Add,
     path::{Component, Path},
     sync::{
-        atomic::{AtomicI64, Ordering, Ordering::Acquire},
         Arc,
+        atomic::{AtomicI64, Ordering},
     },
     time::{Duration, SystemTime},
 };
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 use bitflags::bitflags;
 use crossbeam::{atomic::AtomicCell, channel::at};
 use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
-use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
-use kiseki_types::{
-    attr::{InodeAttr, SetAttrFlags},
-    entry::{DEntry, Entry, FullEntry},
-    ino::{Ino, ROOT_INO, TRASH_INODE},
-    internal_nodes::{InternalNode, TRASH_INODE_NAME},
-    setting::Format,
-    slice::{Slice, SliceID, Slices, SLICE_BYTES},
-    stat::{DirStat, FSStat},
-    FileType,
-};
 use scopeguard::defer;
 use serde::Serialize;
 use snafu::{ensure, ResultExt};
 use tokio::{
     sync::RwLock,
-    time::{timeout, Instant},
+    time::{Instant, timeout},
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 
+use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
+use kiseki_types::{
+    attr::{InodeAttr, SetAttrFlags},
+    entry::{DEntry, Entry, FullEntry},
+    FileType,
+    ino::{Ino, ROOT_INO, TRASH_INODE},
+    internal_nodes::{InternalNode, TRASH_INODE_NAME},
+    setting::Format,
+    slice::{Slice, SLICE_BYTES, SliceID, Slices},
+    stat::{DirStat, FSStat},
+};
+use kiseki_utils::readable_size::ReadableSize;
+
 use crate::{
-    backend::{key::Counter, open_backend, BackendRef},
+    backend::{BackendRef, key::Counter, open_backend},
     config::MetaConfig,
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
@@ -58,8 +61,8 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
         open_files,
         removed_files: Default::default(),
         dir_parents: Default::default(),
-        fs_stat: Default::default(),
-        dir_stats: Default::default(),
+        fs_stat_used_size: Default::default(),
+        fs_stat_file_count: Default::default(),
         free_inodes: IdTable::new(backend.clone(), Counter::NextInode),
         free_slices: IdTable::new(backend.clone(), Counter::NextSlice),
         backend,
@@ -78,7 +81,7 @@ pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
     match backend.load_format() {
         Ok(old_format) => {
             debug!("found exists format, need to update");
-            if !old_format.dir_stats && format.dir_stats {
+            if !old_format.cache_dir_stat && format.cache_dir_stat {
                 // remove dir stats as they are outdated
             }
             // TODO: update the old format
@@ -123,17 +126,25 @@ pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
 }
 
 pub struct MetaEngine {
+    // config represents the configuration of the meta-engine,
+    // like the underlying database engine, etc.
     config: MetaConfig,
+    // format represents the config of the file system.
     format: Format,
+    // The root inode of the file system.
+    // TODO: review me. JuiceFS use it for enabling chroot.
     root: Ino,
 
+    /* track opened/deleted files */
     open_files: OpenFiles,
     removed_files: RwLock<HashSet<Ino>>,
 
+    /* stats */
     dir_parents: DashMap<Ino, Ino>,
-    fs_stat: AtomicCell<FSStat>,
-    dir_stats: DashMap<Ino, DirStat>,
+    fs_stat_used_size: AtomicU64,
+    fs_stat_file_count: AtomicU64,
 
+    /* id tables */
     free_inodes: IdTable,
     free_slices: IdTable,
 
@@ -158,22 +169,17 @@ impl MetaEngine {
         self.free_slices.next().await
     }
 
-    /// StatFS returns summary statistics of a volume.
+    /// [stat_fs] returns summary statistics of a volume.
+    ///
+    /// TODO: support chroot ?
     pub fn stat_fs(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<FSStat> {
-        let stat = self.fs_stat.load();
-
-        // let inode = self.check_root(inode);
-        // if inode == ROOT_INO {
-        //     return Ok(state);
-        // }
-        //
-        // let attr = self.get_attr(inode).await?;
-        // if ctx.check(inode, &attr, MODE_MASK_R & MODE_MASK_X).is_err() {
-        //     return Ok(state);
-        // }
-
-        // TODO: quota check
-        Ok(stat)
+        let total_used_file_count = self.fs_stat_file_count.load(Ordering::Acquire);
+        let total_used_size = self.fs_stat_used_size.load(Ordering::Acquire);
+        Ok(FSStat {
+            total_size: self.format.max_capacity.unwrap_or(usize::MAX) as u64,
+            used_size: total_used_size,
+            file_count: total_used_file_count,
+        })
     }
 
     // Verifies if the requested access mode (mmask) is permitted for the given user
@@ -364,7 +370,7 @@ impl MetaEngine {
     // Mkdir creates a sub-directory with given name and mode.
     pub async fn mkdir(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
         mode: u16,
@@ -380,19 +386,19 @@ impl MetaEngine {
             0,
             String::new(),
         )
-        .await
-        .map(|r| {
-            self.dir_parents.insert(r.0, parent);
-            r
-        })
+            .await
+            .map(|r| {
+                self.dir_parents.insert(r.0, parent);
+                r
+            })
     }
 
     // Mknod creates a node in a directory with given name, type and permissions.
-    #[instrument(skip(self, ctx), fields(parent=?parent, name=?name, typ=?typ, mode=?mode, cumask=?cumask, rdev=?rdev, path=?path))]
+    #[instrument(skip(self, ctx), fields(parent = ? parent, name = ? name, typ = ? typ, mode = ? mode, cumask = ? cumask, rdev = ? rdev, path = ? path))]
     #[allow(clippy::too_many_arguments)]
     pub async fn mknod(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
         typ: FileType,
@@ -414,13 +420,12 @@ impl MetaEngine {
         );
 
         let parent = self.check_root(parent);
-        let (space, inodes) = (kiseki_utils::align::align4k(0), 1i64);
-        // self.check_quota(ctx, space, inodes, parent)?;
         let r = self
             .do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
             .await?;
 
-        self.update_mem_dir_stat(parent, 0, space, inodes)?;
+        self.fs_stat_file_count.fetch_add(1, Ordering::AcqRel);
+        self.fs_stat_used_size.fetch_add(4096, Ordering::Acquire);
 
         Ok(r)
     }
@@ -428,7 +433,7 @@ impl MetaEngine {
     #[allow(clippy::too_many_arguments)]
     async fn do_mknod(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
         typ: FileType,
@@ -500,7 +505,7 @@ impl MetaEngine {
             LibcSnafu {
                 errno: libc::EEXIST,
             }
-            .fail()?;
+                .fail()?;
         }
 
         // check if we need to update the parent
@@ -558,7 +563,7 @@ impl MetaEngine {
 
     pub async fn create(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
         mode: u16,
@@ -696,8 +701,8 @@ impl MetaEngine {
                 if ctx.uid != 0
                     && ctx.uid != cur.uid
                     && (cur.perm & 0o1777 != new_attr.perm & 0o1777
-                        || new_attr.perm & 0o2000 > cur.perm & 0o2000
-                        || new_attr.perm & 0o4000 > cur.perm & 0o4000)
+                    || new_attr.perm & 0o2000 > cur.perm & 0o2000
+                    || new_attr.perm & 0o4000 > cur.perm & 0o4000)
                 {
                     LibcSnafu { errno: libc::EPERM }.fail()?;
                 }
@@ -752,7 +757,7 @@ impl MetaEngine {
                 LibcSnafu {
                     errno: libc::EACCES,
                 }
-                .fail()?;
+                    .fail()?;
             }
             dirty_attr.mtime = new_attr.mtime;
             changed = true;
@@ -791,7 +796,7 @@ impl MetaEngine {
             _ => LibcSnafu {
                 errno: libc::EINVAL,
             }
-            .fail()?,
+                .fail()?,
         };
 
         ctx.check(inode, &attr, mask)?;
@@ -817,7 +822,7 @@ impl MetaEngine {
     fn refresh_atime(&self, _ctx: &FuseContext, _inode: Ino) {}
 
     // Write put a slice of data on top of the given chunk.
-    #[instrument(skip(self, mtime), fields(inode=?inode, chunk_idx=?chunk_idx, chunk_pos=?chunk_pos, slice=?slice))]
+    #[instrument(skip(self, mtime), fields(inode = ? inode, chunk_idx = ? chunk_idx, chunk_pos = ? chunk_pos, slice = ? slice))]
     pub async fn write_slice(
         &self,
         inode: Ino,
@@ -844,22 +849,21 @@ impl MetaEngine {
             .get_raw_chunk_slices(inode, chunk_idx)?
             .unwrap_or(vec![]);
 
-        let mut dir_stat_length: i64 = 0;
-        let mut dir_stat_space: i64 = 0;
+
         let new_len =
             chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
-        if new_len > attr.length {
-            dir_stat_length = new_len as i64 - attr.length as i64;
-            dir_stat_space = kiseki_utils::align::align4k(new_len - attr.length);
+        let grow_len = if new_len > attr.length {
             debug!(
                 "update inode: {} old_length: {} new_length: {}",
                 inode, attr.length, new_len
             );
+            let v = new_len - attr.length;
             attr.length = new_len;
-        }
-        let now = SystemTime::now();
-        attr.mtime = now;
-        attr.ctime = now;
+            v
+        } else {
+            0
+        };
+        attr.update_modification_time();
         let val = bincode::serialize(&slice).unwrap();
         if slices_buf.eq(&val) {
             warn!(
@@ -878,64 +882,17 @@ impl MetaEngine {
             // start a background task to compact these slices
             // TODO: we need to do compaction
         }
-        self.update_parent_stats(inode, attr.parent, dir_stat_length, dir_stat_space)?;
+
+        // update the used size
+        if grow_len > 0 {
+            self.fs_stat_used_size.fetch_add(grow_len, Ordering::AcqRel);
+        }
 
         // TODO: update the cache
         let mut write_guard = self.open_files.files.write().await;
         if let Some(mut open_file) = write_guard.get_mut(&inode) {
             // invalidate the cache.
             open_file.chunks.remove(&chunk_idx);
-        }
-
-        Ok(())
-    }
-
-    fn update_parent_stats(&self, _inode: Ino, parent: Ino, length: i64, space: i64) -> Result<()> {
-        if length == 0 && space == 0 {
-            return Ok(());
-        }
-
-        self.update_fs_stat(space, 0);
-        if !self.format.dir_stats {
-            return Ok(());
-        }
-        if parent.0 > 0 {
-            self.update_mem_dir_stat(parent, length, space, 0)?;
-        }
-
-        // WTF
-
-        Ok(())
-    }
-
-    fn update_fs_stat(&self, space: i64, inodes: i64) {
-        let old = self.fs_stat.load();
-        let mut new = old.clone();
-        new.total_size += space as u64;
-        new.file_count += inodes as u64;
-    }
-
-    fn update_mem_dir_stat(&self, ino: Ino, length: i64, space: i64, inodes: i64) -> Result<()> {
-        if !self.format.dir_stats {
-            return Ok(());
-        }
-
-        match self.dir_stats.get_mut(&ino) {
-            None => {
-                self.dir_stats.insert(
-                    ino,
-                    DirStat {
-                        length,
-                        space,
-                        inodes,
-                    },
-                );
-            }
-            Some(mut old) => {
-                old.length += length;
-                old.space += space;
-                old.inodes += inodes;
-            }
         }
 
         Ok(())
@@ -1014,25 +971,25 @@ impl MetaEngine {
             LibcSnafu {
                 errno: libc::EINVAL,
             }
-            .fail()?;
+                .fail()?;
         }
         if mode.contains(FallocateMode::INSERT_RANGE) && mode != FallocateMode::INSERT_RANGE {
             LibcSnafu {
                 errno: libc::EINVAL,
             }
-            .fail()?;
+                .fail()?;
         }
         if mode == FallocateMode::INSERT_RANGE || mode == FallocateMode::COLLAPSE_RANGE {
             LibcSnafu {
                 errno: libc::ENOTSUP,
             }
-            .fail()?;
+                .fail()?;
         }
         if mode.contains(FallocateMode::PUNCH_HOLE) && mode.contains(FallocateMode::KEEP_SIZE) {
             LibcSnafu {
                 errno: libc::EINVAL,
             }
-            .fail()?;
+                .fail()?;
         }
 
         todo!()

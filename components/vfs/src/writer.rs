@@ -13,45 +13,44 @@ use std::{
     io::Cursor,
     ops::Range,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering}, Weak,
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        Arc, Weak,
     },
     time::Duration,
 };
 
 use crossbeam::atomic::AtomicCell;
 use dashmap::{
-    DashMap,
     mapref::one::{Ref, RefMut},
+    DashMap,
 };
-use libc::EBADF;
-use rangemap::RangeMap;
-use scopeguard::defer;
-use snafu::{OptionExt, ResultExt};
-use tokio::{
-    sync::{mpsc, Mutex, Notify, OnceCell, oneshot, RwLock},
-    task::{JoinHandle, yield_now},
-    time::{error::Elapsed, Instant},
-};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, Instrument, warn};
-
 use kiseki_common::{
-    BLOCK_SIZE, cal_chunk_idx, cal_chunk_offset, CHUNK_SIZE, ChunkIndex, FH, FileOffset,
+    cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE, FH,
 };
 use kiseki_meta::MetaEngineRef;
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     ino::Ino,
-    slice::{EMPTY_SLICE_ID, make_slice_object_key, SliceID},
+    slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
 };
 use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
+use libc::EBADF;
+use rangemap::RangeMap;
+use scopeguard::defer;
+use snafu::{OptionExt, ResultExt};
+use tokio::{
+    sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock},
+    task::{yield_now, JoinHandle},
+    time::{error::Elapsed, Instant},
+};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, instrument, warn, Instrument};
 
 use crate::{
     data_manager::DataManager,
     err::{JoinErrSnafu, LibcSnafu, Result},
-    KisekiVFS,
     reader::FileReader,
+    KisekiVFS,
 };
 
 impl DataManager {
@@ -254,12 +253,20 @@ impl FileWriter {
 
         // 1. find write location.
         let start = Instant::now();
-        debug!("Ino({}) try to find slice writer {:?}", self.inode, start.elapsed());
+        debug!(
+            "Ino({}) try to find slice writer {:?}",
+            self.inode,
+            start.elapsed()
+        );
         let slice_writers = self
             .find_writable_slice_writer(offset, expected_write_len)
             .in_current_span()
             .await;
-        debug!("Ino({}) find slice writer success {:?}",self.inode, start.elapsed());
+        debug!(
+            "Ino({}) find slice writer success {:?}",
+            self.inode,
+            start.elapsed()
+        );
 
         let mut write_len = 0;
         for (sw, state, l) in slice_writers.iter() {
@@ -284,7 +291,10 @@ impl FileWriter {
         if may_new_len > old_len {
             // give up if someone's length is larger.
             loop {
-                debug!("Ino({}) try to update file length from {} to {}", self.inode, old_len, may_new_len);
+                debug!(
+                    "Ino({}) try to update file length from {} to {}",
+                    self.inode, old_len, may_new_len
+                );
                 match self.length.compare_exchange(
                     old_len,
                     may_new_len,

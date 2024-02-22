@@ -1,21 +1,18 @@
 use std::{
     cmp::Ordering,
     collections::hash_map::DefaultHasher,
-    fmt::{Display, Formatter},
+    fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     num::ParseIntError,
     str::FromStr,
     sync::Arc,
 };
-use std::fmt::Debug;
 
+use kiseki_utils::{object_storage::ObjectStoragePath, readable_size::ReadableSize};
 use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, Location, ResultExt, Snafu};
-
-use kiseki_utils::object_storage::ObjectStoragePath;
-use kiseki_utils::readable_size::ReadableSize;
 
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
@@ -137,7 +134,10 @@ impl Debug for Slice {
             } => write!(
                 f,
                 "Slice::Owned {{ chunk_pos: {}, id: {}, size: {}, _padding: {} }}",
-                chunk_pos, id, ReadableSize(*size as u64), _padding
+                chunk_pos,
+                id,
+                ReadableSize(*size as u64),
+                _padding
             ),
             Slice::Borrowed {
                 chunk_pos,
@@ -148,7 +148,11 @@ impl Debug for Slice {
             } => write!(
                 f,
                 "Slice::Borrowed {{ chunk_pos: {}, id: {}, size: {}, off: {}, len: {} }}",
-                chunk_pos, id, ReadableSize(*size as u64), off, len
+                chunk_pos,
+                id,
+                ReadableSize(*size as u64),
+                off,
+                len
             ),
         }
     }

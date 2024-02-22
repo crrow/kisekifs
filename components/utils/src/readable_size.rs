@@ -27,7 +27,6 @@ use serde::{
     de::{Unexpected, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use tracing_core::Field;
 
 const UNIT: u64 = 1;
 
@@ -63,6 +62,8 @@ impl ReadableSize {
         self.0
     }
 
+    pub const fn as_bytes_usize(self) -> usize { self.0 as usize }
+
     pub fn to_string(self) -> String {
         format!("{:?}", self)
     }
@@ -94,8 +95,8 @@ impl Mul<u64> for ReadableSize {
 
 impl Serialize for ReadableSize {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
+        where
+            S: Serializer,
     {
         let size = self.0;
         let mut buffer = String::new();
@@ -187,10 +188,11 @@ impl Display for ReadableSize {
         }
     }
 }
+
 impl<'de> Deserialize<'de> for ReadableSize {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
+        where
+            D: Deserializer<'de>,
     {
         struct SizeVisitor;
 
@@ -202,8 +204,8 @@ impl<'de> Deserialize<'de> for ReadableSize {
             }
 
             fn visit_i64<E>(self, size: i64) -> Result<ReadableSize, E>
-            where
-                E: de::Error,
+                where
+                    E: de::Error,
             {
                 if size >= 0 {
                     self.visit_u64(size as u64)
@@ -213,15 +215,15 @@ impl<'de> Deserialize<'de> for ReadableSize {
             }
 
             fn visit_u64<E>(self, size: u64) -> Result<ReadableSize, E>
-            where
-                E: de::Error,
+                where
+                    E: de::Error,
             {
                 Ok(ReadableSize(size))
             }
 
             fn visit_str<E>(self, size_str: &str) -> Result<ReadableSize, E>
-            where
-                E: de::Error,
+                where
+                    E: de::Error,
             {
                 size_str.parse().map_err(E::custom)
             }

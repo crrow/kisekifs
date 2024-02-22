@@ -2,12 +2,18 @@ use std::{
     cmp::{max, min},
     io::Cursor,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
 };
 
 use bytes::{Buf, Bytes};
+use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
+use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
+use kiseki_utils::{
+    object_storage::{LocalStorage, ObjectStorage, ObjectStoragePath},
+    readable_size::ReadableSize,
+};
 use snafu::ResultExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -16,20 +22,13 @@ use tokio::{
 };
 use tracing::{debug, instrument, Instrument};
 
-use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, PAGE_SIZE};
-use kiseki_types::slice::{EMPTY_SLICE_ID, make_slice_object_key, SliceID, SliceKey};
-use kiseki_utils::{
-    object_storage::{LocalStorage, ObjectStorage, ObjectStoragePath},
-    readable_size::ReadableSize,
-};
-
 use crate::{
     cache,
     err::{
         Error::ObjectStorageError, InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu,
         ObjectStorageSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
     },
-    pool::{GLOBAL_HYBRID_PAGE_POOL, Page},
+    pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
 };
 
 // read_slice_from_object_storage will allocate memory in place and then drop
@@ -347,7 +346,7 @@ impl SliceBuffer {
             key_gen,
             object_storage,
         )
-            .await
+        .await
     }
 
     /// flush_to flush the slice buffer to the storage until the offset.
@@ -480,7 +479,7 @@ impl SliceBuffer {
             ((self.length - 1) / BLOCK_SIZE + 1) * BLOCK_SIZE,
             cache,
         )
-            .await
+        .await
     }
 
     // stage blocks to the local file system.
@@ -544,8 +543,7 @@ impl SliceBuffer {
         self.total_page_cnt -= total_released_page_cnt;
         debug!(
             "slice_id({}), flushed length: {}, total_released_page: {}",
-            sid,
-            self.flushed_length, total_released_page_cnt
+            sid, self.flushed_length, total_released_page_cnt
         );
         Ok(total_released_page_cnt)
     }
@@ -655,9 +653,8 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt, TryStreamExt};
-    use tracing::info;
-
     use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
+    use tracing::info;
 
     use super::*;
 
@@ -867,8 +864,8 @@ mod tests {
             0,
             dst.as_mut_slice(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(read_len, data.len());
         assert_eq!(dst, data);
 
@@ -880,8 +877,8 @@ mod tests {
             BLOCK_SIZE - 3,
             dst.as_mut_slice(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(read_len, data.len());
         assert_eq!(dst, data);
     }

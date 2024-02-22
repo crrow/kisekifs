@@ -6,12 +6,13 @@ use std::{
     mem,
     ops::{Deref, DerefMut},
     ptr,
-    sync::{Arc, atomic::AtomicU8},
+    sync::{atomic::AtomicU8, Arc},
 };
 
 use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
+use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
 use snafu::ResultExt;
 use tokio::{
@@ -20,8 +21,6 @@ use tokio::{
     time::Instant,
 };
 use tracing::debug;
-
-use kiseki_utils::readable_size::ReadableSize;
 
 use crate::err::{DiskPoolMmapSnafu, UnknownIOSnafu};
 
@@ -98,7 +97,6 @@ impl MemoryPagePool {
                 }
             })
             .collect();
-
 
         let pool = Arc::new(Self {
             page_size,
@@ -193,8 +191,8 @@ impl Page {
         length: usize,
         writer: &mut W,
     ) -> crate::err::Result<()>
-        where
-            W: tokio::io::AsyncWrite + Unpin + ?Sized,
+    where
+        W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
         let slot = &self._pool.raw_pages[self.page_id as usize];
         let slice = slot.get_inner_slice(offset, length);
@@ -211,8 +209,8 @@ impl Page {
         length: usize,
         reader: &mut R,
     ) -> crate::err::Result<()>
-        where
-            R: tokio::io::AsyncRead + Unpin + ?Sized,
+    where
+        R: tokio::io::AsyncRead + Unpin + ?Sized,
     {
         let slot = &self._pool.raw_pages[self.page_id as usize];
         let slice = slot.get_mut_inner_slice(offset, length);
@@ -239,9 +237,8 @@ impl Drop for Page {
 mod tests {
     use std::{io::Write, time::Duration};
 
-    use tracing::info;
-
     use kiseki_utils::logger::install_fmt_log;
+    use tracing::info;
 
     use super::*;
 

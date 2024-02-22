@@ -1,7 +1,6 @@
+use kiseki_types::slice::SliceKey;
 use snafu::{Location, Snafu};
 use tracing::error;
-
-use kiseki_types::slice::SliceKey;
 
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]

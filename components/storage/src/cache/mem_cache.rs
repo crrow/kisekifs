@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use snafu::ResultExt;
-
 use kiseki_types::slice::SliceKey;
 use kiseki_utils::readable_size::ReadableSize;
+use snafu::ResultExt;
 
 use crate::err::{Error::CacheError, ObjectStorageSnafu, Result};
 

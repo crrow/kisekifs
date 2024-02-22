@@ -16,9 +16,10 @@ use std::time::SystemTime;
 
 use bitflags::bitflags;
 use fuser::{FileAttr, FileType};
-use kiseki_common::BlockSize;
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+use kiseki_common::BlockSize;
 
 use crate::ino::{Ino, ROOT_INO};
 
@@ -165,6 +166,11 @@ impl InodeAttr {
     pub fn keep_cache(&mut self) -> &mut Self {
         self.keep_cache = true;
         self
+    }
+
+    pub fn update_modification_time(&mut self) {
+        self.mtime = SystemTime::now();
+        self.ctime = SystemTime::now();
     }
 
     // Enforces different access levels for owner, group, and others.

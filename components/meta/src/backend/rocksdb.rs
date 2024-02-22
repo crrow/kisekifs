@@ -4,22 +4,20 @@ use std::{
     sync::Arc,
 };
 
+use kiseki_common::ChunkIndex;
+use kiseki_types::{
+    attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat::DirStat,
+    FileType,
+};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing::debug;
 
-use kiseki_common::ChunkIndex;
-use kiseki_types::{
-    attr::InodeAttr, entry::DEntry, FileType, ino::Ino, setting::Format, slice::Slices,
-    stat::DirStat,
-};
-
+use super::{key, key::Counter, Backend};
 use crate::err::{
-    InvalidSettingSnafu, model_err, model_err::ModelKind, ModelSnafu, Result, RocksdbSnafu,
+    model_err, model_err::ModelKind, InvalidSettingSnafu, ModelSnafu, Result, RocksdbSnafu,
     UninitializedEngineSnafu,
 };
-
-use super::{Backend, key, key::Counter};
 
 #[derive(Debug, Default)]
 pub struct Builder {
@@ -192,11 +190,11 @@ impl Backend for RocksdbBackend {
             inode,
             typ,
         })
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::DEntry,
-                key: String::from_utf8_lossy(&entry_key).to_string(),
-            })
-            .context(ModelSnafu)?;
+        .context(model_err::CorruptionSnafu {
+            kind: ModelKind::DEntry,
+            key: String::from_utf8_lossy(&entry_key).to_string(),
+        })
+        .context(ModelSnafu)?;
         self.db.put(&entry_key, entry_buf).context(RocksdbSnafu)?;
         Ok(())
     }
