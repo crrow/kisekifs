@@ -85,6 +85,8 @@ alias sh-um := help-umount
 
 @format:
     cargo run --color=always --package kiseki-binary format
+    taplo format
+    taplo format --check
 
 @prepare:
     mkdir -p /tmp/kiseki /tmp/kiseki.meta/
@@ -129,3 +131,9 @@ alias rw := random-write
     - rm -r /tmp/kiseki/fio
     mkdir -p /tmp/kiseki/fio
     fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=randwrite --bs=1m --size=512m --numjobs=4 --direct=1 --group_reporting
+
+alias sr := seq-read
+@seq-read:
+    - rm -r /tmp/kiseki/fio
+    mkdir -p /tmp/kiseki/fio
+    fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=read --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting

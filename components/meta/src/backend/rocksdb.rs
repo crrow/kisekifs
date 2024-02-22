@@ -4,20 +4,22 @@ use std::{
     sync::Arc,
 };
 
-use kiseki_common::ChunkIndex;
-use kiseki_types::{
-    attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat::DirStat,
-    FileType,
-};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing::debug;
 
-use super::{key, key::Counter, Backend};
+use kiseki_common::ChunkIndex;
+use kiseki_types::{
+    attr::InodeAttr, entry::DEntry, FileType, ino::Ino, setting::Format, slice::Slices,
+    stat::DirStat,
+};
+
 use crate::err::{
-    model_err, model_err::ModelKind, InvalidSettingSnafu, ModelSnafu, Result, RocksdbSnafu,
+    InvalidSettingSnafu, model_err, model_err::ModelKind, ModelSnafu, Result, RocksdbSnafu,
     UninitializedEngineSnafu,
 };
+
+use super::{Backend, key, key::Counter};
 
 #[derive(Debug, Default)]
 pub struct Builder {
@@ -98,7 +100,6 @@ impl Backend for RocksdbBackend {
             })
             .transpose()?
             .unwrap_or(0u64);
-        debug!("current count: {}", current);
 
         let new = current + step as u64;
         let new_buf = bincode::serialize(&new)
@@ -109,7 +110,6 @@ impl Backend for RocksdbBackend {
             .context(ModelSnafu)?;
         transaction.put(&key, new_buf).context(RocksdbSnafu)?;
         transaction.commit().context(RocksdbSnafu)?;
-        debug!("new count: {}", new);
         Ok(new)
     }
     fn load_count(&self, counter: Counter) -> Result<u64> {
@@ -192,11 +192,11 @@ impl Backend for RocksdbBackend {
             inode,
             typ,
         })
-        .context(model_err::CorruptionSnafu {
-            kind: ModelKind::DEntry,
-            key: String::from_utf8_lossy(&entry_key).to_string(),
-        })
-        .context(ModelSnafu)?;
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::DEntry,
+                key: String::from_utf8_lossy(&entry_key).to_string(),
+            })
+            .context(ModelSnafu)?;
         self.db.put(&entry_key, entry_buf).context(RocksdbSnafu)?;
         Ok(())
     }

@@ -21,29 +21,28 @@
 
 use std::{cmp::min, io::BufRead, path::PathBuf, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use futures::{FutureExt, TryStreamExt};
+use snafu::{location, ResultExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_stream::StreamExt;
+use tokio_util::io::StreamReader;
+use tracing::{debug, error, warn};
+
 use kiseki_common::{BlockIndex, ChunkIndex, PAGE_SIZE};
 use kiseki_types::slice::{SliceID, SliceKey};
 use kiseki_utils::{
     object_storage::{LocalStorage, ObjectReader, ObjectStorage, ObjectStoragePath},
     readable_size::ReadableSize,
 };
-use snafu::{location, ResultExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio_stream::StreamExt;
-use tokio_util::io::StreamReader;
-use tracing::{debug, error};
 
 use crate::{
-    err::{
-        CacheSnafu,
-        Error::{CacheError, ObjectStorageError},
-        ObjectStorageSnafu, Result, UnknownIOSnafu,
-    },
+    err::{CacheSnafu, Error::CacheError, ObjectStorageSnafu, Result, UnknownIOSnafu},
     pool::Page,
 };
 
-pub const DEFAULT_STAGE_CACHE_SIZE: u64 = 10 << 30; // 10GiB
+pub const DEFAULT_STAGE_CACHE_SIZE: u64 = 10 << 30;
+// 10GiB
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(24 * 3600); // 24 hours
 
 pub struct Config {
@@ -105,7 +104,7 @@ impl FileCache {
                         v.slice_key.block_size,
                         &k,
                     )
-                    .await
+                        .await
                     {
                         error!("Failed to flush the block to the remote storage: {:?}", e);
                         return;
@@ -119,7 +118,7 @@ impl FileCache {
             // the index-cache will be bounded by the total weighted size of entries.
             .weigher(|_, index: &CacheIndex| -> u32 { index.slice_key.block_size as u32 })
             // the cache should not grow beyond a certain size,
-            // use the max_capacity method of the CacheBuilder 
+            // use the max_capacity method of the CacheBuilder
             // to set the upper bound.
             .max_capacity(config.max_stage_size.as_bytes())
             // A cached entry will be expired after the specified duration past from insert.
@@ -136,8 +135,8 @@ impl FileCache {
         })
     }
 
-    pub async fn get(self: &Arc<Self>, slice_key: SliceKey) -> Result<Option<ObjectReader>> {
-        return match self.index.get(&slice_key).await {
+    pub async fn get(self: &Arc<Self>, slice_key: &SliceKey) -> Result<Option<ObjectReader>> {
+        return match self.index.get(slice_key).await {
             None => Ok(None),
             Some(_) => {
                 let path = slice_key.make_object_storage_path();
@@ -151,6 +150,25 @@ impl FileCache {
         };
     }
 
+    pub async fn get_range(self: &Arc<Self>, slice_key: &SliceKey, offset: usize, length: usize) -> Result<Option<Bytes>> {
+        return match self.index.get(slice_key).await {
+            None => {
+                warn!("block not found in the stage cache: {:?}", slice_key);
+                Ok(None)
+            }
+            Some(_) => {
+                let path = slice_key.make_object_storage_path();
+                debug!("find block in the stage cache: {:?}, try to use path: {:?} to load", slice_key, &path);
+                let bytes = self
+                    .local_storage
+                    .get_range(&path, offset..offset + length)
+                    .await
+                    .context(ObjectStorageSnafu)?;
+                Ok(Some(bytes))
+            }
+        };
+    }
+
     pub async fn stage(
         self: &Arc<Self>,
         sid: SliceID,
@@ -159,6 +177,7 @@ impl FileCache {
         pages: Box<[Option<Page>]>,
     ) -> Result<(usize, usize)> {
         let key = SliceKey::new(sid, block_index, block_length);
+        debug!("staging block: {:?}", key);
         let mut total_flush_len = 0;
         let mut total_release_page_cnt = 0;
         let _ = self
@@ -263,8 +282,9 @@ struct CacheIndex {
 mod tests {
     use kiseki_common::BLOCK_SIZE;
 
-    use super::*;
     use crate::pool;
+
+    use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {

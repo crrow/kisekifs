@@ -66,8 +66,6 @@ pub enum Error {
 impl Error {
     pub fn is_not_found(&self) -> bool {
         matches!(self, Error::ObjectStorageError { source, .. } if kiseki_utils::object_storage::is_not_found_error(&source))
-        // matches!(self, Error::OpenDal { error, .. } if error.kind() ==
-        // opendal::ErrorKind::NotFound)
     }
 }
 

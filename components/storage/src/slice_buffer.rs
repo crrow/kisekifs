@@ -2,18 +2,12 @@ use std::{
     cmp::{max, min},
     io::Cursor,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 use bytes::{Buf, Bytes};
-use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
-use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
-use kiseki_utils::{
-    object_storage::{LocalStorage, ObjectStorage, ObjectStoragePath},
-    readable_size::ReadableSize,
-};
 use snafu::ResultExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -22,13 +16,20 @@ use tokio::{
 };
 use tracing::{debug, instrument, Instrument};
 
+use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, PAGE_SIZE};
+use kiseki_types::slice::{EMPTY_SLICE_ID, make_slice_object_key, SliceID, SliceKey};
+use kiseki_utils::{
+    object_storage::{LocalStorage, ObjectStorage, ObjectStoragePath},
+    readable_size::ReadableSize,
+};
+
 use crate::{
     cache,
     err::{
         Error::ObjectStorageError, InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu,
         ObjectStorageSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
     },
-    pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
+    pool::{GLOBAL_HYBRID_PAGE_POOL, Page},
 };
 
 // read_slice_from_object_storage will allocate memory in place and then drop
@@ -346,7 +347,7 @@ impl SliceBuffer {
             key_gen,
             object_storage,
         )
-        .await
+            .await
     }
 
     /// flush_to flush the slice buffer to the storage until the offset.
@@ -479,7 +480,7 @@ impl SliceBuffer {
             ((self.length - 1) / BLOCK_SIZE + 1) * BLOCK_SIZE,
             cache,
         )
-        .await
+            .await
     }
 
     // stage blocks to the local file system.
@@ -526,7 +527,7 @@ impl SliceBuffer {
                 let total_released_page_cnt = total_released_page_cnt.clone();
                 let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
                     let (_, total_free_page_cnt) = cache
-                        .stage(sid, offset, data_block.length, data_block.pages)
+                        .stage(sid, idx, data_block.length, data_block.pages)
                         .await?;
                     total_released_page_cnt.fetch_add(total_free_page_cnt, Ordering::AcqRel);
                     Ok(())
@@ -542,7 +543,8 @@ impl SliceBuffer {
         let total_released_page_cnt = total_released_page_cnt.load(Ordering::Relaxed);
         self.total_page_cnt -= total_released_page_cnt;
         debug!(
-            "flushed length: {}, total_released_page: {}",
+            "slice_id({}), flushed length: {}, total_released_page: {}",
+            sid,
             self.flushed_length, total_released_page_cnt
         );
         Ok(total_released_page_cnt)
@@ -582,53 +584,6 @@ struct DataBlock {
     // the written len of the block
     length: usize,
     pages: Box<[Option<Page>]>,
-}
-
-impl DataBlock {
-    // pub async fn copy_to_writer<W>(
-    //     self,
-    //     sid: SliceID,
-    //     block_index: BlockIndex,
-    //     writer: &mut W,
-    // ) -> Result<(usize, usize)>
-    // where
-    //     W: AsyncWrite + Unpin + Send,
-    // {
-    //     let mut total_released_page_cnt = 0;
-    //     let total_flush_length = self.length;
-    //     let mut current_flush_length = 0;
-    //
-    //     while current_flush_length < total_flush_length {
-    //         let page_idx = current_flush_length / PAGE_SIZE;
-    //         let page_offset = current_flush_length % PAGE_SIZE;
-    //         let to_flush_len = min(
-    //             PAGE_SIZE - page_offset,
-    //             total_flush_length - current_flush_length,
-    //         );
-    //         match &self.pages[page_idx] {
-    //             None => {
-    //                 for _ in 0..to_flush_len {
-    //                     writer.write_u8(0).await.context(UnknownIOSnafu)?;
-    //                 }
-    //             }
-    //             Some(page) => {
-    //                 total_released_page_cnt += 1;
-    //                 page.copy_to_writer(page_offset, to_flush_len, writer)
-    //                     .await?
-    //             }
-    //         }
-    //         current_flush_length += to_flush_len;
-    //     }
-    //     if let Err(e) = writer.flush().await {
-    //         panic!(
-    //             "close writer failed: {:?}, expect flush len: {}",
-    //             e,
-    //             ReadableSize(total_flush_length as u64).to_string()
-    //         );
-    //     }
-    //     writer.shutdown().await.context(UnknownIOSnafu)?;
-    //     Ok((total_flush_length, total_released_page_cnt))
-    // }
 }
 
 impl Default for Block {
@@ -700,8 +655,9 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt, TryStreamExt};
-    use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
     use tracing::info;
+
+    use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
 
     use super::*;
 
@@ -820,7 +776,7 @@ mod tests {
 
         // we cannot write at the flushed block ever again.
         assert!(slice_buffer.write_at(0, b"hello".as_slice()).await.is_err()); // we cannot write at the flushed block ever again.
-                                                                               // we should be able to write the next block
+        // we should be able to write the next block
         let write_len = slice_buffer
             .write_at(BLOCK_SIZE, vec![1u8; BLOCK_SIZE].as_slice())
             .await
@@ -911,8 +867,8 @@ mod tests {
             0,
             dst.as_mut_slice(),
         )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
         assert_eq!(read_len, data.len());
         assert_eq!(dst, data);
 
@@ -924,8 +880,8 @@ mod tests {
             BLOCK_SIZE - 3,
             dst.as_mut_slice(),
         )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
         assert_eq!(read_len, data.len());
         assert_eq!(dst, data);
     }

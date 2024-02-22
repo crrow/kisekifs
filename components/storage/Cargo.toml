@@ -6,43 +6,42 @@ description = "The core storage implementation"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-
 [dependencies]
-tokio.workspace = true
-tracing.workspace = true
-lazy_static.workspace = true
-snafu.workspace = true
-opendal.workspace =true
-futures.workspace = true
-bytes.workspace = true
-tokio-util.workspace = true
-tokio-stream.workspace = true
 async-trait.workspace = true
-dashmap.workspace = true
-crossbeam-queue.workspace = true
+bytes.workspace = true
 crossbeam.workspace = true
-serde.workspace = true
-scopeguard.workspace = true
+crossbeam-queue.workspace = true
+dashmap.workspace = true
+futures.workspace = true
+lazy_static.workspace = true
+opendal.workspace = true
 rustix.workspace = true
+scopeguard.workspace = true
+serde.workspace = true
+snafu.workspace = true
 sonyflake.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
 
-kiseki-common = {path = "../../components/common"}
-kiseki-utils = {path = "../../components/utils"}
-kiseki-types = {path = "../../components/types"}
-kiseki-meta = {path = "../../components/meta"}
+kiseki-common = { path = "../../components/common" }
+kiseki-meta = { path = "../../components/meta" }
+kiseki-types = { path = "../../components/types" }
+kiseki-utils = { path = "../../components/utils" }
 
-rand = "0.8.5"
-log = "0.4.20"
 byte-pool = "0.2.4"
-fmmap = {version = "0.3.3", features = ["tokio","tokio-async"]}
 crc32fast = "1.3.2"
+fmmap = { version = "0.3.3", features = ["tokio", "tokio-async"] }
+log = "0.4.20"
 moka = { version = "0.12.5", features = ["future"] }
+rand = "0.8.5"
 
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
 
-kiseki-utils = {path = "../../components/utils"}
+kiseki-utils = { path = "../../components/utils" }
 
 uuid = "1.7.0"
 

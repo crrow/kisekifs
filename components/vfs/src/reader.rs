@@ -1,40 +1,38 @@
 use std::{
     cmp::min,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Weak,
+        Arc,
+        atomic::{AtomicBool, Ordering}, Weak,
     },
 };
+use std::cell::UnsafeCell;
+use std::io::Cursor;
 
 use dashmap::DashMap;
-use kiseki_common::{ChunkIndex, FH};
-use kiseki_meta::MetaEngineRef;
-// use kiseki_storage::raw_buffer::ReadBuffer;
-use kiseki_types::slice::make_slice_object_key;
-use kiseki_types::{
-    ino::Ino,
-    slice::{OverlookedSlicesRef, Slice, SliceID},
-};
 use rangemap::RangeMap;
 use snafu::ResultExt;
-use tracing::debug;
+use tokio::task::JoinHandle;
+use tracing::{debug, instrument};
+
+use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, ChunkIndex, FH};
+use kiseki_meta::MetaEngineRef;
+use kiseki_storage::cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef};
+use kiseki_storage::err::{JoinErrSnafu, ObjectStorageSnafu, UnknownIOSnafu};
+use kiseki_types::{
+    ino::Ino,
+    slice::{make_slice_object_key, OverlookedSlicesRef, Slice, SliceID},
+};
+use kiseki_types::slice::SliceKey;
+use kiseki_utils::object_storage::ObjectStorage;
 
 use crate::{
     data_manager::{DataManager, DataManagerRef},
     err::{Result, StorageSnafu},
     KisekiVFS,
 };
+use crate::err::ObjectBlockNotFoundSnafu;
 
 impl DataManager {
-    // fn new_read_buffer(&self, sid: SliceID, length: usize) -> ReadBuffer {
-    //     ReadBuffer::new(
-    //         self.block_size,
-    //         self.chunk_size,
-    //         self.object_storage.clone(),
-    //         sid,
-    //         length,
-    //     )
-    // }
     /// Get the file reader for the given inode and file handle.
     pub(crate) fn new_file_reader(
         self: &Arc<Self>,
@@ -50,6 +48,8 @@ impl DataManager {
                     ino: inode,
                     fh,
                     length,
+                    file_cache: self.file_cache.clone(),
+                    mem_cache: self.mem_cache.clone(),
                     chunks: Default::default(),
                     closing: Default::default(),
                 };
@@ -71,7 +71,6 @@ pub(crate) type FileReadersRef = Arc<DashMap<(Ino, FH), Arc<FileReader>>>;
 
 /// A [FileReader] is used for read content from a file.
 /// Each [FileReader] is held by a FileHandle: Ino+Fh.
-#[derive(Debug)]
 pub(crate) struct FileReader {
     data_engine: Weak<DataManager>,
     // The file inode.
@@ -79,9 +78,14 @@ pub(crate) struct FileReader {
     fh: FH,
     // The max file read length, it was set when we crate the file handle.
     length: usize,
+    // the write back cache.
+    file_cache: FileCacheRef,
+    // the read-only cache.
+    mem_cache: MemCacheRef,
     // A file be divided into multiple chunks,
     // each chunk is composed by multiple slices.
     // This map is used to store latest slices that compose the chunk.
+    // TODO: get rid of DashMap
     chunks: DashMap<ChunkIndex, OverlookedSlicesRef>,
     // The file is closing or not.
     closing: AtomicBool,
@@ -188,14 +192,15 @@ impl FileReader {
                         let sid = s.get_id();
 
                         let read_len =
-                            kiseki_storage::slice_buffer::read_slice_from_object_storage(
-                                |bi, bs| -> String { make_slice_object_key(sid, bi, bs) },
-                                engine.object_storage.clone(),
+                            read_slice_from_cache(
+                                sid,
+                                engine.file_cache.clone(),
+                                engine.mem_cache.clone(),
                                 s.get_underlying_size(),
                                 0,
                                 &mut dst[start..end],
                             )
-                            .await?;
+                                .await?;
 
                         // let rb = engine.new_read_buffer(s.get_id(),
                         // s.get_underlying_size());
@@ -212,6 +217,8 @@ impl FileReader {
         Ok(total_read_len)
     }
 
+    /// When release file handle, we will try to close the associated
+    /// FileReader.
     pub(crate) fn close(self: &Arc<Self>) {
         if self
             .closing
@@ -234,6 +241,100 @@ impl FileReader {
 enum VirtualSlice {
     Hole,
     Slice(Slice),
+}
+
+
+#[instrument(skip_all, fields(length, offset))]
+async fn read_slice_from_cache(
+    slice_id: SliceID,
+    file_cache: FileCacheRef,
+    mem_cache: MemCacheRef,
+    length: usize, // length of the slice.
+    offset: usize, // read offset
+    dst: &mut [u8],
+) -> Result<usize> {
+    let expected_read_len = dst.len();
+    if expected_read_len == 0 {
+        return Ok(0);
+    }
+
+    debug_assert!(
+        offset + expected_read_len <= CHUNK_SIZE,
+        "offset {} + expect read len {} will exceed the chunk size",
+        offset,
+        expected_read_len
+    );
+
+    let expected_read_len = min(length - offset, expected_read_len);
+    let mut total_read_len = 0;
+    let mut hanldes = vec![];
+    let dst_ptr = dst.as_mut_ptr();
+    let dst_len = dst.len();
+
+    while total_read_len < expected_read_len {
+        let new_pos = total_read_len + offset;
+        let block_idx = new_pos / BLOCK_SIZE;
+        let block_offset = new_pos % BLOCK_SIZE;
+        let obj_block_size = cal_object_block_size(length, block_idx, BLOCK_SIZE);
+        let current_block_to_read_len = min(
+            expected_read_len - total_read_len,
+            obj_block_size - block_offset, // don't exceed the block boundary.
+        );
+
+        // FIXME: use chunks_exact_mut to build slice.
+        let dst = unsafe { std::slice::from_raw_parts_mut(dst_ptr, dst_len) };
+        let dst_slice = &mut dst[total_read_len..(total_read_len + current_block_to_read_len)];
+        let mut writer = Cursor::new(dst_slice);
+
+        total_read_len += current_block_to_read_len;
+
+        let file_cache_clone = file_cache.clone();
+        let mem_cache_clone = mem_cache.clone();
+        let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
+            let key = SliceKey::new(slice_id, block_idx, obj_block_size);
+            // 1. first of all, try to get block from file-cache
+            if let Some(mut block_reader) = file_cache_clone.get_range(&key, block_offset, current_block_to_read_len).await? {
+                let mut slice = block_reader.as_ref();
+                // copy to the writer
+                let copy_len = tokio::io::copy(&mut slice, &mut writer).await.context(UnknownIOSnafu)?;
+                return Ok(copy_len as usize);
+            }
+
+            // 2. try to get block from mem-cache
+            if let Some(mut block) = mem_cache_clone.get(&key).await? {
+                // copy to the writer
+                let reader = block.slice(block_offset..block_offset + current_block_to_read_len);
+                let mut slice = reader.as_ref();
+                let copy_len = tokio::io::copy(&mut slice, &mut writer).await.context(UnknownIOSnafu)?;
+                return Ok(copy_len as usize);
+            }
+
+            // 3. report not found error
+            return ObjectBlockNotFoundSnafu {
+                key,
+            }.fail()?;
+        });
+        hanldes.push(handle);
+    }
+
+    let mut actual_read_cnt = 0;
+    for x in futures::future::try_join_all(hanldes)
+        .await
+        .context(JoinErrSnafu)?
+        .into_iter()
+    {
+        actual_read_cnt += x?;
+    }
+    assert_eq!(actual_read_cnt, total_read_len);
+
+    Ok(total_read_len)
+}
+
+fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: BlockSize) -> usize {
+    // min(1025 - 0 * 1024, 1024) = min(1024) = 1024
+    // min(1023 - 0 * 1024, 1024) = min(1023, 1024) = 1023
+    // min(2049 - 2 * 1024, 1024) = min(1, 1024) = 1
+    min(length - block_idx * block_size, block_size)
 }
 
 #[cfg(test)]
@@ -307,15 +408,12 @@ mod tests {
             .await
             .unwrap();
 
-        let sto_engine = new_memory_object_store();
-        // let cache = kiseki_storage::cache::new_juice_builder().build().unwrap();
         let data_manager = Arc::new(DataManager::new(
             format.page_size,
             format.block_size,
             format.chunk_size,
             meta_engine,
-            sto_engine,
-            // cache,
+            new_memory_object_store(),
         ));
 
         data_manager.open_file_writer(inode, 0);
@@ -333,7 +431,9 @@ mod tests {
         let file_reader = data_manager.new_file_reader(inode, 0, write_len);
 
         let mut read_data = vec![0u8; 11];
-        let read_len = file_reader.read(0, read_data.as_mut_slice()).await.unwrap();
+        let read_len = file_reader.read(0, read_data.as_mut_slice()).await;
+        assert!(read_len.is_ok());
+        let read_len = read_len.unwrap();
         assert_eq!(read_len, 11);
         assert!(read_data.starts_with(b"hello world"));
         println!("{}", String::from_utf8_lossy(&read_data));

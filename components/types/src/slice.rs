@@ -263,10 +263,13 @@ impl FromStr for SliceKey {
     type Err = Error; // Define the error type for parsing
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts = s.strip_prefix("chunks/").unwrap_or(s) // Remove the "chunks-" prefix
+        let parts = s
+            .strip_prefix("chunks/")
+            .unwrap_or(s) // Remove the "chunks-" prefix
             .split('_')
-            .map(|part| u64::from_str(part) ) // Parse hexadecimal parts
-            .collect::<Result<Vec<_>, _>>().context(ParseSliceKeyFailedSnafu { str: s.to_string()})?;
+            .map(|part| u64::from_str(part)) // Parse hexadecimal parts
+            .collect::<Result<Vec<_>, _>>()
+            .context(ParseSliceKeyFailedSnafu { str: s.to_string() })?;
         ensure!(
             parts.len() == 5,
             InvalidSliceKeyStrSnafu { str: s.to_string() }
