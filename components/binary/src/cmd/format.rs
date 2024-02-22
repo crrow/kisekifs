@@ -1,17 +1,16 @@
 use std::str::FromStr;
 
 use clap::Args;
-use regex::Regex;
-use snafu::{ensure, ensure_whatever, OptionExt, ResultExt, Whatever};
-use tokio::runtime;
-use tracing::{debug, info, Instrument, level_filters::LevelFilter, warn};
-
 use kiseki_meta::MetaConfig;
 use kiseki_types::setting::Format;
 use kiseki_utils::{
     align::{align4k, align_to_block},
     readable_size::ReadableSize,
 };
+use regex::Regex;
+use snafu::{ensure, ensure_whatever, OptionExt, ResultExt, Whatever};
+use tokio::runtime;
+use tracing::{debug, info, level_filters::LevelFilter, warn, Instrument};
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
 const MANAGEMENT_OPTIONS_HEADER: &str = "MANAGEMENT";
@@ -96,6 +95,7 @@ impl FormatArgs {
         format.name = self.name.clone();
         format
     }
+
     pub fn run(&self) -> Result<(), Whatever> {
         kiseki_utils::logger::install_fmt_log();
         let dsn = self

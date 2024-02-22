@@ -31,13 +31,9 @@ pub const MAX_FILE_SIZE: usize = CHUNK_SIZE << 31; // 64 MiB * 2^31 = 64 PiB
 
 pub const MIN_FILE_SYSTEM_CAPACITY: usize = 1 << 30; // 1 GiB
 
-pub fn cal_chunk_idx(offset: usize, chunk_size: usize) -> usize {
-    offset / chunk_size
-}
+pub fn cal_chunk_idx(offset: usize, chunk_size: usize) -> usize { offset / chunk_size }
 
-pub fn cal_chunk_offset(offset: usize, chunk_size: usize) -> usize {
-    offset % chunk_size
-}
+pub fn cal_chunk_offset(offset: usize, chunk_size: usize) -> usize { offset % chunk_size }
 
 pub type PageSize = usize;
 pub type BlockIndex = usize;

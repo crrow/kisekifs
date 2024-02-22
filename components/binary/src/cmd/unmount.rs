@@ -16,7 +16,7 @@ pub struct UmountArgs {
     )]
     pub mount_point: PathBuf,
     #[arg(long, short, help = "Force unmount even if the directory is not empty")]
-    pub force: bool,
+    pub force:       bool,
 }
 
 impl UmountArgs {

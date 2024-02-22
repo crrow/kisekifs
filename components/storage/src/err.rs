@@ -8,13 +8,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: opendal::Error,
+        error:    opendal::Error,
     },
 
     ObjectStorageError {
         #[snafu(implicit)]
         location: Location,
-        source: kiseki_utils::object_storage::ObjectStorageError,
+        source:   kiseki_utils::object_storage::ObjectStorageError,
     },
 
     CacheError {
@@ -24,13 +24,13 @@ pub enum Error {
     UnknownIOError {
         #[snafu(implicit)]
         location: Location,
-        source: std::io::Error,
+        source:   std::io::Error,
     },
 
     JoinErr {
         #[snafu(implicit)]
         location: Location,
-        source: tokio::task::JoinError,
+        source:   tokio::task::JoinError,
     },
 
     FlushBlockFailed {
@@ -46,20 +46,20 @@ pub enum Error {
     DiskPoolMmapError {
         #[snafu(implicit)]
         location: Location,
-        source: fmmap::error::Error,
+        source:   fmmap::error::Error,
     },
 
     #[snafu(display("no more space in cache dir {}", cache_dir))]
     ErrStageNoMoreSpace {
         cache_dir: String,
         #[snafu(implicit)]
-        location: Location,
+        location:  Location,
     },
 
     MetaError {
         #[snafu(implicit)]
         location: Location,
-        source: kiseki_meta::Error,
+        source:   kiseki_meta::Error,
     },
 }
 

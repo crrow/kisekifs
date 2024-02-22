@@ -16,8 +16,8 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     time::{Duration, SystemTime},
 };
@@ -25,24 +25,23 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use libc::{EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM, mode_t};
-use scopeguard::defer;
-use snafu::{ensure, location, Location, OptionExt, ResultExt};
-use tokio::{task::JoinHandle, time::Instant};
-use tracing::{debug, error, info, instrument, Instrument, trace};
-
 use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
-    ino::{CONTROL_INODE, Ino, ROOT_INO},
-    internal_nodes::{CONFIG_INODE_NAME, CONTROL_INODE_NAME, InternalNodeTable},
+    ino::{Ino, CONTROL_INODE, ROOT_INO},
+    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
     slice::SliceID,
     ToErrno,
 };
 use kiseki_utils::{object_storage, object_storage::ObjectStorage};
+use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
+use scopeguard::defer;
+use snafu::{ensure, location, Location, OptionExt, ResultExt};
+use tokio::{task::JoinHandle, time::Instant};
+use tracing::{debug, error, info, instrument, trace, Instrument};
 
 use crate::{
     config::Config,
@@ -59,8 +58,8 @@ pub struct KisekiVFS {
     pub config: Config,
 
     // Runtime status
-    internal_nodes: InternalNodeTable,
-    modified_at: DashMap<Ino, std::time::Instant>,
+    internal_nodes:          InternalNodeTable,
+    modified_at:             DashMap<Ino, std::time::Instant>,
     pub(crate) handle_table: HandleTableRef,
     pub(crate) data_manager: DataManagerRef,
 
@@ -295,13 +294,13 @@ impl KisekiVFS {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-                .fail()?;
+            .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-                .fail()?;
+            .fail()?;
         }
         let file_type = get_file_type(mode)?;
         let mode = mode as u16 & 0o777;
@@ -337,13 +336,13 @@ impl KisekiVFS {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-                .fail()?;
+            .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-                .fail()?;
+            .fail()?;
         };
 
         let (inode, attr) = self
@@ -491,13 +490,13 @@ impl KisekiVFS {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-                .fail()?;
+            .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-                .fail()?;
+            .fail()?;
         };
 
         let (ino, attr) = self
@@ -597,7 +596,8 @@ impl KisekiVFS {
         let _read_len = read_guard.read(offset as usize, buf.as_mut_slice()).await?;
         file_handle.remove_operation(&ctx).await;
         debug!(
-            "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: {:?}",
+            "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: \
+             {:?}",
             ino, fh, offset, size, _read_len
         );
         Ok(Bytes::from(buf))
@@ -815,7 +815,7 @@ impl KisekiVFS {
 /// Reply to a `open` or `opendir` call
 #[derive(Debug)]
 pub struct Opened {
-    pub fh: u64,
+    pub fh:    u64,
     pub flags: u32,
     pub entry: FullEntry,
 }

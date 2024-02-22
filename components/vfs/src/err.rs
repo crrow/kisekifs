@@ -46,15 +46,11 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<kiseki_meta::Error> for Error {
-    fn from(value: kiseki_meta::Error) -> Self {
-        Self::MetaError { source: value }
-    }
+    fn from(value: kiseki_meta::Error) -> Self { Self::MetaError { source: value } }
 }
 
 impl From<kiseki_storage::err::Error> for Error {
-    fn from(value: kiseki_storage::err::Error) -> Self {
-        Self::StorageError { source: value }
-    }
+    fn from(value: kiseki_storage::err::Error) -> Self { Self::StorageError { source: value } }
 }
 
 impl kiseki_types::ToErrno for Error {

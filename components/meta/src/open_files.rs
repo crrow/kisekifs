@@ -4,15 +4,15 @@ use kiseki_types::{attr::InodeAttr, ino::Ino, slice::Slices};
 use tokio::sync::RwLock;
 
 pub(crate) struct OpenFile {
-    pub attr: InodeAttr,
+    pub attr:            InodeAttr,
     pub reference_count: usize,
-    pub last_check: std::time::Instant,
-    pub chunks: HashMap<usize, Arc<Slices>>, // should we add lock on it ?
+    pub last_check:      std::time::Instant,
+    pub chunks:          HashMap<usize, Arc<Slices>>, // should we add lock on it ?
 }
 
 pub(crate) struct OpenFiles {
-    ttl: Duration,
-    limit: usize,
+    ttl:              Duration,
+    limit:            usize,
     pub(crate) files: RwLock<HashMap<Ino, OpenFile>>,
     // TODO: background clean up
 }
@@ -61,10 +61,10 @@ impl OpenFiles {
                 write_guard.insert(
                     inode,
                     OpenFile {
-                        attr: attr.keep_cache().clone(),
+                        attr:            attr.keep_cache().clone(),
                         reference_count: 1,
-                        last_check: std::time::Instant::now(),
-                        chunks: HashMap::new(),
+                        last_check:      std::time::Instant::now(),
+                        chunks:          HashMap::new(),
                     },
                 );
             }

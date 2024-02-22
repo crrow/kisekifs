@@ -10,25 +10,25 @@ pub enum Error {
     Unknown {
         #[snafu(implicit)]
         location: Location,
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source:   Box<dyn std::error::Error + Send + Sync>,
     },
     UnsupportedMetaDSN {
         #[snafu(implicit)]
         location: Location,
-        dsn: String,
+        dsn:      String,
     },
 
     TokioJoinError {
         #[snafu(implicit)]
         location: Location,
-        source: tokio::task::JoinError,
+        source:   tokio::task::JoinError,
     },
 
     #[cfg(feature = "meta-rocksdb")]
     RocksdbError {
         #[snafu(implicit)]
         location: Location,
-        source: rocksdb::Error,
+        source:   rocksdb::Error,
     },
 
     // Model Error
@@ -36,7 +36,7 @@ pub enum Error {
     ModelError {
         #[snafu(implicit)]
         location: Location,
-        source: model_err::Error,
+        source:   model_err::Error,
     },
 
     // Setting
@@ -50,13 +50,13 @@ pub enum Error {
     InvalidSetting {
         #[snafu(implicit)]
         location: Location,
-        key: Vec<u8>,
+        key:      Vec<u8>,
     },
 
     LibcError {
         #[snafu(implicit)]
         location: Location,
-        errno: libc::c_int,
+        errno:    libc::c_int,
     },
 }
 
@@ -85,24 +85,22 @@ pub mod model_err {
     pub enum Error {
         NotFound {
             kind: ModelKind,
-            key: String,
+            key:  String,
         },
         Corruption {
-            kind: ModelKind,
-            key: String,
+            kind:   ModelKind,
+            key:    String,
             source: bincode::Error,
         },
         CorruptionString {
-            kind: ModelKind,
-            key: String,
+            kind:   ModelKind,
+            key:    String,
             reason: String,
         },
     }
 
     impl Error {
-        pub fn is_not_found(&self) -> bool {
-            matches!(self, Error::NotFound { .. })
-        }
+        pub fn is_not_found(&self) -> bool { matches!(self, Error::NotFound { .. }) }
     }
 }
 

@@ -59,9 +59,8 @@ impl HandleTable {
             _next_fh: AtomicU64::new(1),
         })
     }
-    fn next_fh(&self) -> FH {
-        self._next_fh.fetch_add(1, Ordering::SeqCst)
-    }
+
+    fn next_fh(&self) -> FH { self._next_fh.fetch_add(1, Ordering::SeqCst) }
 
     pub(crate) fn new_dir_handle(self: &Arc<Self>, inode: Ino) -> FH {
         let fh = self.next_fh();
@@ -143,6 +142,7 @@ impl Handle {
             Handle::Dir(h) => h.fh,
         }
     }
+
     pub(crate) fn get_inode(&self) -> Ino {
         match self {
             Handle::File(h) => h.inode,
@@ -225,15 +225,14 @@ impl FileHandle {
             closed: Default::default(),
         }
     }
+
     pub(crate) fn try_set_ofd_owner(&self, lock_owner: u64) {
         let _ = self
             .ofd_owner
             .compare_exchange(lock_owner, 0, Ordering::AcqRel, Ordering::Relaxed);
     }
 
-    pub(crate) fn has_writer(&self) -> bool {
-        self.writer.is_some()
-    }
+    pub(crate) fn has_writer(&self) -> bool { self.writer.is_some() }
 
     pub(crate) async fn read_lock(&self, ctx: Arc<FuseContext>) -> Option<FileHandleReadGuard> {
         let cancel_token = ctx.cancellation_token.clone();
@@ -428,13 +427,9 @@ impl FileHandleWriteGuard {
         self.file_writer.write(offset, src).await
     }
 
-    pub(crate) async fn flush(&self) -> Result<()> {
-        self.file_writer.finish().await
-    }
+    pub(crate) async fn flush(&self) -> Result<()> { self.file_writer.finish().await }
 
-    pub(crate) fn get_length(&self) -> usize {
-        self.file_writer.get_length()
-    }
+    pub(crate) fn get_length(&self) -> usize { self.file_writer.get_length() }
 }
 
 impl Drop for FileHandleWriteGuard {
@@ -468,9 +463,7 @@ impl Drop for FileHandleReadGuard {
 
 pub(crate) struct DirHandle {
     fh: FH,
-    // cannot be changed
     inode: Ino,
-    // cannot be changed
     pub(crate) inner: RwLock<DirHandleInner>,
 }
 

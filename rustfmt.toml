@@ -1,16 +1,41 @@
 version = "Two"
 unstable_features = true
+edition = "2021"
 
-comment_width = 80
-wrap_comments = true
-format_code_in_doc_comments = true
-format_macro_bodies = true
-format_macro_matchers = true
-normalize_comments = true
-normalize_doc_attributes = true
-condense_wildcard_suffixes = true
+indent_style = "Block"
 newline_style = "Unix"
 use_field_init_shorthand = true
 use_try_shorthand = true
+
+# ==== comments & docs
+# Maximum length of comments. Default value: 80
+comment_width = 80
+normalize_comments = true
+normalize_doc_attributes = true
+# Break comments to fit on the line
+# https://rust-lang.github.io/rustfmt/?version=v1.6.0&search=#wrap_comments
+wrap_comments = true
+
+# ==== Abount format
+# https://rust-lang.github.io/rustfmt/?version=v1.6.0&search=#condense_wildcard_suffixes
+format_code_in_doc_comments = true
+format_macro_bodies = true
+format_macro_matchers = true
+# https://rust-lang.github.io/rustfmt/?version=v1.6.0&search=#format_strings
+format_strings = true
+# Put single-expression functions on a single line
+# https://rust-lang.github.io/rustfmt/?version=v1.6.0&search=#fn_single_line
+fn_single_line = true
+condense_wildcard_suffixes = true
+
+# ==== Import
 imports_granularity = "Crate"
 group_imports = "StdExternalCrate"
+
+# ==== Reorder
+reorder_impl_items = true
+reorder_imports = true
+reorder_modules = true
+
+struct_field_align_threshold = 20
+

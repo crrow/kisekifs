@@ -20,17 +20,17 @@ use crate::err::{DiskPoolMmapSnafu, Result, UnknownIOSnafu};
 
 pub(crate) struct DiskPagePool {
     // the file path of the pool.
-    filepath: PathBuf,
+    filepath:  PathBuf,
     // the size of each page.
     page_size: usize,
     // the total space of the file will use.
-    capacity: usize,
+    capacity:  usize,
     // the queue of the pages.
-    queue: ArrayQueue<u64>,
+    queue:     ArrayQueue<u64>,
     // ready notify.
-    notify: Notify,
+    notify:    Notify,
     // the underlying persistent storage support
-    file: RwLock<AsyncMmapFileMut>,
+    file:      RwLock<AsyncMmapFileMut>,
 }
 
 impl DiskPagePool {
@@ -90,17 +90,13 @@ impl DiskPagePool {
         }
         Page {
             page_id: page_id.unwrap(),
-            pool: self.clone(),
+            pool:    self.clone(),
         }
     }
 
-    pub(crate) fn remain_page_cnt(&self) -> usize {
-        self.queue.len()
-    }
+    pub(crate) fn remain_page_cnt(&self) -> usize { self.queue.len() }
 
-    pub(crate) fn total_page_cnt(&self) -> usize {
-        self.capacity / self.page_size
-    }
+    pub(crate) fn total_page_cnt(&self) -> usize { self.capacity / self.page_size }
 }
 
 impl Display for DiskPagePool {
@@ -118,7 +114,7 @@ impl Display for DiskPagePool {
 
 pub(crate) struct Page {
     page_id: u64,
-    pool: Arc<DiskPagePool>,
+    pool:    Arc<DiskPagePool>,
 }
 
 impl Page {
@@ -162,9 +158,7 @@ impl Page {
         Ok(())
     }
 
-    fn cal_offset(&self) -> usize {
-        self.page_id as usize * self.pool.page_size
-    }
+    fn cal_offset(&self) -> usize { self.page_id as usize * self.pool.page_size }
 }
 
 impl Drop for Page {

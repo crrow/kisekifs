@@ -45,19 +45,17 @@ pub enum AccessTimeMode {
 }
 
 impl Default for AccessTimeMode {
-    fn default() -> Self {
-        Self::Never
-    }
+    fn default() -> Self { Self::Never }
 }
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct MetaConfig {
     pub dsn: String,
 
-    pub skip_dir_nlink: usize,
-    pub read_only: bool,
+    pub skip_dir_nlink:   usize,
+    pub read_only:        bool,
     /// The duration to reuse open file without checking update (0 means disable
     /// this feature)
-    pub open_cache: Duration,
+    pub open_cache:       Duration,
     /// max number of open files to cache (soft limit, 0 means unlimited)
     pub open_cache_limit: usize,
 }
@@ -72,10 +70,10 @@ impl MetaConfig {
 impl Default for MetaConfig {
     fn default() -> Self {
         Self {
-            dsn: kiseki_common::KISEKI_DEBUG_META_ADDR.to_string(),
-            skip_dir_nlink: 0,
-            read_only: false,
-            open_cache: Duration::default(),
+            dsn:              kiseki_common::KISEKI_DEBUG_META_ADDR.to_string(),
+            skip_dir_nlink:   0,
+            read_only:        false,
+            open_cache:       Duration::default(),
             open_cache_limit: 10_000,
         }
     }

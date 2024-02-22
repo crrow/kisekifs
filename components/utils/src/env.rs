@@ -53,9 +53,7 @@ where
 /// - [var] uses [dotenvy] which loads the `.env` file from the current or
 ///   parent directories before returning the value.
 #[track_caller]
-pub fn required_var(key: &str) -> Result<String, Whatever> {
-    required(var(key), key)
-}
+pub fn required_var(key: &str) -> Result<String, Whatever> { required(var(key), key) }
 
 fn required<T>(res: Result<Option<T>, Whatever>, key: &str) -> Result<T, Whatever> {
     match res {

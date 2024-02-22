@@ -9,7 +9,7 @@ pub enum Error {
     Unknown {
         #[snafu(implicit)]
         location: Location,
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source:   Box<dyn std::error::Error + Send + Sync>,
     },
 }
 

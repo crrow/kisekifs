@@ -7,9 +7,9 @@ use crate::env::{required_var, var, var_parsed};
 
 #[derive(Debug)]
 pub struct SentryConfig {
-    pub dsn: Option<Dsn>,
-    pub environment: Option<String>,
-    pub release: Option<String>,
+    pub dsn:                Option<Dsn>,
+    pub environment:        Option<String>,
+    pub release:            Option<String>,
     pub traces_sample_rate: f32,
 }
 
@@ -19,12 +19,13 @@ impl SentryConfig {
             format!("SENTRY_DSN_API is not a valid Sentry DSN value {}", e)
         })?;
 
-        let environment = match dsn {
-            None => None,
-            Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
-                |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
-            )?),
-        };
+        let environment =
+            match dsn {
+                None => None,
+                Some(_) => Some(required_var("SENTRY_ENVIRONMENT").with_whatever_context(
+                    |_| "SENTRY_ENV_API must be set when using SENTRY_DSN_API",
+                )?),
+            };
 
         Ok(Self {
             dsn,

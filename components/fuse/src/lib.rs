@@ -19,28 +19,27 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub use config::FuseConfig;
 use fuser::{
-    Filesystem, FileType, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow,
 };
-use libc::{__u64, c_int};
-use snafu::{ResultExt, Snafu, Whatever};
-use tokio::runtime;
-use tracing::{debug, error, field, info, instrument, Instrument};
-
-pub use config::FuseConfig;
 use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
-use kiseki_meta::context::{EMPTY_CONTEXT, FuseContext};
+use kiseki_meta::context::{FuseContext, EMPTY_CONTEXT};
 use kiseki_types::{
     attr::InodeAttr,
     entry::{Entry, FullEntry},
     ino::Ino,
+    stat::FSStat,
     ToErrno,
 };
-use kiseki_types::stat::FSStat;
 use kiseki_utils::readable_size::ReadableSize;
 use kiseki_vfs::KisekiVFS;
+use libc::{__u64, c_int};
+use snafu::{ResultExt, Snafu, Whatever};
+use tokio::runtime;
+use tracing::{debug, error, field, info, instrument, Instrument};
 
 use crate::err::Error;
 
@@ -50,8 +49,8 @@ pub mod null;
 
 #[derive(Debug)]
 pub struct KisekiFuse {
-    config: FuseConfig,
-    vfs: Arc<KisekiVFS>,
+    config:  FuseConfig,
+    vfs:     Arc<KisekiVFS>,
     runtime: runtime::Runtime,
 }
 
@@ -164,6 +163,7 @@ impl Filesystem for KisekiFuse {
         }
         Ok(())
     }
+
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = FuseContext::from(_req);
@@ -370,7 +370,14 @@ impl Filesystem for KisekiFuse {
 
         match self.runtime.block_on(
             self.vfs
-                .create(ctx.clone(), Ino(parent), &name, mode as u16, umask as u16, flags)
+                .create(
+                    ctx.clone(),
+                    Ino(parent),
+                    &name,
+                    mode as u16,
+                    umask as u16,
+                    flags,
+                )
                 .in_current_span(),
         ) {
             Ok((entry, fh)) => reply.created(

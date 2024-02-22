@@ -1,13 +1,12 @@
 use std::fmt::{Debug, Formatter};
 
-use serde::{Deserialize, Serialize};
-
 use kiseki_utils::readable_size::ReadableSize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DirStat {
     pub length: i64,
-    pub space: i64,
+    pub space:  i64,
     pub inodes: i64,
 }
 
@@ -17,7 +16,7 @@ pub struct FSStat {
     /// Represents the total available size.
     pub total_size: u64,
     /// Represents the used size.
-    pub used_size: u64,
+    pub used_size:  u64,
     /// Represents the total used file count.
     pub file_count: u64,
 }
@@ -36,7 +35,7 @@ impl Default for FSStat {
     fn default() -> Self {
         FSStat {
             total_size: u64::MAX,
-            used_size: 0,
+            used_size:  0,
             file_count: 0,
         }
     }

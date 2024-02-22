@@ -9,8 +9,8 @@ use crate::{
 /// It starts at 2 since the root inode is 1.
 pub struct IdTable {
     next_max_pair: RwLock<(u64, u64)>,
-    backend: BackendRef,
-    counter: Counter,
+    backend:       BackendRef,
+    counter:       Counter,
 }
 
 impl IdTable {

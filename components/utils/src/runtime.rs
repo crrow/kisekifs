@@ -13,9 +13,7 @@ static GLOBAL_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
         .unwrap()
 });
 
-pub fn handle() -> tokio::runtime::Handle {
-    GLOBAL_RUNTIME.handle().clone()
-}
+pub fn handle() -> tokio::runtime::Handle { GLOBAL_RUNTIME.handle().clone() }
 
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
@@ -35,6 +33,4 @@ where
 }
 
 #[allow(dead_code)]
-pub fn block_on<F: Future>(future: F) -> F::Output {
-    GLOBAL_RUNTIME.block_on(future)
-}
+pub fn block_on<F: Future>(future: F) -> F::Output { GLOBAL_RUNTIME.block_on(future) }

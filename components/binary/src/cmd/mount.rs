@@ -184,11 +184,12 @@ impl MountArgs {
             options.push(MountOption::AllowOther);
         }
         FuseConfig {
-            mount_point: self.mount_point.clone(),
-            mount_options: options,
+            mount_point:        self.mount_point.clone(),
+            mount_options:      options,
             async_work_threads: self.async_work_threads,
         }
     }
+
     fn meta_config(&self) -> Result<MetaConfig, Whatever> {
         let mut mc = MetaConfig::default();
         mc.with_dsn(&self.meta_dsn);
@@ -200,20 +201,20 @@ impl MountArgs {
             return None;
         }
         let mut opts = LoggingOptions {
-            dir: self.log_directory.clone(),
-            level: self.level.clone(),
-            enable_otlp_tracing: self.enable_otlp_tracing.clone(),
-            otlp_endpoint: self.otlp_endpoint.clone(),
+            dir:                  self.log_directory.clone(),
+            level:                self.level.clone(),
+            enable_otlp_tracing:  self.enable_otlp_tracing.clone(),
+            otlp_endpoint:        self.otlp_endpoint.clone(),
             tracing_sample_ratio: self.tracing_sample_ratio,
-            append_stdout: self.append_stdout,
-            tokio_console_addr: Some(kiseki_utils::logger::DEFAULT_TOKIO_CONSOLE_ADDR.to_string()),
+            append_stdout:        self.append_stdout,
+            tokio_console_addr:   Some(
+                kiseki_utils::logger::DEFAULT_TOKIO_CONSOLE_ADDR.to_string(),
+            ),
         };
         Some(opts)
     }
 
-    fn vfs_config(&self) -> VFSConfig {
-        VFSConfig::default()
-    }
+    fn vfs_config(&self) -> VFSConfig { VFSConfig::default() }
 
     pub fn run(self) -> Result<(), Whatever> {
         human_panic::setup_panic!();

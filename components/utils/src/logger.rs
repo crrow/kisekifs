@@ -35,13 +35,13 @@ pub const DEFAULT_TOKIO_CONSOLE_ADDR: &str = "127.0.0.1:6669";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {
-    pub dir: String,
-    pub level: Option<String>,
-    pub enable_otlp_tracing: bool,
-    pub otlp_endpoint: Option<String>,
+    pub dir:                  String,
+    pub level:                Option<String>,
+    pub enable_otlp_tracing:  bool,
+    pub otlp_endpoint:        Option<String>,
     pub tracing_sample_ratio: Option<f64>,
-    pub append_stdout: bool,
-    pub tokio_console_addr: Option<String>,
+    pub append_stdout:        bool,
+    pub tokio_console_addr:   Option<String>,
 }
 
 impl PartialEq for LoggingOptions {
@@ -61,21 +61,19 @@ impl Eq for LoggingOptions {}
 impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
-            dir: DEFAULT_LOG_DIR.to_string(),
-            level: None,
-            enable_otlp_tracing: false,
-            otlp_endpoint: None,
+            dir:                  DEFAULT_LOG_DIR.to_string(),
+            level:                None,
+            enable_otlp_tracing:  false,
+            otlp_endpoint:        None,
             tracing_sample_ratio: None,
-            append_stdout: true,
-            tokio_console_addr: Some(DEFAULT_TOKIO_CONSOLE_ADDR.to_string()),
+            append_stdout:        true,
+            tokio_console_addr:   Some(DEFAULT_TOKIO_CONSOLE_ADDR.to_string()),
         }
     }
 }
 
 impl LoggingOptions {
-    pub fn with_dir(self, dir: String) -> Self {
-        Self { dir, ..self }
-    }
+    pub fn with_dir(self, dir: String) -> Self { Self { dir, ..self } }
 
     pub fn with_enable_otlp_tracing(self, v: bool) -> Self {
         Self {

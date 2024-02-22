@@ -63,28 +63,28 @@ impl DataManager {
             .or_insert_with(|| {
                 let (tx, mut rx) = mpsc::channel(200);
                 let fw = FileWriter {
-                    inode: ino,
-                    length: AtomicUsize::new(len as usize),
-                    chunk_writers: Default::default(),
-                    slice_flush_queue: tx,
+                    inode:                  ino,
+                    length:                 AtomicUsize::new(len as usize),
+                    chunk_writers:          Default::default(),
+                    slice_flush_queue:      tx,
                     total_slice_writer_cnt: Arc::new(Default::default()),
-                    cancel_token: CancellationToken::new(),
-                    seq_generate: self.id_generator.clone(),
-                    ref_count: Arc::new(Default::default()),
-                    flush_waiting: Arc::new(Default::default()),
-                    flush_done_notify: Arc::new(Default::default()),
-                    write_waiting: Arc::new(Default::default()),
-                    write_notify: Arc::new(Default::default()),
-                    pattern: Default::default(),
-                    early_flush_threshold: 0.3,
-                    data_manager: Arc::downgrade(self),
+                    cancel_token:           CancellationToken::new(),
+                    seq_generate:           self.id_generator.clone(),
+                    ref_count:              Arc::new(Default::default()),
+                    flush_waiting:          Arc::new(Default::default()),
+                    flush_done_notify:      Arc::new(Default::default()),
+                    write_waiting:          Arc::new(Default::default()),
+                    write_notify:           Arc::new(Default::default()),
+                    pattern:                Default::default(),
+                    early_flush_threshold:  0.3,
+                    data_manager:           Arc::downgrade(self),
                 };
 
                 let fw = Arc::new(fw);
                 let fw_cloned = fw.clone();
                 tokio::spawn(async move {
                     let flusher = FileWriterFlusher {
-                        fw: fw_cloned,
+                        fw:       fw_cloned,
                         flush_rx: rx,
                     };
                     flusher.run().await
@@ -142,13 +142,13 @@ type InternalSliceSeq = u64;
 
 #[derive(Debug, Default)]
 struct WriterPattern {
-    score: AtomicIsize,
+    score:                  AtomicIsize,
     last_write_stop_offset: AtomicUsize,
 }
 
 impl WriterPattern {
-    const MAX_SEQ_SCORE: isize = 20;
     const MAX_RANDOM_SCORE: isize = -5;
+    const MAX_SEQ_SCORE: isize = 20;
 
     fn monitor_write_at(&self, offset: usize, size: usize) {
         let last_offset = self
@@ -168,9 +168,8 @@ impl WriterPattern {
             }
         }
     }
-    fn is_seq(&self) -> bool {
-        self.score.load(Ordering::Acquire) >= 0
-    }
+
+    fn is_seq(&self) -> bool { self.score.load(Ordering::Acquire) >= 0 }
 }
 
 pub(crate) type FileWritersRef = Arc<DashMap<Ino, Arc<FileWriter>>>;
@@ -181,27 +180,27 @@ pub struct FileWriter {
 
     // runtime
     // the length of current file.
-    length: AtomicUsize,
+    length:            AtomicUsize,
     // buffer writers.
-    chunk_writers: RwLock<HashMap<ChunkIndex, Arc<ChunkWriter>>>,
+    chunk_writers:     RwLock<HashMap<ChunkIndex, Arc<ChunkWriter>>>,
     // we may need to wait on the flush queue to flush the data to the remote storage.
     slice_flush_queue: mpsc::Sender<FlushReq>,
 
-    cancel_token: CancellationToken,
-    seq_generate: Arc<sonyflake::Sonyflake>,
+    cancel_token:           CancellationToken,
+    seq_generate:           Arc<sonyflake::Sonyflake>,
     // tracking how many operations is using the file writer.
     // 1. when we open, we increase the counter.
     // 2. when we close the file, decrease the counter.
-    ref_count: Arc<AtomicUsize>,
-    flush_waiting: Arc<AtomicUsize>,
-    flush_done_notify: Arc<Notify>,
-    write_waiting: Arc<AtomicUsize>,
-    write_notify: Arc<Notify>,
+    ref_count:              Arc<AtomicUsize>,
+    flush_waiting:          Arc<AtomicUsize>,
+    flush_done_notify:      Arc<Notify>,
+    write_waiting:          Arc<AtomicUsize>,
+    write_notify:           Arc<Notify>,
     total_slice_writer_cnt: Arc<AtomicUsize>,
 
     // random write early flush
     // when we reach the threshold, we should flush some flush to the remote storage.
-    pattern: Arc<WriterPattern>,
+    pattern:               Arc<WriterPattern>,
     // when should we flush the buffer in advance, according to current buffer pool free ratio.
     early_flush_threshold: f64,
 
@@ -211,9 +210,8 @@ pub struct FileWriter {
 }
 
 impl FileWriter {
-    pub fn get_length(self: &Arc<Self>) -> usize {
-        self.length.load(Ordering::Acquire)
-    }
+    pub fn get_length(self: &Arc<Self>) -> usize { self.length.load(Ordering::Acquire) }
+
     /// Write data to the file.
     ///
     /// 1. calculate the location
@@ -328,10 +326,10 @@ impl FileWriter {
             let cw = write_guard
                 .entry(l.chunk_idx)
                 .or_insert(Arc::new(ChunkWriter {
-                    inode: self.inode,
-                    chunk_index: l.chunk_idx,
-                    slice_writers: Default::default(),
-                    fw: Arc::downgrade(self),
+                    inode:             self.inode,
+                    chunk_index:       l.chunk_idx,
+                    slice_writers:     Default::default(),
+                    fw:                Arc::downgrade(self),
                     total_slice_count: self.total_slice_writer_cnt.clone(),
                     slice_done_notify: Default::default(),
                 }))
@@ -403,14 +401,17 @@ impl FileWriter {
 }
 
 enum FlushReq {
-    FlushBulk { sw: Arc<SliceWriter>, offset: usize },
+    FlushBulk {
+        sw:     Arc<SliceWriter>,
+        offset: usize,
+    },
     FlushFull(Arc<SliceWriter>),
     CommitIdle(Arc<SliceWriter>),
 }
 
 /// FileWriterFlusher flushes the data to the remote storage periodically.
 struct FileWriterFlusher {
-    fw: Arc<FileWriter>,
+    fw:       Arc<FileWriter>,
     flush_rx: mpsc::Receiver<FlushReq>,
 }
 
@@ -501,10 +502,10 @@ impl FileWriterFlusher {
 }
 
 struct ChunkWriter {
-    inode: Ino,
-    chunk_index: ChunkIndex,
-    slice_writers: RwLock<BTreeMap<InternalSliceSeq, Arc<SliceWriter>>>,
-    fw: Weak<FileWriter>,
+    inode:             Ino,
+    chunk_index:       ChunkIndex,
+    slice_writers:     RwLock<BTreeMap<InternalSliceSeq, Arc<SliceWriter>>>,
+    fw:                Weak<FileWriter>,
     total_slice_count: Arc<AtomicUsize>,
     slice_done_notify: Arc<Notify>,
 }
@@ -682,7 +683,7 @@ struct SliceWriter {
     // dependencies
     // the underlying object storage.
     data_manager: Weak<DataManager>,
-    chunk_index: ChunkIndex,
+    chunk_index:  ChunkIndex,
     chunk_writer: Weak<ChunkWriter>,
 
     state: Arc<AtomicU8>,
@@ -691,14 +692,14 @@ struct SliceWriter {
     // used to identify the slice writer,
     // we have it since we delay the slice-id assignment until we
     // really do the flush.
-    _internal_seq: u64,
+    _internal_seq:   u64,
     // the slice id of the slice, assigned by meta engine.
-    slice_id: AtomicU64,
+    slice_id:        AtomicU64,
     // where the slice start at of the chunk
     offset_of_chunk: usize,
     // the buffer to serve the write request.
-    slice_buffer: RwLock<SliceBuffer>,
-    last_modified: AtomicCell<Instant>,
+    slice_buffer:    RwLock<SliceBuffer>,
+    last_modified:   AtomicCell<Instant>,
 }
 
 impl Display for SliceWriter {
@@ -821,9 +822,9 @@ impl SliceWriter {
                 self.offset_of_chunk,
                 kiseki_types::slice::Slice::Owned {
                     chunk_pos: self.offset_of_chunk as u32,
-                    id: slice_id,
-                    size: len as u32,
-                    _padding: 0,
+                    id:        slice_id,
+                    size:      len as u32,
+                    _padding:  0,
                 },
                 self.last_modified.load(),
             )
@@ -958,7 +959,7 @@ impl SliceWriter {
                         return None;
                     }
                     Some(FlushReq::FlushBulk {
-                        sw: self.clone(),
+                        sw:     self.clone(),
                         offset: length,
                     })
                 } else {
@@ -1014,9 +1015,9 @@ impl SliceWriter {
                 self.offset_of_chunk,
                 kiseki_types::slice::Slice::Owned {
                     chunk_pos: self.offset_of_chunk as u32,
-                    id: slice_id,
-                    size: len as u32,
-                    _padding: 0,
+                    id:        slice_id,
+                    size:      len as u32,
+                    _padding:  0,
                 },
                 self.last_modified.load(),
             )
@@ -1032,22 +1033,20 @@ impl SliceWriter {
 impl Eq for SliceWriter {}
 
 impl PartialEq for SliceWriter {
-    fn eq(&self, other: &Self) -> bool {
-        self._internal_seq == other._internal_seq
-    }
+    fn eq(&self, other: &Self) -> bool { self._internal_seq == other._internal_seq }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 struct ChunkWriteCtx {
-    file_offset: usize,
+    file_offset:    usize,
     // write to which chunk
-    chunk_idx: usize,
+    chunk_idx:      usize,
     // the start offset of this write
-    chunk_offset: usize,
+    chunk_offset:   usize,
     // the length of this write
     need_write_len: usize,
     // the start offset of the input buf
-    buf_start_at: usize,
+    buf_start_at:   usize,
 }
 
 fn locate_chunk(chunk_size: usize, offset: usize, expect_write_len: usize) -> Vec<ChunkWriteCtx> {
@@ -1064,14 +1063,16 @@ fn locate_chunk(chunk_size: usize, offset: usize, expect_write_len: usize) -> Ve
         .map(move |idx| {
             let max_can_write = min(chunk_size - chunk_pos, left);
             debug!(
-                "offset: {}, chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, max can write: {}",
+                "offset: {}, chunk-size: {}, chunk: {} chunk_pos: {}, left: {}, buf start at: {}, \
+                 max can write: {}",
                 ReadableSize(offset as u64),
                 ReadableSize(chunk_size as u64),
                 idx,
                 chunk_pos,
                 ReadableSize(left as u64),
                 ReadableSize(buf_start_at as u64),
-                ReadableSize(max_can_write as u64));
+                ReadableSize(max_can_write as u64)
+            );
 
             let ctx = ChunkWriteCtx {
                 file_offset: offset + buf_start_at,

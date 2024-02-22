@@ -5,41 +5,39 @@ use std::{
     ops::Add,
     path::{Component, Path},
     sync::{
+        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering},
         Arc,
-        atomic::{AtomicI64, Ordering},
     },
     time::{Duration, SystemTime},
 };
-use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 use bitflags::bitflags;
 use crossbeam::{atomic::AtomicCell, channel::at};
 use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
+use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
+use kiseki_types::{
+    attr::{InodeAttr, SetAttrFlags},
+    entry::{DEntry, Entry, FullEntry},
+    ino::{Ino, ROOT_INO, TRASH_INODE},
+    internal_nodes::{InternalNode, TRASH_INODE_NAME},
+    setting::Format,
+    slice::{Slice, SliceID, Slices, SLICE_BYTES},
+    stat::{DirStat, FSStat},
+    FileType,
+};
+use kiseki_utils::readable_size::ReadableSize;
 use scopeguard::defer;
 use serde::Serialize;
 use snafu::{ensure, ResultExt};
 use tokio::{
     sync::RwLock,
-    time::{Instant, timeout},
+    time::{timeout, Instant},
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
-use kiseki_types::{
-    attr::{InodeAttr, SetAttrFlags},
-    entry::{DEntry, Entry, FullEntry},
-    FileType,
-    ino::{Ino, ROOT_INO, TRASH_INODE},
-    internal_nodes::{InternalNode, TRASH_INODE_NAME},
-    setting::Format,
-    slice::{Slice, SLICE_BYTES, SliceID, Slices},
-    stat::{DirStat, FSStat},
-};
-use kiseki_utils::readable_size::ReadableSize;
-
 use crate::{
-    backend::{BackendRef, key::Counter, open_backend},
+    backend::{key::Counter, open_backend, BackendRef},
     config::MetaConfig,
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
@@ -133,18 +131,18 @@ pub struct MetaEngine {
     format: Format,
     // The root inode of the file system.
     // TODO: review me. JuiceFS use it for enabling chroot.
-    root: Ino,
+    root:   Ino,
 
-    /* track opened/deleted files */
-    open_files: OpenFiles,
+    // track opened/deleted files
+    open_files:    OpenFiles,
     removed_files: RwLock<HashSet<Ino>>,
 
-    /* stats */
-    dir_parents: DashMap<Ino, Ino>,
-    fs_stat_used_size: AtomicU64,
+    // stats
+    dir_parents:        DashMap<Ino, Ino>,
+    fs_stat_used_size:  AtomicU64,
     fs_stat_file_count: AtomicU64,
 
-    /* id tables */
+    // id tables
     free_inodes: IdTable,
     free_slices: IdTable,
 
@@ -160,14 +158,10 @@ impl Display for MetaEngine {
 }
 
 impl MetaEngine {
-    pub fn get_format(&self) -> &Format {
-        &self.format
-    }
+    pub fn get_format(&self) -> &Format { &self.format }
 
     #[instrument(skip(self))]
-    pub async fn next_slice_id(&self) -> Result<SliceID> {
-        self.free_slices.next().await
-    }
+    pub async fn next_slice_id(&self) -> Result<SliceID> { self.free_slices.next().await }
 
     /// [stat_fs] returns summary statistics of a volume.
     ///
@@ -177,7 +171,7 @@ impl MetaEngine {
         let total_used_size = self.fs_stat_used_size.load(Ordering::Acquire);
         Ok(FSStat {
             total_size: self.format.max_capacity.unwrap_or(usize::MAX) as u64,
-            used_size: total_used_size,
+            used_size:  total_used_size,
             file_count: total_used_file_count,
         })
     }
@@ -224,7 +218,7 @@ impl MetaEngine {
                 ensure!(
                     parent_attr.get_filetype() == FileType::Directory,
                     LibcSnafu {
-                        errno: libc::ENOTDIR
+                        errno: libc::ENOTDIR,
                     }
                 );
                 let attr = self.get_attr(parent_attr.parent).await?;
@@ -308,6 +302,7 @@ impl MetaEngine {
 
         Ok(basic_entries)
     }
+
     async fn do_read_dir(
         &self,
         inode: Ino,
@@ -386,11 +381,11 @@ impl MetaEngine {
             0,
             String::new(),
         )
-            .await
-            .map(|r| {
-                self.dir_parents.insert(r.0, parent);
-                r
-            })
+        .await
+        .map(|r| {
+            self.dir_parents.insert(r.0, parent);
+            r
+        })
     }
 
     // Mknod creates a node in a directory with given name, type and permissions.
@@ -415,7 +410,7 @@ impl MetaEngine {
         ensure!(
             !name.is_empty(),
             LibcSnafu {
-                errno: libc::ENOENT
+                errno: libc::ENOENT,
             }
         );
 
@@ -476,14 +471,14 @@ impl MetaEngine {
         ensure!(
             parent_attr.is_dir(),
             LibcSnafu {
-                errno: libc::ENOTDIR
+                errno: libc::ENOTDIR,
             }
         );
         // check if the parent is trash
         ensure!(
             !parent_attr.parent.is_trash(),
             LibcSnafu {
-                errno: libc::ENOENT
+                errno: libc::ENOENT,
             }
         );
         // check if the parent have the permission
@@ -505,7 +500,7 @@ impl MetaEngine {
             LibcSnafu {
                 errno: libc::EEXIST,
             }
-                .fail()?;
+            .fail()?;
         }
 
         // check if we need to update the parent
@@ -599,6 +594,7 @@ impl MetaEngine {
         self.open_files.open(x.0, &mut x.1).await;
         Ok(x)
     }
+
     pub async fn check_set_attr(
         &self,
         ctx: &FuseContext,
@@ -613,6 +609,7 @@ impl MetaEngine {
         // TODO: implement me
         Ok(())
     }
+
     // SetAttr updates the attributes for given node.
     pub async fn set_attr(
         &self,
@@ -634,6 +631,7 @@ impl MetaEngine {
         self.backend.set_attr(inode, &dirty_attr)?;
         Ok(())
     }
+
     fn merge_attr(
         &self,
         ctx: &FuseContext,
@@ -701,8 +699,8 @@ impl MetaEngine {
                 if ctx.uid != 0
                     && ctx.uid != cur.uid
                     && (cur.perm & 0o1777 != new_attr.perm & 0o1777
-                    || new_attr.perm & 0o2000 > cur.perm & 0o2000
-                    || new_attr.perm & 0o4000 > cur.perm & 0o4000)
+                        || new_attr.perm & 0o2000 > cur.perm & 0o2000
+                        || new_attr.perm & 0o4000 > cur.perm & 0o4000)
                 {
                     LibcSnafu { errno: libc::EPERM }.fail()?;
                 }
@@ -721,14 +719,14 @@ impl MetaEngine {
             ensure!(
                 ctx.uid == cur.uid,
                 LibcSnafu {
-                    errno: libc::EACCES
+                    errno: libc::EACCES,
                 }
             );
             if ctx.check(inode, cur, MODE_MASK_W).is_err() {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
-                        errno: libc::EACCES
+                        errno: libc::EACCES,
                     }
                 );
             }
@@ -740,7 +738,7 @@ impl MetaEngine {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
-                        errno: libc::EACCES
+                        errno: libc::EACCES,
                     }
                 );
             }
@@ -750,14 +748,14 @@ impl MetaEngine {
             ensure!(
                 ctx.uid == cur.uid,
                 LibcSnafu {
-                    errno: libc::EACCES
+                    errno: libc::EACCES,
                 }
             );
             if ctx.check(inode, cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
                 LibcSnafu {
                     errno: libc::EACCES,
                 }
-                    .fail()?;
+                .fail()?;
             }
             dirty_attr.mtime = new_attr.mtime;
             changed = true;
@@ -796,7 +794,7 @@ impl MetaEngine {
             _ => LibcSnafu {
                 errno: libc::EINVAL,
             }
-                .fail()?,
+            .fail()?,
         };
 
         ctx.check(inode, &attr, mask)?;
@@ -848,7 +846,6 @@ impl MetaEngine {
             .backend
             .get_raw_chunk_slices(inode, chunk_idx)?
             .unwrap_or(vec![]);
-
 
         let new_len =
             chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
@@ -971,25 +968,25 @@ impl MetaEngine {
             LibcSnafu {
                 errno: libc::EINVAL,
             }
-                .fail()?;
+            .fail()?;
         }
         if mode.contains(FallocateMode::INSERT_RANGE) && mode != FallocateMode::INSERT_RANGE {
             LibcSnafu {
                 errno: libc::EINVAL,
             }
-                .fail()?;
+            .fail()?;
         }
         if mode == FallocateMode::INSERT_RANGE || mode == FallocateMode::COLLAPSE_RANGE {
             LibcSnafu {
                 errno: libc::ENOTSUP,
             }
-                .fail()?;
+            .fail()?;
         }
         if mode.contains(FallocateMode::PUNCH_HOLE) && mode.contains(FallocateMode::KEEP_SIZE) {
             LibcSnafu {
                 errno: libc::EINVAL,
             }
-                .fail()?;
+            .fail()?;
         }
 
         todo!()

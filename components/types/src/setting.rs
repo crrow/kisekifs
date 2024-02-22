@@ -1,8 +1,7 @@
 use std::fmt::Display;
 
-use serde::{Deserialize, Serialize};
-
 use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, KISEKI, PAGE_SIZE};
+use serde::{Deserialize, Serialize};
 
 /// [Format] can be thought of as the configuration of the filesystem.
 /// We can set up different filesystems with different configurations
@@ -27,14 +26,14 @@ pub struct Format {
     /// [page_size] can be also called as the MIN_BLOCK_SIZE,
     /// which is the min size of the block. Since under the hood,
     /// each block is divided into fixed size pages.
-    pub page_size: usize,
+    pub page_size:  usize,
 
     /// [max_capacity] set limit on the capacity of the filesystem
-    pub max_capacity: Option<usize>,
+    pub max_capacity:   Option<usize>,
     /// [max_inodes] set limit on the number of inodes
-    pub max_inodes: Option<usize>,
+    pub max_inodes:     Option<usize>,
     /// [trash_days] days to keep trash
-    pub trash_days: usize,
+    pub trash_days:     usize,
     /// [cache_dir_stat] cache the dir stats or not, which is necessary
     /// for fast summary and dir quota.
     pub cache_dir_stat: bool,
@@ -43,13 +42,13 @@ pub struct Format {
 impl Default for Format {
     fn default() -> Self {
         Format {
-            name: String::from(KISEKI),
-            chunk_size: CHUNK_SIZE, // 64MB
-            block_size: BLOCK_SIZE, // 4MB
-            page_size: PAGE_SIZE,   // 64KB
-            max_capacity: None,
-            max_inodes: None,
-            trash_days: 0,
+            name:           String::from(KISEKI),
+            chunk_size:     CHUNK_SIZE, // 64MB
+            block_size:     BLOCK_SIZE, // 4MB
+            page_size:      PAGE_SIZE,  // 64KB
+            max_capacity:   None,
+            max_inodes:     None,
+            trash_days:     0,
             cache_dir_stat: false,
         }
     }

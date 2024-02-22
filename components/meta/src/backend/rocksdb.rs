@@ -29,6 +29,7 @@ impl Builder {
         self.path = path.as_ref().to_path_buf();
         self
     }
+
     pub fn build(self) -> Result<Arc<dyn Backend>> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
@@ -58,7 +59,7 @@ impl Backend for RocksdbBackend {
         let setting_buf = bincode::serialize(format)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
-                key: key::CURRENT_FORMAT.to_string(),
+                key:  key::CURRENT_FORMAT.to_string(),
             })
             .context(ModelSnafu)?;
 
@@ -67,6 +68,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?;
         Ok(())
     }
+
     fn load_format(&self) -> Result<Format> {
         let setting_buf = self
             .db
@@ -76,7 +78,7 @@ impl Backend for RocksdbBackend {
         let setting: Format = bincode::deserialize(&setting_buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
-                key: key::CURRENT_FORMAT.to_string(),
+                key:  key::CURRENT_FORMAT.to_string(),
             })
             .context(ModelSnafu)?;
         Ok(setting)
@@ -92,7 +94,7 @@ impl Backend for RocksdbBackend {
                 bincode::deserialize(&v)
                     .context(model_err::CorruptionSnafu {
                         kind: ModelKind::Counter,
-                        key: String::from_utf8_lossy(&key).to_string(),
+                        key:  String::from_utf8_lossy(&key).to_string(),
                     })
                     .context(ModelSnafu)
             })
@@ -103,13 +105,14 @@ impl Backend for RocksdbBackend {
         let new_buf = bincode::serialize(&new)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Counter,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         transaction.put(&key, new_buf).context(RocksdbSnafu)?;
         transaction.commit().context(RocksdbSnafu)?;
         Ok(new)
     }
+
     fn load_count(&self, counter: Counter) -> Result<u64> {
         let key: Vec<u8> = counter.into();
         let buf = self
@@ -118,13 +121,13 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Counter,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         let count: u64 = bincode::deserialize(&buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Counter,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(count)
@@ -138,24 +141,25 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Attr,
-                key: String::from_utf8_lossy(&attr_key).to_string(),
+                key:  String::from_utf8_lossy(&attr_key).to_string(),
             })
             .context(ModelSnafu)?;
 
         let attr: InodeAttr = bincode::deserialize(&buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Attr,
-                key: String::from_utf8_lossy(&attr_key).to_string(),
+                key:  String::from_utf8_lossy(&attr_key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(attr)
     }
+
     fn set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()> {
         let attr_key = key::attr(inode);
         let buf = bincode::serialize(attr)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Attr,
-                key: String::from_utf8_lossy(&attr_key).to_string(),
+                key:  String::from_utf8_lossy(&attr_key).to_string(),
             })
             .context(ModelSnafu)?;
         self.db.put(&attr_key, &buf).context(RocksdbSnafu)?;
@@ -170,18 +174,19 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::DEntry,
-                key: String::from_utf8_lossy(&entry_key).to_string(),
+                key:  String::from_utf8_lossy(&entry_key).to_string(),
             })
             .context(ModelSnafu)?;
 
         let entry_info: DEntry = bincode::deserialize(&entry_buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::DEntry,
-                key: String::from_utf8_lossy(&entry_key).to_string(),
+                key:  String::from_utf8_lossy(&entry_key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(entry_info)
     }
+
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()> {
         let entry_key = key::dentry(parent, name);
         let entry_buf = bincode::serialize(&DEntry {
@@ -192,12 +197,13 @@ impl Backend for RocksdbBackend {
         })
         .context(model_err::CorruptionSnafu {
             kind: ModelKind::DEntry,
-            key: String::from_utf8_lossy(&entry_key).to_string(),
+            key:  String::from_utf8_lossy(&entry_key).to_string(),
         })
         .context(ModelSnafu)?;
         self.db.put(&entry_key, entry_buf).context(RocksdbSnafu)?;
         Ok(())
     }
+
     fn list_entry_info(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>> {
         let prefix = key::dentry_prefix(parent);
         let range = prefix.as_slice()..;
@@ -223,7 +229,7 @@ impl Backend for RocksdbBackend {
                         let dentry: DEntry = bincode::deserialize(v)
                             .context(model_err::CorruptionSnafu {
                                 kind: ModelKind::DEntry,
-                                key: String::from_utf8_lossy(k).to_string(),
+                                key:  String::from_utf8_lossy(k).to_string(),
                             })
                             .context(ModelSnafu)?;
                         res.push(dentry);
@@ -258,6 +264,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?;
         Ok(())
     }
+
     fn get_symlink(&self, inode: Ino) -> Result<String> {
         let symlink_key = key::symlink(inode);
         let path_buf = self
@@ -266,7 +273,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Symlink,
-                key: String::from_utf8_lossy(&symlink_key).to_string(),
+                key:  String::from_utf8_lossy(&symlink_key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(String::from_utf8_lossy(path_buf.as_ref()).to_string())
@@ -277,7 +284,7 @@ impl Backend for RocksdbBackend {
         let buf = bincode::serialize(&slices)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::ChunkSlices,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
@@ -301,6 +308,7 @@ impl Backend for RocksdbBackend {
         let buf = self.db.get(&key).context(RocksdbSnafu)?;
         Ok(buf)
     }
+
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices> {
         let key = key::chunk_slices(inode, chunk_index);
         let buf = self
@@ -309,7 +317,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::ChunkSlices,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         let slices = Slices::decode(&buf).unwrap();
@@ -328,12 +336,13 @@ impl Backend for RocksdbBackend {
         let buf = bincode::serialize(&dir_stat)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::DirStat,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
         Ok(())
     }
+
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat> {
         let key = key::dir_stat(inode);
         let buf = self
@@ -342,13 +351,13 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::DirStat,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         let dir_stat = bincode::deserialize::<DirStat>(&buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::DirStat,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(dir_stat)
