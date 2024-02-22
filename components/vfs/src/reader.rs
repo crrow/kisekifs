@@ -7,12 +7,14 @@ use std::{
 };
 use std::cell::UnsafeCell;
 use std::cmp::max;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::Cursor;
 
 use dashmap::DashMap;
 use rangemap::RangeMap;
 use snafu::ResultExt;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, instrument};
 
@@ -37,29 +39,58 @@ use crate::err::ObjectBlockNotFoundSnafu;
 
 impl DataManager {
     /// Get the file reader for the given inode and file handle.
-    pub(crate) fn new_file_reader(
+    pub(crate) async fn new_file_reader(
         self: &Arc<Self>,
         inode: Ino,
         fh: FH,
         length: usize,
     ) -> Arc<FileReader> {
-        self.file_readers
-            .entry((inode, fh))
-            .or_insert_with(|| {
-                let fr = FileReader {
-                    data_engine: Arc::downgrade(&self),
-                    ino: inode,
-                    fh,
-                    length,
-                    file_cache: self.file_cache.clone(),
-                    mem_cache: self.mem_cache.clone(),
-                    chunks: Default::default(),
-                    closing: Default::default(),
-                };
-                Arc::new(fr)
-            })
-            .value()
-            .clone()
+        let mut outer_read_guard = self.file_readers.read().await;
+        if !outer_read_guard.contains_key(&inode) {
+            drop(outer_read_guard);
+
+            let mut out_write_guard = self.file_readers.write().await;
+            // check again
+            if !out_write_guard.contains_key(&inode) {
+                out_write_guard.insert(inode, Default::default());
+            }
+            drop(out_write_guard);
+
+            // acquire the read lock again.
+            outer_read_guard = self.file_readers.read().await;
+        }
+
+        let inner_map = outer_read_guard.get(&inode).unwrap().clone();
+        // Release the outer lock before acquiring the inner lock to avoid deadlock
+        drop(outer_read_guard);
+
+        // check if exists the file reader for the specified FH.
+        let inner_read_guard = inner_map.read().await;
+        if let Some(fr) = inner_read_guard.get(&fh) {
+            return fr.clone();
+        }
+        // not found, we have to create one.
+        drop(inner_read_guard);
+
+        // use write lock
+        let mut inner_write_guard = inner_map.write().await;
+        // check again in case of someone has created the file reader already.
+        if let Some(fr) = inner_write_guard.get(&fh) {
+            return fr.clone();
+        }
+        // no one create the file reader for real, we have to create it.
+        let fr = Arc::new(FileReader {
+            data_engine: Arc::downgrade(&self),
+            ino: inode,
+            fh,
+            length,
+            file_cache: self.file_cache.clone(),
+            mem_cache: self.mem_cache.clone(),
+            chunks: Default::default(),
+            closing: Default::default(),
+        });
+        inner_write_guard.insert(fh, fr.clone());
+        return fr;
     }
 
     pub(crate) fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
@@ -69,8 +100,6 @@ impl DataManager {
         );
     }
 }
-
-pub(crate) type FileReadersRef = Arc<DashMap<(Ino, FH), Arc<FileReader>>>;
 
 /// A [FileReader] is used for read content from a file.
 /// Each [FileReader] is held by a FileHandle: Ino+Fh.
@@ -228,7 +257,7 @@ impl FileReader {
 
     /// When release file handle, we will try to close the associated
     /// FileReader.
-    pub(crate) fn close(self: &Arc<Self>) {
+    pub(crate) async fn close(self: &Arc<Self>) {
         if self
             .closing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
@@ -242,7 +271,20 @@ impl FileReader {
             .data_engine
             .upgrade()
             .expect("engine should not be dropped");
-        engine.file_readers.remove(&(self.ino, self.fh));
+
+        let mut outer_guard = engine.file_readers.read().await;
+        if let Some(inner_map) = outer_guard.get(&self.ino) {
+            let inner_map = inner_map.clone();
+            drop(outer_guard);
+
+            let inner_read_guard = inner_map.read().await;
+            if inner_read_guard.contains_key(&self.fh) {
+                drop(inner_read_guard);
+
+                let mut inner_write_guard = inner_map.write().await;
+                inner_write_guard.remove(&self.fh);
+            }
+        }
     }
 }
 
@@ -437,7 +479,7 @@ mod tests {
         let fw = data_manager.find_file_writer(inode).unwrap();
         fw.finish().await.unwrap();
 
-        let file_reader = data_manager.new_file_reader(inode, 0, write_len);
+        let file_reader = data_manager.new_file_reader(inode, 0, write_len).await;
 
         let mut read_data = vec![0u8; 11];
         let read_len = file_reader.read(0, read_data.as_mut_slice()).await;
@@ -461,9 +503,9 @@ mod tests {
 
         let mut read_data = vec![0u8; 11];
 
-        data_manager.file_readers.remove(&(inode, 0));
+        file_reader.close().await;
 
-        let file_reader = data_manager.new_file_reader(inode, 0, file_len);
+        let file_reader = data_manager.new_file_reader(inode, 0, file_len).await;
         let read_len = file_reader
             .read(chunk_size - 3, read_data.as_mut_slice())
             .await
@@ -513,7 +555,7 @@ mod tests {
         }
         fw.finish().await.unwrap();
 
-        let file_reader = data_manager.new_file_reader(inode, 0, total_step * step_size);
+        let file_reader = data_manager.new_file_reader(inode, 0, total_step * step_size).await;
         let page_size: usize = 128 << 10;
         let total_read_step = 1 << 30 / page_size;
         let expect_read_content = vec![1u8; page_size];

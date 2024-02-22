@@ -16,8 +16,8 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -25,23 +25,24 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
+use libc::{EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM, mode_t};
+use scopeguard::defer;
+use snafu::{ensure, location, Location, OptionExt, ResultExt};
+use tokio::{task::JoinHandle, time::Instant};
+use tracing::{debug, error, info, instrument, Instrument, trace};
+
 use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
-    ino::{Ino, CONTROL_INODE, ROOT_INO},
-    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+    ino::{CONTROL_INODE, Ino, ROOT_INO},
+    internal_nodes::{CONFIG_INODE_NAME, CONTROL_INODE_NAME, InternalNodeTable},
     slice::SliceID,
     ToErrno,
 };
 use kiseki_utils::{object_storage, object_storage::ObjectStorage};
-use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
-use scopeguard::defer;
-use snafu::{ensure, location, Location, OptionExt, ResultExt};
-use tokio::{task::JoinHandle, time::Instant};
-use tracing::{debug, error, info, instrument, trace, Instrument};
 
 use crate::{
     config::Config,
@@ -51,7 +52,6 @@ use crate::{
         OpenDalSnafu, Result, StorageSnafu,
     },
     handle::{FileHandleWriteGuard, Handle, HandleTable, HandleTableRef},
-    reader::FileReadersRef,
     writer::{FileWriter, FileWritersRef},
 };
 
@@ -150,8 +150,8 @@ impl KisekiVFS {
             let h = meta.stat_fs(ctx, ino)?;
             Ok::<kiseki_types::stat::FSStat, Error>(h)
         })
-        .await
-        .context(JoinErrSnafu)??;
+            .await
+            .context(JoinErrSnafu)??;
         Ok(h)
     }
 
@@ -301,13 +301,13 @@ impl KisekiVFS {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-            .fail()?;
+                .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-            .fail()?;
+                .fail()?;
         }
         let file_type = get_file_type(mode)?;
         let mode = mode as u16 & 0o777;
@@ -343,13 +343,13 @@ impl KisekiVFS {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-            .fail()?;
+                .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-            .fail()?;
+                .fail()?;
         };
 
         let (inode, attr) = self
@@ -362,7 +362,7 @@ impl KisekiVFS {
         self.update_length(inode, &mut e.attr);
         let fh = self
             .handle_table
-            .new_file_handle(inode, e.attr.length, flags)?;
+            .new_file_handle(inode, e.attr.length, flags).await?;
         Ok((e, fh))
     }
 
@@ -496,13 +496,13 @@ impl KisekiVFS {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-            .fail()?;
+                .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-            .fail()?;
+                .fail()?;
         };
 
         let (ino, attr) = self
@@ -534,7 +534,7 @@ impl KisekiVFS {
         self.update_length(inode, &mut attr);
         let opened_fh = self
             .handle_table
-            .new_file_handle(inode, attr.length, flags)?;
+            .new_file_handle(inode, attr.length, flags).await?;
         // TODO: review me
         let entry = FullEntry::new(inode, "", attr);
 
@@ -841,7 +841,6 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
 #[cfg(test)]
 mod tests {
     use kiseki_utils::logger::install_fmt_log;
-    use tracing::debug;
 
     use super::*;
 

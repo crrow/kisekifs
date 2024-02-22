@@ -17,16 +17,12 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
     },
 };
 
 use dashmap::DashMap;
-use kiseki_common::FH;
-use kiseki_meta::context::FuseContext;
-use kiseki_types::{entry::Entry, ino::Ino};
-use kiseki_utils::readable_size::ReadableSize;
 use libc::clone;
 use snafu::ResultExt;
 use tokio::{
@@ -36,6 +32,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, instrument, Instrument};
 
+use kiseki_common::FH;
+use kiseki_meta::context::FuseContext;
+use kiseki_types::{entry::Entry, ino::Ino};
+use kiseki_utils::readable_size::ReadableSize;
+
 use crate::{
     data_manager::DataManagerRef,
     err::{Error, JoinErrSnafu, LibcSnafu, Result},
@@ -44,6 +45,7 @@ use crate::{
 };
 
 pub(crate) type HandleTableRef = Arc<HandleTable>;
+
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
     handles: DashMap<Ino, DashMap<FH, Handle>>,
@@ -80,21 +82,21 @@ impl HandleTable {
         fh
     }
 
-    pub(crate) fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<FH> {
+    pub(crate) async fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<FH> {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => FileHandle::new(
-                inode,
-                fh,
-                self.data_manager
-                    .new_file_reader(inode, fh, length as usize),
-                None,
-            ),
+            libc::O_RDONLY => {
+                FileHandle::new(
+                    inode,
+                    fh,
+                    self.data_manager.new_file_reader(inode, fh, length as usize).await,
+                    None,
+                )
+            }
             libc::O_WRONLY | libc::O_RDWR => FileHandle::new(
                 inode,
                 fh,
-                self.data_manager
-                    .new_file_reader(inode, fh, length as usize),
+                self.data_manager.new_file_reader(inode, fh, length as usize).await,
                 Some(self.data_manager.open_file_writer(inode, length)),
             ),
             _ => LibcSnafu { errno: libc::EPERM }.fail()?,
@@ -170,7 +172,8 @@ impl Handle {
 }
 
 pub(crate) struct FileHandle {
-    fh: FH,     // cannot be changed
+    fh: FH,
+    // cannot be changed
     inode: Ino, // cannot be changed
 
     reader: Arc<FileReader>,
@@ -190,7 +193,8 @@ pub(crate) struct FileHandle {
 
     // posix-lock
     pub(crate) locks: AtomicU8,
-    flock_owner: AtomicU64, // kernel 3.1- does not pass lock_owner in release()
+    flock_owner: AtomicU64,
+    // kernel 3.1- does not pass lock_owner in release()
     ofd_owner: AtomicU64,
 
     closed: AtomicBool,
@@ -395,7 +399,7 @@ impl FileHandle {
     }
 
     pub(crate) async fn close(&self) {
-        self.reader.close();
+        self.reader.close().await;
         if let Some(writer) = &self.writer {
             writer.close().await;
         }
@@ -462,8 +466,10 @@ impl Drop for FileHandleReadGuard {
 }
 
 pub(crate) struct DirHandle {
-    fh: FH,     // cannot be changed
-    inode: Ino, // cannot be changed
+    fh: FH,
+    // cannot be changed
+    inode: Ino,
+    // cannot be changed
     pub(crate) inner: RwLock<DirHandleInner>,
 }
 

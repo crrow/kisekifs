@@ -2,9 +2,10 @@ use std::{
     sync::{Arc, atomic::AtomicUsize},
     time::SystemTime,
 };
+use std::collections::HashMap;
 
 use snafu::OptionExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -22,9 +23,9 @@ use kiseki_utils::object_storage::ObjectStorage;
 
 use crate::{
     err::Result,
-    reader::FileReadersRef,
     writer::{FileWriter, FileWritersRef},
 };
+use crate::reader::FileReader;
 
 pub(crate) type DataManagerRef = Arc<DataManager>;
 
@@ -34,7 +35,7 @@ pub(crate) struct DataManager {
     pub(crate) block_size: usize,
     pub(crate) chunk_size: usize,
     pub(crate) file_writers: FileWritersRef,
-    pub(crate) file_readers: FileReadersRef,
+    pub(crate) file_readers: RwLock<HashMap<Ino, Arc<RwLock<HashMap<FH, Arc<FileReader>>>>>>,
     pub(crate) id_generator: Arc<sonyflake::Sonyflake>,
     // Dependencies
     pub(crate) meta_engine: MetaEngineRef,
@@ -58,7 +59,7 @@ impl DataManager {
             block_size,
             chunk_size,
             file_writers: Arc::new(Default::default()),
-            file_readers: Arc::new(Default::default()),
+            file_readers: Default::default(),
             id_generator: Arc::new(sonyflake::Sonyflake::new().unwrap()),
             meta_engine: meta_engine_ref,
             object_storage,
