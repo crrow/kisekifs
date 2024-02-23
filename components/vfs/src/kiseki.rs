@@ -227,7 +227,7 @@ impl KisekiVFS {
             let attr = self.meta.get_attr(inode).await?;
             ctx.check_access(&attr, mmask)?;
         }
-        Ok(self.handle_table.new_dir_handle(inode))
+        Ok(self.handle_table.new_dir_handle(inode).await)
     }
 
     pub async fn read_dir<I: Into<Ino>>(
@@ -247,6 +247,7 @@ impl KisekiVFS {
         let h = self
             .handle_table
             .find_handle(inode, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         let h = h.as_dir_handle().context(LibcSnafu { errno: EBADF })?;
 
@@ -470,7 +471,10 @@ impl KisekiVFS {
         Ok(new_attr)
     }
 
-    async fn truncate(&self, _ino: Ino, _size: u64, _fh: Option<u64>) -> Result<InodeAttr> {
+    async fn truncate(&self, ino: Ino, size: u64, _fh: Option<u64>) -> Result<InodeAttr> {
+        ensure!(!ino.is_special(), LibcSnafu { errno: EPERM });
+        ensure!((size as usize) < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+
         // let attr = self.meta.get_attr(ino).await?;
         // TODO: fix me
         Ok(InodeAttr::default())
@@ -600,6 +604,7 @@ impl KisekiVFS {
         let handle = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         let file_handle = handle
             .as_file_handle()
@@ -647,6 +652,7 @@ impl KisekiVFS {
         let _handle = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         if ino == CONTROL_INODE {
             todo!()
@@ -681,6 +687,7 @@ impl KisekiVFS {
         let h = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: ENOENT })?;
         let h = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
         if ino.is_special() {
@@ -744,6 +751,7 @@ impl KisekiVFS {
         let handle = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         if let Some(fh) = handle.as_file_handle() {
             let write_guard = fh
@@ -775,6 +783,7 @@ impl KisekiVFS {
         let h = self
             .handle_table
             .find_handle(inode, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         let _ = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
         self.meta.fallocate(inode, offset, length, mode).await?;
@@ -791,7 +800,7 @@ impl KisekiVFS {
         if inode.is_special() {
             todo!()
         }
-        if let Some(handle) = self.handle_table.find_handle(inode, fh) {
+        if let Some(handle) = self.handle_table.find_handle(inode, fh).await {
             handle.wait_all_operations_done(ctx.clone()).await?;
             if let Some(fh) = handle.as_file_handle() {
                 if fh.has_writer() {
