@@ -183,7 +183,7 @@ impl InodeAttr {
     // Enforces different access levels for owner, group, and others.
     // Grants full access to the root user.
     // Determines access based on user and group IDs.
-    pub fn access_perm(&self, uid: u32, gids: &Vec<u32>) -> u8 {
+    pub fn access_mode(&self, uid: u32, gids: &Vec<u32>) -> u8 {
         if uid == 0 {
             // If uid is 0 (root user), returns 0x7 (full access) unconditionally.
             return 0x7;

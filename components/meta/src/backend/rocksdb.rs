@@ -396,7 +396,7 @@ impl Backend for RocksdbBackend {
             }
         );
         // check if the parent have the permission
-        ctx.check(&parent_attr, kiseki_common::MODE_MASK_W)?;
+        ctx.check_access(&parent_attr, kiseki_common::MODE_MASK_W)?;
         ensure!(
             !kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8)
                 .unwrap()
@@ -564,7 +564,7 @@ impl Backend for RocksdbBackend {
             }
         );
 
-        ctx.check(
+        ctx.check_access(
             &parent_attr,
             kiseki_common::MODE_MASK_W | kiseki_common::MODE_MASK_X,
         )?;

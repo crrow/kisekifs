@@ -408,11 +408,11 @@ impl Filesystem for KisekiFuse {
         flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         match self.runtime.block_on(
             self.vfs
                 .set_attr(
-                    &ctx,
+                    ctx.clone(),
                     Ino(ino),
                     flags.unwrap_or(0),
                     atime,

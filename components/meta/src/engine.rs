@@ -221,7 +221,7 @@ impl MetaEngine {
         let parent = self.check_root(parent);
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
-            ctx.check(&parent_attr, MODE_MASK_X)?;
+            ctx.check_access(&parent_attr, MODE_MASK_X)?;
         }
         let mut name = name;
         if name == DOT_DOT {
@@ -299,7 +299,7 @@ impl MetaEngine {
             MODE_MASK_X
         };
 
-        ctx.check(&attr, mmask)?;
+        ctx.check_access(&attr, mmask)?;
 
         if inode == self.root {
             attr.parent = self.root;
@@ -658,7 +658,7 @@ impl MetaEngine {
             }
         }
         if flags.contains(SetAttrFlags::ATIME_NOW) {
-            if ctx.check(cur, MODE_MASK_W).is_err() {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() {
                 ensure!(ctx.uid == cur.uid, LibcSnafu { errno: libc::EPERM });
             }
             dirty_attr.atime = now;
@@ -670,7 +670,7 @@ impl MetaEngine {
                     errno: libc::EACCES,
                 }
             );
-            if ctx.check(cur, MODE_MASK_W).is_err() {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
@@ -682,7 +682,7 @@ impl MetaEngine {
             changed = true;
         }
         if flags.contains(SetAttrFlags::MTIME_NOW) {
-            if ctx.check(cur, MODE_MASK_W).is_err() {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
@@ -699,7 +699,7 @@ impl MetaEngine {
                     errno: libc::EACCES,
                 }
             );
-            if ctx.check(cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
                 LibcSnafu {
                     errno: libc::EACCES,
                 }
@@ -745,7 +745,7 @@ impl MetaEngine {
             .fail()?,
         };
 
-        ctx.check(&attr, mask)?;
+        ctx.check_access(&attr, mask)?;
 
         let attr_flags = kiseki_types::attr::Flags::from_bits(attr.flags as u8).unwrap();
         if (attr_flags.contains(kiseki_types::attr::Flags::IMMUTABLE) || attr.parent.is_trash())

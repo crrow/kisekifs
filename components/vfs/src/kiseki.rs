@@ -225,7 +225,7 @@ impl KisekiVFS {
                     _ => 0, // do nothing, // Handle unexpected flags
                 };
             let attr = self.meta.get_attr(inode).await?;
-            ctx.check(&attr, mmask)?;
+            ctx.check_access(&attr, mmask)?;
         }
         Ok(self.handle_table.new_dir_handle(inode))
     }
@@ -362,7 +362,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn set_attr(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         flags: u32,
         atime: Option<TimeOrNow>,
@@ -444,7 +444,7 @@ impl KisekiVFS {
         if need_update {
             if ctx.check_permission {
                 self.meta
-                    .check_set_attr(ctx, ino, flags, &mut new_attr)
+                    .check_set_attr(&ctx, ino, flags, &mut new_attr)
                     .await
                     .context(MetaSnafu)?;
             }
@@ -459,7 +459,7 @@ impl KisekiVFS {
         }
 
         self.meta
-            .set_attr(ctx, flags, ino, &mut new_attr)
+            .set_attr(&ctx, flags, ino, &mut new_attr)
             .await
             .context(MetaSnafu)?;
 
@@ -664,7 +664,8 @@ impl KisekiVFS {
         handle.remove_operation(&ctx).await;
 
         self.data_manager
-            .truncate_reader(ino, write_guard.get_length() as u64).await;
+            .truncate_reader(ino, write_guard.get_length() as u64)
+            .await;
 
         Ok(write_len as u32)
     }
@@ -830,6 +831,28 @@ impl KisekiVFS {
             .get_mut(&ino)
             .map(|mut v| *v = std::time::Instant::now());
     }
+
+    #[cfg(test)]
+    fn check_access(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        attr: &InodeAttr,
+        mask: libc::c_int,
+    ) -> Result<()> {
+        let mut my_mask = 0;
+        if mask & libc::R_OK != 0 {
+            my_mask |= libc::R_OK;
+        }
+        if mask & libc::W_OK != 0 {
+            my_mask |= libc::W_OK;
+        }
+        if mask & libc::X_OK != 0 {
+            my_mask |= libc::X_OK;
+        }
+        ctx.check_access(attr, my_mask as u8)?;
+        Ok(())
+    }
 }
 
 /// Reply to a `open` or `opendir` call
@@ -963,9 +986,62 @@ mod tests {
         let stat = vfs.stat_fs(ctx.clone(), ROOT_INO)?;
         debug!("{:?}", stat);
 
+        // dirs
         let dir1 = vfs.mkdir(ctx.clone(), ROOT_INO, "d1", 0o755, 0).await?;
         let dir2 = vfs.mkdir(ctx.clone(), dir1.inode, "d2", 0o755, 0).await?;
+        assert_eq!(
+            vfs.rmdir(ctx.clone(), ROOT_INO, &dir1.name)
+                .await
+                .unwrap_err()
+                .to_errno(),
+            libc::ENOTEMPTY
+        );
+        vfs.rmdir(ctx.clone(), dir1.inode, &dir2.name).await?;
 
+        // files
+        let f = vfs
+            .mknod(
+                ctx.clone(),
+                dir1.inode,
+                "f1".to_string(),
+                0o644 | libc::S_IFREG,
+                0,
+                0,
+            )
+            .await?;
+        assert_eq!(
+            vfs.check_access(ctx.clone(), f.inode, &f.attr, libc::X_OK)
+                .unwrap_err()
+                .to_errno(),
+            libc::EACCES
+        );
+
+        let time = SystemTime::now();
+        let f_new_attr = vfs
+            .set_attr(
+                ctx.clone(),
+                f.inode,
+                (SetAttrFlags::MODE
+                    | SetAttrFlags::UID
+                    | SetAttrFlags::GID
+                    | SetAttrFlags::ATIME
+                    | SetAttrFlags::MTIME)
+                    .bits(),
+                Some(TimeOrNow::SpecificTime(time)),
+                Some(TimeOrNow::SpecificTime(time)),
+                Some(0o755),
+                Some(1),
+                Some(3),
+                Some(1024),
+                None,
+            )
+            .await?;
+        assert_eq!(f_new_attr.mode, 0o755);
+        assert_eq!(f_new_attr.uid, 1);
+        assert_eq!(f_new_attr.gid, 3);
+        assert_eq!(f_new_attr.atime, time);
+        assert_eq!(f_new_attr.mtime, time);
+        assert_eq!(f_new_attr.length, 1024);
         Ok(())
     }
 }
