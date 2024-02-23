@@ -175,6 +175,11 @@ impl InodeAttr {
         self
     }
 
+    pub fn update_length(&mut self, length: u64) {
+        self.length = length;
+        self.update_modification_time()
+    }
+
     pub fn update_modification_time(&mut self) {
         self.mtime = SystemTime::now();
         self.ctime = SystemTime::now();
@@ -325,7 +330,7 @@ mod tests {
         println!("{:?}, {:?}", new_mode, new_mode_u16);
 
         let x = libc::S_ISUID;
-        let x2  = 0o1000;
+        let x2 = 0o1000;
         println!("{:x}, {:x}", x, x2)
     }
 }

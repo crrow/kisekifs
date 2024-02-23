@@ -142,7 +142,7 @@ impl KisekiVFS {
             if let Some(fh) = h.as_file_handle() {
                 if let Some(write_guard) = fh.write_lock(ctx.clone()).await {
                     _guards.push(write_guard);
-                }else if matches!(_fh, Some(_fh) if _fh == h.get_fh()) {
+                } else if matches!(_fh, Some(_fh) if _fh == h.get_fh()) {
                     // not find FileWriter
                     return LibcSnafu { errno: EACCES }.fail();
                 }
@@ -157,10 +157,12 @@ impl KisekiVFS {
         // safety: we hold all the locks for the exists file handles
         self.data_manager.direct_flush(ino).await?;
         // TODO: call meta to truncate the file length
-
-        // let attr = self.meta.get_attr(ino).await?;
-        // TODO: fix me
-        Ok(InodeAttr::default())
+        let attr = self
+            .meta
+            .truncate(ctx, ino, size, _fh.is_some())
+            .await
+            .context(MetaSnafu)?;
+        Ok(attr)
     }
 
     /// [get_entry_ttl] return the entry timeout according to the given file
@@ -1068,6 +1070,7 @@ mod tests {
                 (SetAttrFlags::MODE
                     | SetAttrFlags::UID
                     | SetAttrFlags::GID
+                    | SetAttrFlags::SIZE
                     | SetAttrFlags::ATIME
                     | SetAttrFlags::MTIME)
                     .bits(),

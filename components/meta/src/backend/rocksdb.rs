@@ -1,4 +1,5 @@
 use std::{
+    cmp::{max, min},
     fmt::{Debug, Formatter},
     ops::Sub,
     path::{Path, PathBuf},
@@ -114,6 +115,18 @@ impl RocksdbBackend {
         iter.seek_to_first();
         Ok(iter.valid())
     }
+}
+
+fn txn_put_attr<DB>(txn: &rocksdb::Transaction<DB>, inode: Ino, attr: &InodeAttr) -> Result<()> {
+    let attr_key = key::attr(inode);
+    let buf = bincode::serialize(attr)
+        .context(model_err::CorruptionSnafu {
+            kind: ModelKind::Attr,
+            key:  String::from_utf8_lossy(&attr_key).to_string(),
+        })
+        .context(ModelSnafu)?;
+    txn.put(&attr_key, &buf).context(RocksdbSnafu)?;
+    Ok(())
 }
 
 impl Backend for RocksdbBackend {
@@ -634,6 +647,40 @@ impl Backend for RocksdbBackend {
         // TODO: do we need to call commit after we call write batch with transaction?
         // txn.commit().context(RocksdbSnafu)?;
         Ok((entry_info, child_attr))
+    }
+
+    fn do_truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        length: u64,
+        skip_perm_check: bool,
+    ) -> Result<InodeAttr> {
+        let txn = self.db.transaction();
+        let mut old_attr = Self::do_get_attr(&txn, inode)?;
+        ensure!(
+            matches!(old_attr.kind, FileType::RegularFile),
+            LibcSnafu { errno: libc::EPERM }
+        );
+        let flags = kiseki_types::attr::Flags::from_bits(old_attr.flags as u8).unwrap();
+        if flags.contains(kiseki_types::attr::Flags::IMMUTABLE)
+            || flags.contains(kiseki_types::attr::Flags::APPEND)
+            || old_attr.parent.is_trash()
+        {
+            return LibcSnafu { errno: libc::EPERM }.fail();
+        }
+        if !skip_perm_check {
+            ctx.check_access(&old_attr, kiseki_common::MODE_MASK_W)?;
+        }
+        assert_ne!(length, old_attr.length, "length is the same");
+        old_attr.update_length(length);
+
+        // TODO: review me, juicefs make hole manually here, by appending empty slices
+        // info.
+
+        txn_put_attr(&txn, inode, &old_attr)?;
+        txn.commit().context(RocksdbSnafu)?;
+        Ok(old_attr.clone())
     }
 }
 

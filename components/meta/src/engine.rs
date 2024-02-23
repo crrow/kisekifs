@@ -42,7 +42,7 @@ use crate::{
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
     id_table::IdTable,
-    open_files::OpenFiles,
+    open_files::{InvalidSliceReq, OpenFiles},
 };
 
 pub type MetaEngineRef = Arc<MetaEngine>;
@@ -833,7 +833,9 @@ impl MetaEngine {
         }
 
         // TODO: update the cache
-        self.open_files.invalid_slices(inode, chunk_idx).await;
+        self.open_files
+            .invalid_slices(inode, InvalidSliceReq::One(chunk_idx))
+            .await;
 
         Ok(())
     }
@@ -942,7 +944,9 @@ impl MetaEngine {
         Ok(())
     }
 
-    // Close a file.
+    /// [close] a file, try to decrease the reference count of the OpenFile,
+    /// if the reference count is zero, then we can remove the file from the
+    /// cache.
     pub async fn close(&self, inode: Ino) -> Result<()> {
         if self.open_files.close(inode).await {
             let mut write_guard = self.removed_files.write().await;
@@ -953,7 +957,31 @@ impl MetaEngine {
         Ok(())
     }
 
-    pub async fn truncate(&self, inode: Ino, size: u64) {}
+    /// [truncate] changes the length for given file.
+    ///
+    /// When the [set_attr] operation carry the [FH], then we can skip the perm
+    /// check.
+    pub async fn truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        size: u64,
+        skip_perm_check: bool,
+    ) -> Result<InodeAttr> {
+        return if let Some(of) = self.open_files.load(&inode).await {
+            let guard = of.read_guard().await;
+            if guard.attr.length == size {
+                return Ok(guard.attr.clone());
+            }
+            let attr = self
+                .backend
+                .do_truncate(ctx, inode, size, skip_perm_check)?;
+            drop(guard); // explicitly drop the guard for keeping holding the lock
+            Ok(attr)
+        } else {
+            self.backend.do_truncate(ctx, inode, size, skip_perm_check)
+        };
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

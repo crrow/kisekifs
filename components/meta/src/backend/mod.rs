@@ -102,4 +102,13 @@ pub trait Backend: Send + Sync + 'static {
         // than this value
         skip_dir_mtime: Duration,
     ) -> Result<(DEntry, InodeAttr)>;
+
+    /// [truncate] changes the length for given file.
+    fn do_truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        length: u64,
+        skip_perm_check: bool,
+    ) -> Result<InodeAttr>;
 }
