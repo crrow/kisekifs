@@ -519,7 +519,10 @@ impl KisekiVFS {
         if parent == ROOT_INO && name == TRASH_INODE_NAME || parent.is_trash() && ctx.uid != 0 {
             return LibcSnafu { errno: EPERM }.fail()?;
         }
-        self.meta.rmdir(ctx, parent, name).await.context(MetaSnafu)?;
+        self.meta
+            .rmdir(ctx, parent, name)
+            .await
+            .context(MetaSnafu)?;
 
         Ok(())
     }
@@ -661,7 +664,7 @@ impl KisekiVFS {
         handle.remove_operation(&ctx).await;
 
         self.data_manager
-            .truncate_reader(ino, write_guard.get_length() as u64);
+            .truncate_reader(ino, write_guard.get_length() as u64).await;
 
         Ok(write_len as u32)
     }
@@ -889,6 +892,12 @@ mod tests {
         assert_eq!(write_len, 5);
 
         vfs.fsync(ctx.clone(), entry.inode, fh, true).await.unwrap();
+
+        let read_content = vfs
+            .read(ctx.clone(), entry.inode, fh, 0, 5, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(read_content.as_ref(), b"hello".as_slice());
 
         let write_len = vfs
             .write(

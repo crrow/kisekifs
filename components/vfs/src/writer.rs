@@ -291,7 +291,9 @@ impl FileWriter {
             loop {
                 debug!(
                     "Ino({}) try to update file length from {} to {}",
-                    self.inode, old_len, may_new_len
+                    self.inode,
+                    ReadableSize(old_len as u64),
+                    ReadableSize(may_new_len as u64)
                 );
                 match self.length.compare_exchange(
                     old_len,

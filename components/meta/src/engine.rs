@@ -473,13 +473,13 @@ impl MetaEngine {
         rdev: u32,
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
-        let inode = if parent.is_trash() {
+        let new_inode = if parent.is_trash() {
             let next = self.backend.increase_count_by(Counter::NextTrash, 1)?;
             TRASH_INODE + Ino::from(next)
         } else {
             Ino::from(self.free_inodes.next().await?)
         };
-        debug!("new inode: {}", inode);
+        debug!("new inode: {}", new_inode);
 
         let mut attr = InodeAttr::default()
             .set_mode(mode & !umask) // erase umask
@@ -487,108 +487,21 @@ impl MetaEngine {
             .set_gid(ctx.gid)
             .set_uid(ctx.uid)
             .set_parent(parent)
-            // .set_flags(flags) // TODO, maybe we don't have to
             .to_owned();
-        if typ == FileType::Directory {
+        if matches!(typ, FileType::Directory) {
             attr.set_nlink(2).set_length(4 << 10);
         } else {
             attr.set_nlink(1);
-            if typ == FileType::Symlink {
+            if matches!(typ, FileType::Symlink) {
                 attr.set_length(path.len() as u64);
             } else {
                 attr.set_length(0).set_rdev(rdev);
             }
         };
 
-        // FIXME: we need transaction here
-        debug!("get attr {} from backend", parent);
-        let mut parent_attr = self.backend.get_attr(parent)?;
-        debug!("get attr {} from backend succeed", parent);
-        ensure!(
-            parent_attr.is_dir(),
-            LibcSnafu {
-                errno: libc::ENOTDIR,
-            }
-        );
-        // check if the parent is trash
-        ensure!(
-            !parent_attr.parent.is_trash(),
-            LibcSnafu {
-                errno: libc::ENOENT,
-            }
-        );
-        // check if the parent have the permission
-        ctx.check(&parent_attr, kiseki_common::MODE_MASK_W)?;
-
-        ensure!(
-            !kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8)
-                .unwrap()
-                .contains(kiseki_types::attr::Flags::IMMUTABLE),
-            LibcSnafu { errno: libc::EPERM }
-        );
-
-        // check if the entry already exists
-        if let Err(e) = self.backend.get_dentry(parent, name) {
-            if !e.is_not_found() {
-                return Err(e);
-            }
-        } else {
-            LibcSnafu {
-                errno: libc::EEXIST,
-            }
-            .fail()?;
-        }
-
-        // check if we need to update the parent
-        let mut update_parent_attr = false;
-        if !parent.is_trash() && typ == FileType::Directory {
-            parent_attr.set_nlink(parent_attr.nlink + 1);
-
-            let now = SystemTime::now();
-            parent_attr.mtime = now;
-            parent_attr.ctime = now;
-            update_parent_attr = true;
-        };
-
-        let now = SystemTime::now();
-        attr.set_atime(now);
-        attr.set_mtime(now);
-        attr.set_ctime(now);
-
-        #[cfg(target_os = "darwin")]
-        {
-            attr.set_gid(parent_attr.gid);
-        }
-
-        // TODO: review the logic here
-        #[cfg(target_os = "linux")]
-        {
-            if parent_attr.mode & 0o2000 != 0 {
-                attr.set_gid(parent_attr.gid);
-            }
-            if typ == FileType::Directory {
-                attr.mode |= 0o2000;
-            } else if attr.mode & 0o2010 == 0o2010
-                && ctx.uid != 0
-                && !ctx.gid_list.contains(&parent_attr.gid)
-            {
-                attr.mode &= !0o2010;
-            }
-        }
-
-        self.backend.set_dentry(parent, name, inode, typ)?;
-        info!("create entry info: parent: {parent}, name: {name}, ino: {inode}");
-        self.backend.set_attr(inode, &attr)?;
-        if update_parent_attr {
-            self.backend.set_attr(parent, &parent_attr)?;
-        }
-        if typ == FileType::Symlink {
-            self.backend.set_symlink(inode, path)?;
-        } else if typ == FileType::Directory {
-            self.backend
-                .set_dir_stat(inode, kiseki_types::stat::DirStat::default())?;
-        };
-        Ok((inode, attr))
+        self.backend.do_mknod(
+            ctx, new_inode, attr, parent, name, typ, path,
+        )
     }
 
     pub async fn create(
@@ -970,6 +883,7 @@ impl MetaEngine {
                 return Ok(Some(svs.clone()));
             }
         }
+        drop(read_guard);
 
         let slices = self.backend.get_chunk_slices(inode, chunk_index)?;
         // let slice_info_buf = match slice_info_buf {
