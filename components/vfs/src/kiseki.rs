@@ -73,6 +73,7 @@ impl Debug for KisekiVFS {
     }
 }
 
+// All helper functions for KisekiVFS
 impl KisekiVFS {
     pub fn new(vfs_config: Config, meta: MetaEngineRef) -> Result<Self> {
         let mut internal_nodes =
@@ -123,6 +124,109 @@ impl KisekiVFS {
         Ok(vfs)
     }
 
+    async fn truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        ino: Ino,
+        size: u64,
+        _fh: Option<u64>,
+    ) -> Result<InodeAttr> {
+        ensure!(!ino.is_special(), LibcSnafu { errno: EPERM });
+        ensure!((size as usize) < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+
+        // acquire a big lock for all file handles of the inode
+        let handles = self.handle_table.get_handles(ino).await;
+        // when we release the guards, the lock will be released automatically.
+        let mut _guards = Vec::with_capacity(handles.len());
+        for h in handles {
+            if let Some(fh) = h.as_file_handle() {
+                if let Some(write_guard) = fh.write_lock(ctx.clone()).await {
+                    _guards.push(write_guard);
+                } else if matches!(_fh, Some(_fh) if _fh == h.get_fh()) {
+                    // not find FileWriter
+                    return LibcSnafu { errno: EACCES }.fail();
+                }
+            } else {
+                // Try to truncate a DirHandle
+                if matches!(_fh, Some(_fh) if _fh == h.get_fh()) {
+                    return LibcSnafu { errno: EBADF }.fail();
+                }
+            }
+        }
+
+        // safety: we hold all the locks for the exists file handles
+        self.data_manager.direct_flush(ino).await?;
+        // TODO: call meta to truncate the file length
+        let attr = self
+            .meta
+            .truncate(ctx, ino, size, _fh.is_some())
+            .await
+            .context(MetaSnafu)?;
+        Ok(attr)
+    }
+
+    /// [get_entry_ttl] return the entry timeout according to the given file
+    /// type.
+    pub fn get_entry_ttl(&self, kind: FileType) -> &Duration {
+        if kind == FileType::Directory {
+            &self.config.dir_entry_timeout
+        } else {
+            &self.config.file_entry_timeout
+        }
+    }
+
+    /// [try_update_file_reader_length] is used for checking and update the file
+    /// reader length.
+    pub async fn try_update_file_reader_length(&self, inode: Ino, attr: &mut InodeAttr) {
+        if attr.is_file() {
+            let len = self.data_manager.get_length(inode);
+            if len > attr.length {
+                attr.length = len;
+            }
+            if len < attr.length {
+                self.data_manager.truncate_reader(inode, attr.length).await;
+            }
+        }
+    }
+
+    pub fn modified_since(&self, inode: Ino, start_at: std::time::Instant) -> bool {
+        match self.modified_at.get(&inode) {
+            Some(v) => v.value() > &start_at,
+            None => false,
+        }
+    }
+
+    fn invalidate_length(&self, ino: Ino) {
+        self.modified_at
+            .get_mut(&ino)
+            .map(|mut v| *v = std::time::Instant::now());
+    }
+
+    #[cfg(test)]
+    fn check_access(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        attr: &InodeAttr,
+        mask: libc::c_int,
+    ) -> Result<()> {
+        let mut my_mask = 0;
+        if mask & libc::R_OK != 0 {
+            my_mask |= libc::R_OK;
+        }
+        if mask & libc::W_OK != 0 {
+            my_mask |= libc::W_OK;
+        }
+        if mask & libc::X_OK != 0 {
+            my_mask |= libc::X_OK;
+        }
+        ctx.check_access(attr, my_mask as u8)?;
+        Ok(())
+    }
+}
+
+/// Fuse operations for KisekiVFS
+impl KisekiVFS {
     pub async fn init(&self, ctx: &FuseContext) -> Result<()> {
         debug!("vfs:init");
         // let _format = self.meta.get_format().await?;
@@ -166,36 +270,6 @@ impl KisekiVFS {
         })
     }
 
-    /// [get_entry_ttl]
-    pub fn get_entry_ttl(&self, kind: FileType) -> &Duration {
-        if kind == FileType::Directory {
-            &self.config.dir_entry_timeout
-        } else {
-            &self.config.file_entry_timeout
-        }
-    }
-
-    /// [try_update_file_reader_length] is used for checking and update the file
-    /// reader length.
-    pub async fn try_update_file_reader_length(&self, inode: Ino, attr: &mut InodeAttr) {
-        if attr.is_file() {
-            let len = self.data_manager.get_length(inode);
-            if len > attr.length {
-                attr.length = len;
-            }
-            if len < attr.length {
-                self.data_manager.truncate_reader(inode, attr.length).await;
-            }
-        }
-    }
-
-    pub fn modified_since(&self, inode: Ino, start_at: std::time::Instant) -> bool {
-        match self.modified_at.get(&inode) {
-            Some(v) => v.value() > &start_at,
-            None => false,
-        }
-    }
-
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
         debug!("vfs:get_attr with inode {:?}", inode);
         if inode.is_special() {
@@ -225,9 +299,9 @@ impl KisekiVFS {
                     _ => 0, // do nothing, // Handle unexpected flags
                 };
             let attr = self.meta.get_attr(inode).await?;
-            ctx.check(&attr, mmask)?;
+            ctx.check_access(&attr, mmask)?;
         }
-        Ok(self.handle_table.new_dir_handle(inode))
+        Ok(self.handle_table.new_dir_handle(inode).await)
     }
 
     pub async fn read_dir<I: Into<Ino>>(
@@ -247,6 +321,7 @@ impl KisekiVFS {
         let h = self
             .handle_table
             .find_handle(inode, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         let h = h.as_dir_handle().context(LibcSnafu { errno: EBADF })?;
 
@@ -362,7 +437,7 @@ impl KisekiVFS {
     #[allow(clippy::too_many_arguments)]
     pub async fn set_attr(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         ino: Ino,
         flags: u32,
         atime: Option<TimeOrNow>,
@@ -390,7 +465,7 @@ impl KisekiVFS {
         let flags = SetAttrFlags::from_bits(flags).expect("invalid set attr flags");
         if flags.contains(SetAttrFlags::SIZE) {
             if let Some(size) = size {
-                new_attr = self.truncate(ino, size, fh).await?;
+                new_attr = self.truncate(ctx.clone(), ino, size, fh).await?;
             } else {
                 return LibcSnafu { errno: EPERM }.fail()?;
             }
@@ -444,7 +519,7 @@ impl KisekiVFS {
         if need_update {
             if ctx.check_permission {
                 self.meta
-                    .check_set_attr(ctx, ino, flags, &mut new_attr)
+                    .check_set_attr(&ctx, ino, flags, &mut new_attr)
                     .await
                     .context(MetaSnafu)?;
             }
@@ -459,7 +534,7 @@ impl KisekiVFS {
         }
 
         self.meta
-            .set_attr(ctx, flags, ino, &mut new_attr)
+            .set_attr(&ctx, flags, ino, &mut new_attr)
             .await
             .context(MetaSnafu)?;
 
@@ -468,12 +543,6 @@ impl KisekiVFS {
         // TODO: invalid open_file cache
 
         Ok(new_attr)
-    }
-
-    async fn truncate(&self, _ino: Ino, _size: u64, _fh: Option<u64>) -> Result<InodeAttr> {
-        // let attr = self.meta.get_attr(ino).await?;
-        // TODO: fix me
-        Ok(InodeAttr::default())
     }
 
     pub async fn mkdir(
@@ -519,7 +588,10 @@ impl KisekiVFS {
         if parent == ROOT_INO && name == TRASH_INODE_NAME || parent.is_trash() && ctx.uid != 0 {
             return LibcSnafu { errno: EPERM }.fail()?;
         }
-        self.meta.rmdir(ctx, parent, name).await.context(MetaSnafu)?;
+        self.meta
+            .rmdir(ctx, parent, name)
+            .await
+            .context(MetaSnafu)?;
 
         Ok(())
     }
@@ -597,6 +669,7 @@ impl KisekiVFS {
         let handle = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         let file_handle = handle
             .as_file_handle()
@@ -644,6 +717,7 @@ impl KisekiVFS {
         let _handle = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         if ino == CONTROL_INODE {
             todo!()
@@ -661,7 +735,8 @@ impl KisekiVFS {
         handle.remove_operation(&ctx).await;
 
         self.data_manager
-            .truncate_reader(ino, write_guard.get_length() as u64);
+            .truncate_reader(ino, write_guard.get_length() as u64)
+            .await;
 
         Ok(write_len as u32)
     }
@@ -677,6 +752,7 @@ impl KisekiVFS {
         let h = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: ENOENT })?;
         let h = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
         if ino.is_special() {
@@ -740,6 +816,7 @@ impl KisekiVFS {
         let handle = self
             .handle_table
             .find_handle(ino, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         if let Some(fh) = handle.as_file_handle() {
             let write_guard = fh
@@ -771,6 +848,7 @@ impl KisekiVFS {
         let h = self
             .handle_table
             .find_handle(inode, fh)
+            .await
             .context(LibcSnafu { errno: EBADF })?;
         let _ = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
         self.meta.fallocate(inode, offset, length, mode).await?;
@@ -787,7 +865,7 @@ impl KisekiVFS {
         if inode.is_special() {
             todo!()
         }
-        if let Some(handle) = self.handle_table.find_handle(inode, fh) {
+        if let Some(handle) = self.handle_table.find_handle(inode, fh).await {
             handle.wait_all_operations_done(ctx.clone()).await?;
             if let Some(fh) = handle.as_file_handle() {
                 if fh.has_writer() {
@@ -820,12 +898,6 @@ impl KisekiVFS {
         Ok(tokio::spawn(async move {
             ht.release_file_handle(inode, fh).await;
         }))
-    }
-
-    fn invalidate_length(&self, ino: Ino) {
-        self.modified_at
-            .get_mut(&ino)
-            .map(|mut v| *v = std::time::Instant::now());
     }
 }
 
@@ -889,6 +961,12 @@ mod tests {
         assert_eq!(write_len, 5);
 
         vfs.fsync(ctx.clone(), entry.inode, fh, true).await.unwrap();
+
+        let read_content = vfs
+            .read(ctx.clone(), entry.inode, fh, 0, 5, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(read_content.as_ref(), b"hello".as_slice());
 
         let write_len = vfs
             .write(
@@ -954,9 +1032,63 @@ mod tests {
         let stat = vfs.stat_fs(ctx.clone(), ROOT_INO)?;
         debug!("{:?}", stat);
 
+        // dirs
         let dir1 = vfs.mkdir(ctx.clone(), ROOT_INO, "d1", 0o755, 0).await?;
         let dir2 = vfs.mkdir(ctx.clone(), dir1.inode, "d2", 0o755, 0).await?;
+        assert_eq!(
+            vfs.rmdir(ctx.clone(), ROOT_INO, &dir1.name)
+                .await
+                .unwrap_err()
+                .to_errno(),
+            libc::ENOTEMPTY
+        );
+        vfs.rmdir(ctx.clone(), dir1.inode, &dir2.name).await?;
 
+        // files
+        let f = vfs
+            .mknod(
+                ctx.clone(),
+                dir1.inode,
+                "f1".to_string(),
+                0o644 | libc::S_IFREG,
+                0,
+                0,
+            )
+            .await?;
+        assert_eq!(
+            vfs.check_access(ctx.clone(), f.inode, &f.attr, libc::X_OK)
+                .unwrap_err()
+                .to_errno(),
+            libc::EACCES
+        );
+
+        let time = SystemTime::now();
+        let f_new_attr = vfs
+            .set_attr(
+                ctx.clone(),
+                f.inode,
+                (SetAttrFlags::MODE
+                    | SetAttrFlags::UID
+                    | SetAttrFlags::GID
+                    | SetAttrFlags::SIZE
+                    | SetAttrFlags::ATIME
+                    | SetAttrFlags::MTIME)
+                    .bits(),
+                Some(TimeOrNow::SpecificTime(time)),
+                Some(TimeOrNow::SpecificTime(time)),
+                Some(0o755),
+                Some(1),
+                Some(3),
+                Some(1024),
+                None,
+            )
+            .await?;
+        assert_eq!(f_new_attr.mode, 0o755);
+        assert_eq!(f_new_attr.uid, 1);
+        assert_eq!(f_new_attr.gid, 3);
+        assert_eq!(f_new_attr.atime, time);
+        assert_eq!(f_new_attr.mtime, time);
+        assert_eq!(f_new_attr.length, 1024);
         Ok(())
     }
 }

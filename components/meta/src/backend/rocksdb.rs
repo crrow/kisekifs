@@ -1,4 +1,5 @@
 use std::{
+    cmp::{max, min},
     fmt::{Debug, Formatter},
     ops::Sub,
     path::{Path, PathBuf},
@@ -8,13 +9,18 @@ use std::{
 
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
-    attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat::DirStat,
+    attr::InodeAttr,
+    entry::DEntry,
+    ino::{Ino, TRASH_INODE},
+    setting::Format,
+    slice::Slices,
+    stat::DirStat,
     FileType,
 };
-use rocksdb::{DBAccess, MultiThreaded, WriteBatchWithTransaction};
+use rocksdb::{DBAccess, DBPinnableSlice, MultiThreaded, WriteBatchWithTransaction};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::{key, key::Counter, Backend};
 use crate::{
@@ -23,6 +29,7 @@ use crate::{
         model_err, model_err::ModelKind, InvalidSettingSnafu, LibcSnafu, ModelSnafu, Result,
         RocksdbSnafu, UninitializedEngineSnafu,
     },
+    Error,
 };
 
 #[derive(Debug, Default)]
@@ -108,6 +115,18 @@ impl RocksdbBackend {
         iter.seek_to_first();
         Ok(iter.valid())
     }
+}
+
+fn txn_put_attr<DB>(txn: &rocksdb::Transaction<DB>, inode: Ino, attr: &InodeAttr) -> Result<()> {
+    let attr_key = key::attr(inode);
+    let buf = bincode::serialize(attr)
+        .context(model_err::CorruptionSnafu {
+            kind: ModelKind::Attr,
+            key:  String::from_utf8_lossy(&attr_key).to_string(),
+        })
+        .context(ModelSnafu)?;
+    txn.put(&attr_key, &buf).context(RocksdbSnafu)?;
+    Ok(())
 }
 
 impl Backend for RocksdbBackend {
@@ -363,6 +382,167 @@ impl Backend for RocksdbBackend {
         Ok(dir_stat)
     }
 
+    fn do_mknod(
+        &self,
+        ctx: Arc<FuseContext>,
+        mut new_inode: Ino,
+        mut new_inode_attr: InodeAttr,
+        parent: Ino,
+        name: &str,
+        typ: FileType,
+        path: String,
+    ) -> Result<(Ino, InodeAttr)> {
+        let txn = self.db.transaction();
+        debug!("get attr {} from backend", parent);
+        let mut parent_attr = Self::do_get_attr(&txn, parent)?;
+        ensure!(
+            parent_attr.is_dir(),
+            LibcSnafu {
+                errno: libc::ENOTDIR,
+            }
+        );
+        // check if the parent is trash
+        ensure!(
+            !parent_attr.parent.is_trash(),
+            LibcSnafu {
+                errno: libc::ENOENT,
+            }
+        );
+        // check if the parent have the permission
+        ctx.check_access(&parent_attr, kiseki_common::MODE_MASK_W)?;
+        ensure!(
+            !kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8)
+                .unwrap()
+                .contains(kiseki_types::attr::Flags::IMMUTABLE),
+            LibcSnafu { errno: libc::EPERM }
+        );
+
+        // check if the entry already exists
+        if let Ok(found_entry) = Self::do_get_dentry(&txn, parent, name) {
+            if matches!(found_entry.typ, FileType::Directory | FileType::RegularFile) {
+                // load the exists inode attr
+                match Self::do_get_attr(&txn, found_entry.inode) {
+                    Ok(found_attr) => {
+                        new_inode_attr = found_attr;
+                    }
+                    Err(e) => {
+                        // not found inode attr
+                        if !e.is_not_found() {
+                            return Err(e);
+                        }
+                        // use the exists inode attr
+                        new_inode = found_entry.inode;
+                    }
+                }
+            }
+            return LibcSnafu {
+                errno: libc::EEXIST,
+            }
+            .fail();
+        }
+
+        // check if we need to update the parent
+        let mut update_parent_attr = false;
+        if !parent.is_trash() && typ == FileType::Directory {
+            parent_attr.set_nlink(parent_attr.nlink + 1);
+
+            let now = SystemTime::now();
+            parent_attr.mtime = now;
+            parent_attr.ctime = now;
+            update_parent_attr = true;
+        };
+
+        let now = SystemTime::now();
+        new_inode_attr.set_atime(now);
+        new_inode_attr.set_mtime(now);
+        new_inode_attr.set_ctime(now);
+
+        #[cfg(target_os = "darwin")]
+        {
+            attr.set_gid(parent_attr.gid);
+        }
+
+        // TODO: review the logic here
+        #[cfg(target_os = "linux")]
+        {
+            // if the parent directory has the set group ID (SGID) bit (02000) set in its
+            // mode (pattr.Mode). If so, it sets the group ID (attr.Gid) of the new node to
+            // the group ID of the parent directory (pattr.Gid).
+            if parent_attr.mode & 0o2000 != 0 {
+                new_inode_attr.set_gid(parent_attr.gid);
+            }
+            // If the type of the node being created is a directory (_type ==
+            // TypeDirectory), it sets the SGID bit (02000) in the mode (attr.Mode) of the
+            // new node. This ensures that newly created directories inherit the group ID of
+            // their parent directory.
+            if typ == FileType::Directory {
+                new_inode_attr.mode |= 0o2000;
+            } else if new_inode_attr.mode & 0o2010 == 0o2010
+                && ctx.uid != 0
+                && !ctx.gid_list.contains(&parent_attr.gid)
+            {
+                // If the mode of the new node has both the set group ID bit (02000) and the set
+                // group execute bit (010) (attr.Mode&02010 == 02010), and if the user ID
+                // (ctx.Uid()) is not 0 (i.e., the user is not root), it further checks if the
+                // user belongs to the group of the parent directory (pattr.Gid). If not, it
+                // removes the SGID bit from the mode of the new node (attr.Mode &=
+                // ^uint16(02000)).
+                new_inode_attr.mode &= !0o2010;
+            }
+        }
+
+        let mut batch = txn.get_writebatch();
+        let entry_key = key::dentry(parent, name);
+        // insert entry
+        batch.put(
+            &entry_key,
+            bincode::serialize(&DEntry {
+                parent,
+                name: name.to_string(),
+                inode: new_inode,
+                typ,
+            })
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::DEntry,
+                key:  String::from_utf8_lossy(&entry_key).to_string(),
+            })
+            .context(ModelSnafu)?,
+        );
+        // insert attr
+        let attr_key = key::attr(new_inode);
+        batch.put(
+            &attr_key,
+            bincode::serialize(&new_inode_attr)
+                .context(model_err::CorruptionSnafu {
+                    kind: ModelKind::Attr,
+                    key:  String::from_utf8_lossy(&attr_key).to_string(),
+                })
+                .context(ModelSnafu)?,
+        );
+        if update_parent_attr {
+            // update parent attr
+            let parent_attr_key = key::attr(parent);
+            batch.put(
+                &parent_attr_key,
+                bincode::serialize(&parent_attr)
+                    .context(model_err::CorruptionSnafu {
+                        kind: ModelKind::Attr,
+                        key:  String::from_utf8_lossy(&parent_attr_key).to_string(),
+                    })
+                    .context(ModelSnafu)?,
+            );
+        }
+        if typ == FileType::Symlink {
+            let symlink_key = key::symlink(new_inode);
+            batch.put(&symlink_key, path.into_bytes());
+        } else if typ == FileType::Directory {
+            // TODO: maybe store the dir stats
+        };
+        self.db.write(batch).context(RocksdbSnafu)?;
+        txn.commit().context(RocksdbSnafu)?;
+        Ok((new_inode, new_inode_attr))
+    }
+
     fn do_rmdir(
         &self,
         ctx: Arc<FuseContext>,
@@ -397,7 +577,7 @@ impl Backend for RocksdbBackend {
             }
         );
 
-        ctx.check(
+        ctx.check_access(
             &parent_attr,
             kiseki_common::MODE_MASK_W | kiseki_common::MODE_MASK_X,
         )?;
@@ -464,7 +644,43 @@ impl Backend for RocksdbBackend {
             );
         }
         self.db.write(batch).context(RocksdbSnafu)?;
+        // TODO: do we need to call commit after we call write batch with transaction?
+        // txn.commit().context(RocksdbSnafu)?;
         Ok((entry_info, child_attr))
+    }
+
+    fn do_truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        length: u64,
+        skip_perm_check: bool,
+    ) -> Result<InodeAttr> {
+        let txn = self.db.transaction();
+        let mut old_attr = Self::do_get_attr(&txn, inode)?;
+        ensure!(
+            matches!(old_attr.kind, FileType::RegularFile),
+            LibcSnafu { errno: libc::EPERM }
+        );
+        let flags = kiseki_types::attr::Flags::from_bits(old_attr.flags as u8).unwrap();
+        if flags.contains(kiseki_types::attr::Flags::IMMUTABLE)
+            || flags.contains(kiseki_types::attr::Flags::APPEND)
+            || old_attr.parent.is_trash()
+        {
+            return LibcSnafu { errno: libc::EPERM }.fail();
+        }
+        if !skip_perm_check {
+            ctx.check_access(&old_attr, kiseki_common::MODE_MASK_W)?;
+        }
+        assert_ne!(length, old_attr.length, "length is the same");
+        old_attr.update_length(length);
+
+        // TODO: review me, juicefs make hole manually here, by appending empty slices
+        // info.
+
+        txn_put_attr(&txn, inode, &old_attr)?;
+        txn.commit().context(RocksdbSnafu)?;
+        Ok(old_attr.clone())
     }
 }
 

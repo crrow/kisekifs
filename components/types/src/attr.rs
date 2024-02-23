@@ -175,6 +175,11 @@ impl InodeAttr {
         self
     }
 
+    pub fn update_length(&mut self, length: u64) {
+        self.length = length;
+        self.update_modification_time()
+    }
+
     pub fn update_modification_time(&mut self) {
         self.mtime = SystemTime::now();
         self.ctime = SystemTime::now();
@@ -183,7 +188,7 @@ impl InodeAttr {
     // Enforces different access levels for owner, group, and others.
     // Grants full access to the root user.
     // Determines access based on user and group IDs.
-    pub fn access_perm(&self, uid: u32, gids: &Vec<u32>) -> u8 {
+    pub fn access_mode(&self, uid: u32, gids: &Vec<u32>) -> u8 {
         if uid == 0 {
             // If uid is 0 (root user), returns 0x7 (full access) unconditionally.
             return 0x7;
@@ -325,7 +330,7 @@ mod tests {
         println!("{:?}, {:?}", new_mode, new_mode_u16);
 
         let x = libc::S_ISUID;
-        let x2  = 0o1000;
+        let x2 = 0o1000;
         println!("{:x}, {:x}", x, x2)
     }
 }

@@ -26,7 +26,7 @@ use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
 use rangemap::RangeMap;
 use snafu::ResultExt;
 use tokio::{sync::RwLock, task::JoinHandle};
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, instrument, warn};
 
 use crate::{
     data_manager::{DataManager, DataManagerRef},
@@ -113,7 +113,7 @@ impl DataManager {
                 fr.length.store(length as usize, Ordering::Release);
             }
         } else {
-            error!("not found any file reader under: {:?}", inode);
+            warn!("not found any file reader under: {:?}", inode);
         }
     }
 }

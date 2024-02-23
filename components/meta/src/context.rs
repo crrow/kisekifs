@@ -39,7 +39,8 @@ impl<'a> From<&'a kiseki_types::Request<'a>> for FuseContext {
 }
 
 impl FuseContext {
-    pub fn check(&self, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
+    // Access checks the access permission on given inode.
+    pub fn check_access(&self, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
         if self.uid == 0 {
             return Ok(());
         }
@@ -47,7 +48,7 @@ impl FuseContext {
             return Ok(());
         }
 
-        let perm = attr.access_perm(self.uid, &self.gid_list);
+        let mode = attr.access_mode(self.uid, &self.gid_list);
         // This condition checks if all the bits set in mmask (requested permissions)
         // are also set in mode (file's permissions).
         //
@@ -55,11 +56,15 @@ impl FuseContext {
         // perm_mask = 0o4 (read permission)
         // perm & perm_mask = 0o4 (read permission is granted)
         ensure!(
-            perm & perm_mask == perm_mask,
+            mode & perm_mask == perm_mask,
             LibcSnafu {
                 errno: libc::EACCES,
             }
         );
+        let r =mode & perm_mask;
+        if r != perm_mask {
+            panic!("what fuck")
+        }
         return Ok(());
     }
 
@@ -71,11 +76,11 @@ impl FuseContext {
     pub fn background() -> Self {
         Self {
             unique:             0,
-            gid:                1,
-            gid_list:           vec![],
+            gid:                2,
+            gid_list:           vec![2, 3],
             uid:                1,
-            pid:                1,
-            check_permission:   false,
+            pid:                10,
+            check_permission:   true,
             start_at:           Instant::now(),
             cancellation_token: CancellationToken::new(),
         }

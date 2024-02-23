@@ -15,7 +15,7 @@ use bitflags::bitflags;
 use crossbeam::{atomic::AtomicCell, channel::at};
 use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
-use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
+use kiseki_common::{ChunkIndex, CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{DEntry, Entry, FullEntry},
@@ -42,7 +42,7 @@ use crate::{
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
     id_table::IdTable,
-    open_files::OpenFiles,
+    open_files::{InvalidSliceReq, OpenFiles},
 };
 
 pub type MetaEngineRef = Arc<MetaEngine>;
@@ -221,7 +221,7 @@ impl MetaEngine {
         let parent = self.check_root(parent);
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
-            ctx.check(&parent_attr, MODE_MASK_X)?;
+            ctx.check_access(&parent_attr, MODE_MASK_X)?;
         }
         let mut name = name;
         if name == DOT_DOT {
@@ -271,7 +271,7 @@ impl MetaEngine {
         let inode = self.check_root(inode);
         // check cache
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.check(inode).await {
+            if let Some(attr) = self.open_files.load_attr(inode, false).await {
                 return Ok(attr);
             }
         }
@@ -280,7 +280,7 @@ impl MetaEngine {
         let mut attr = self.backend.get_attr(inode)?;
 
         // update cache
-        self.open_files.update(inode, &mut attr).await;
+        self.open_files.refresh_attr(inode, &mut attr).await;
         if attr.is_filetype(FileType::Directory) && !inode.is_root() && !attr.parent.is_trash() {
             self.add_dir2parent_mapping(inode, attr.parent).await;
         }
@@ -299,7 +299,7 @@ impl MetaEngine {
             MODE_MASK_X
         };
 
-        ctx.check(&attr, mmask)?;
+        ctx.check_access(&attr, mmask)?;
 
         if inode == self.root {
             attr.parent = self.root;
@@ -473,13 +473,13 @@ impl MetaEngine {
         rdev: u32,
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
-        let inode = if parent.is_trash() {
+        let new_inode = if parent.is_trash() {
             let next = self.backend.increase_count_by(Counter::NextTrash, 1)?;
             TRASH_INODE + Ino::from(next)
         } else {
             Ino::from(self.free_inodes.next().await?)
         };
-        debug!("new inode: {}", inode);
+        debug!("new inode: {}", new_inode);
 
         let mut attr = InodeAttr::default()
             .set_mode(mode & !umask) // erase umask
@@ -487,108 +487,20 @@ impl MetaEngine {
             .set_gid(ctx.gid)
             .set_uid(ctx.uid)
             .set_parent(parent)
-            // .set_flags(flags) // TODO, maybe we don't have to
             .to_owned();
-        if typ == FileType::Directory {
+        if matches!(typ, FileType::Directory) {
             attr.set_nlink(2).set_length(4 << 10);
         } else {
             attr.set_nlink(1);
-            if typ == FileType::Symlink {
+            if matches!(typ, FileType::Symlink) {
                 attr.set_length(path.len() as u64);
             } else {
                 attr.set_length(0).set_rdev(rdev);
             }
         };
 
-        // FIXME: we need transaction here
-        debug!("get attr {} from backend", parent);
-        let mut parent_attr = self.backend.get_attr(parent)?;
-        debug!("get attr {} from backend succeed", parent);
-        ensure!(
-            parent_attr.is_dir(),
-            LibcSnafu {
-                errno: libc::ENOTDIR,
-            }
-        );
-        // check if the parent is trash
-        ensure!(
-            !parent_attr.parent.is_trash(),
-            LibcSnafu {
-                errno: libc::ENOENT,
-            }
-        );
-        // check if the parent have the permission
-        ctx.check(&parent_attr, kiseki_common::MODE_MASK_W)?;
-
-        ensure!(
-            !kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8)
-                .unwrap()
-                .contains(kiseki_types::attr::Flags::IMMUTABLE),
-            LibcSnafu { errno: libc::EPERM }
-        );
-
-        // check if the entry already exists
-        if let Err(e) = self.backend.get_dentry(parent, name) {
-            if !e.is_not_found() {
-                return Err(e);
-            }
-        } else {
-            LibcSnafu {
-                errno: libc::EEXIST,
-            }
-            .fail()?;
-        }
-
-        // check if we need to update the parent
-        let mut update_parent_attr = false;
-        if !parent.is_trash() && typ == FileType::Directory {
-            parent_attr.set_nlink(parent_attr.nlink + 1);
-
-            let now = SystemTime::now();
-            parent_attr.mtime = now;
-            parent_attr.ctime = now;
-            update_parent_attr = true;
-        };
-
-        let now = SystemTime::now();
-        attr.set_atime(now);
-        attr.set_mtime(now);
-        attr.set_ctime(now);
-
-        #[cfg(target_os = "darwin")]
-        {
-            attr.set_gid(parent_attr.gid);
-        }
-
-        // TODO: review the logic here
-        #[cfg(target_os = "linux")]
-        {
-            if parent_attr.mode & 0o2000 != 0 {
-                attr.set_gid(parent_attr.gid);
-            }
-            if typ == FileType::Directory {
-                attr.mode |= 0o2000;
-            } else if attr.mode & 0o2010 == 0o2010
-                && ctx.uid != 0
-                && !ctx.gid_list.contains(&parent_attr.gid)
-            {
-                attr.mode &= !0o2010;
-            }
-        }
-
-        self.backend.set_dentry(parent, name, inode, typ)?;
-        info!("create entry info: parent: {parent}, name: {name}, ino: {inode}");
-        self.backend.set_attr(inode, &attr)?;
-        if update_parent_attr {
-            self.backend.set_attr(parent, &parent_attr)?;
-        }
-        if typ == FileType::Symlink {
-            self.backend.set_symlink(inode, path)?;
-        } else if typ == FileType::Directory {
-            self.backend
-                .set_dir_stat(inode, kiseki_types::stat::DirStat::default())?;
-        };
-        Ok((inode, attr))
+        self.backend
+            .do_mknod(ctx, new_inode, attr, parent, name, typ, path)
     }
 
     pub async fn create(
@@ -745,7 +657,7 @@ impl MetaEngine {
             }
         }
         if flags.contains(SetAttrFlags::ATIME_NOW) {
-            if ctx.check(cur, MODE_MASK_W).is_err() {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() {
                 ensure!(ctx.uid == cur.uid, LibcSnafu { errno: libc::EPERM });
             }
             dirty_attr.atime = now;
@@ -757,7 +669,7 @@ impl MetaEngine {
                     errno: libc::EACCES,
                 }
             );
-            if ctx.check(cur, MODE_MASK_W).is_err() {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
@@ -769,7 +681,7 @@ impl MetaEngine {
             changed = true;
         }
         if flags.contains(SetAttrFlags::MTIME_NOW) {
-            if ctx.check(cur, MODE_MASK_W).is_err() {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
@@ -786,7 +698,7 @@ impl MetaEngine {
                     errno: libc::EACCES,
                 }
             );
-            if ctx.check(cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
+            if ctx.check_access(cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
                 LibcSnafu {
                     errno: libc::EACCES,
                 }
@@ -816,7 +728,7 @@ impl MetaEngine {
         defer!(self.refresh_atime(ctx, inode));
 
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.open_check(inode).await {
+            if let Some(attr) = self.open_files.load_attr(inode, true).await {
                 return Ok(attr);
             }
         }
@@ -832,7 +744,7 @@ impl MetaEngine {
             .fail()?,
         };
 
-        ctx.check(&attr, mask)?;
+        ctx.check_access(&attr, mask)?;
 
         let attr_flags = kiseki_types::attr::Flags::from_bits(attr.flags as u8).unwrap();
         if (attr_flags.contains(kiseki_types::attr::Flags::IMMUTABLE) || attr.parent.is_trash())
@@ -921,11 +833,9 @@ impl MetaEngine {
         }
 
         // TODO: update the cache
-        let mut write_guard = self.open_files.files.write().await;
-        if let Some(mut open_file) = write_guard.get_mut(&inode) {
-            // invalidate the cache.
-            open_file.chunks.remove(&chunk_idx);
-        }
+        self.open_files
+            .invalid_slices(inode, InvalidSliceReq::One(chunk_idx))
+            .await;
 
         Ok(())
     }
@@ -951,41 +861,33 @@ impl MetaEngine {
 
     /// [MetaEngine::read_slice] returns the rangemap of slices on the given
     /// chunk.
-    pub async fn read_slice(&self, inode: Ino, chunk_index: usize) -> Result<Option<Arc<Slices>>> {
+    pub async fn read_slice(
+        &self,
+        inode: Ino,
+        chunk_index: ChunkIndex,
+    ) -> Result<Option<Arc<Slices>>> {
         debug!(
             "read_slice with inode {:?}, chunk_index {:?}",
             inode, chunk_index
         );
 
-        // TODO: update access time
-        let read_guard = self.open_files.files.read().await;
-        if let Some(of) = read_guard.get(&inode) {
-            if let Some(svs) = of.chunks.get(&chunk_index) {
-                debug!(
-                    "read ino {} chunk {} slice info from cache, get count {}",
-                    inode,
-                    chunk_index,
-                    svs.len(),
-                );
-                return Ok(Some(svs.clone()));
-            }
+        if let Some(slices) = self.open_files.load_slices(inode, chunk_index).await {
+            debug!(
+                "read ino {} chunk {} slice info from cache, get count {}",
+                inode,
+                chunk_index,
+                slices.len(),
+            );
+            return Ok(Some(slices));
         }
 
         let slices = self.backend.get_chunk_slices(inode, chunk_index)?;
-        // let slice_info_buf = match slice_info_buf {
-        //     Some(buf) => buf,
-        //     None => {
-        //         let attr = self.sto_must_get_attr(inode).await?;
-        //         ensure!(attr.is_file(), LibcSnafu { errno: libc::EPERM });
-        //         return Ok(None);
-        //     }
-        // };
 
         // fixme
         let slices = Arc::new(slices);
         // TODO: build cache.
         self.open_files
-            .update_chunk_slices_info(inode, chunk_index, slices.clone())
+            .refresh_slices(inode, chunk_index, slices.clone())
             .await;
 
         Ok(Some(slices))
@@ -1042,7 +944,9 @@ impl MetaEngine {
         Ok(())
     }
 
-    // Close a file.
+    /// [close] a file, try to decrease the reference count of the OpenFile,
+    /// if the reference count is zero, then we can remove the file from the
+    /// cache.
     pub async fn close(&self, inode: Ino) -> Result<()> {
         if self.open_files.close(inode).await {
             let mut write_guard = self.removed_files.write().await;
@@ -1051,6 +955,32 @@ impl MetaEngine {
             }
         }
         Ok(())
+    }
+
+    /// [truncate] changes the length for given file.
+    ///
+    /// When the [set_attr] operation carry the [FH], then we can skip the perm
+    /// check.
+    pub async fn truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        size: u64,
+        skip_perm_check: bool,
+    ) -> Result<InodeAttr> {
+        return if let Some(of) = self.open_files.load(&inode).await {
+            let guard = of.read_guard().await;
+            if guard.attr.length == size {
+                return Ok(guard.attr.clone());
+            }
+            let attr = self
+                .backend
+                .do_truncate(ctx, inode, size, skip_perm_check)?;
+            drop(guard); // explicitly drop the guard for keeping holding the lock
+            Ok(attr)
+        } else {
+            self.backend.do_truncate(ctx, inode, size, skip_perm_check)
+        };
     }
 }
 

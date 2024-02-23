@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt::Debug,
     marker::PhantomData,
     sync::{
@@ -47,7 +47,7 @@ pub(crate) type HandleTableRef = Arc<HandleTable>;
 
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
-    handles:      DashMap<Ino, DashMap<FH, Handle>>,
+    handles:      RwLock<HashMap<Ino, Arc<RwLock<BTreeMap<FH, Handle>>>>>,
     _next_fh:     AtomicU64,
 }
 
@@ -55,32 +55,26 @@ impl HandleTable {
     pub(crate) fn new(data_manager_ref: DataManagerRef) -> HandleTableRef {
         Arc::new(HandleTable {
             data_manager: data_manager_ref,
-            handles:      DashMap::new(),
+            handles:      Default::default(),
             _next_fh:     AtomicU64::new(1),
         })
     }
 
     fn next_fh(&self) -> FH { self._next_fh.fetch_add(1, Ordering::SeqCst) }
 
-    pub(crate) fn new_dir_handle(self: &Arc<Self>, inode: Ino) -> FH {
+    pub(crate) async fn new_dir_handle(self: &Arc<Self>, inode: Ino) -> FH {
         let fh = self.next_fh();
-        let e = self.handles.entry(inode).or_insert(DashMap::new());
-        e.insert(
-            fh,
-            Handle::Dir(Arc::new(DirHandle {
-                fh,
-                inode,
-                inner: RwLock::new(DirHandleInner {
-                    children:  Vec::new(),
-                    read_at:   None,
-                    ofd_owner: 0,
-                }),
-            })),
-        );
+        let dir_handle = Handle::Dir(Arc::new(DirHandle::new(inode, fh)));
+        self.insert_handle(inode, fh, dir_handle).await;
         fh
     }
 
-    pub(crate) async fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<FH> {
+    pub(crate) async fn new_file_handle(
+        self: &Arc<Self>,
+        inode: Ino,
+        length: u64,
+        flags: i32,
+    ) -> Result<FH> {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
             libc::O_RDONLY => FileHandle::new(
@@ -101,22 +95,69 @@ impl HandleTable {
             ),
             _ => LibcSnafu { errno: libc::EPERM }.fail()?,
         };
-        self.handles
-            .entry(inode)
-            .or_default()
-            .insert(fh, Handle::File(Arc::new(h)));
+        self.insert_handle(inode, fh, Handle::File(Arc::new(h)))
+            .await;
 
         Ok(fh)
     }
 
-    pub(crate) fn find_handle(&self, ino: Ino, fh: u64) -> Option<Handle> {
-        self.handles.get(&ino)?.get(&fh).map(|h| h.value().clone())
+    async fn insert_handle(self: &Arc<Self>, inode: Ino, fh: FH, handle: Handle) {
+        let mut outer_read_guard = self.handles.read().await;
+        if !outer_read_guard.contains_key(&inode) {
+            drop(outer_read_guard);
+
+            let mut out_write_guard = self.handles.write().await;
+            // check again
+            if !out_write_guard.contains_key(&inode) {
+                out_write_guard.insert(inode, Default::default());
+            }
+            drop(out_write_guard);
+
+            // acquire the read lock again.
+            outer_read_guard = self.handles.read().await;
+        }
+
+        let inner_map = outer_read_guard.get(&inode).unwrap().clone();
+        // Release the outer lock before acquiring the inner lock to avoid deadlock
+        drop(outer_read_guard);
+
+        let mut write_guard = inner_map.write().await;
+        write_guard.insert(fh, handle);
+        drop(write_guard);
+    }
+
+    pub(crate) async fn find_handle(&self, ino: Ino, fh: u64) -> Option<Handle> {
+        let outer_read_guard = self.handles.read().await;
+        if let Some(inner_map) = outer_read_guard.get(&ino).and_then(|v| Some(v.clone())) {
+            drop(outer_read_guard);
+            let inner_read_guard = inner_map.read().await;
+            inner_read_guard.get(&fh).map(|h| h.clone())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) async fn get_handles(&self, ino: Ino) -> Vec<Handle> {
+        let outer_read_guard = self.handles.read().await;
+        match outer_read_guard.get(&ino).and_then(|v| Some(v.clone())) {
+            None => Default::default(),
+            Some(inner_map) => {
+                drop(outer_read_guard);
+                let inner_read_guard = inner_map.read().await;
+                inner_read_guard.values().map(|h| h.clone()).collect()
+            }
+        }
     }
 
     // after writes it waits for data sync, so do it after everything
     pub(crate) async fn release_file_handle(&self, inode: Ino, fh: FH) {
-        if let Some(h) = self.handles.get(&inode) {
-            if let Some((_, h)) = h.remove(&fh) {
+        let outer_read_guard = self.handles.read().await;
+        if let Some(inner_map) = outer_read_guard.get(&inode).and_then(|v| Some(v.clone())) {
+            drop(outer_read_guard);
+
+            let mut inner_write_guard = inner_map.write().await;
+            if let Some(h) = inner_write_guard.remove(&fh) {
+                drop(inner_write_guard);
                 // remove the handle from the handle table.
                 if let Some(fh) = h.as_file_handle() {
                     if let Err(e) = fh.wait_all_operations_done(None).await {
@@ -271,6 +312,9 @@ impl FileHandle {
         })
     }
 
+    /// [write_lock] will block until it gets the exclusive lock for the [FileHandle].
+    /// When there is no [FileWriter], then this function will return None.
+    /// FIXME: add timeout mechanism
     #[instrument(skip(self))]
     pub(crate) async fn write_lock(&self, ctx: Arc<FuseContext>) -> Option<FileHandleWriteGuard> {
         if self.writer.is_none() {
@@ -288,7 +332,7 @@ impl FileHandle {
                 // wait for they notify that exclusive lock has been released or reader has been
                 // released.
                 tokio::select! {
-                    _ =self.exclusive_lock_notify.notified() => {
+                    _ = self.exclusive_lock_notify.notified() => {
                         debug!("exclusive lock is released")
                     }
                     _ = self.reader_notify.notified() => {
@@ -465,6 +509,20 @@ pub(crate) struct DirHandle {
     fh:               FH,
     inode:            Ino,
     pub(crate) inner: RwLock<DirHandleInner>,
+}
+
+impl DirHandle {
+    fn new(inode: Ino, fh: FH) -> Self {
+        DirHandle {
+            fh,
+            inode,
+            inner: RwLock::new(DirHandleInner {
+                children:  Vec::new(),
+                read_at:   None,
+                ofd_owner: 0,
+            }),
+        }
+    }
 }
 
 pub(crate) struct DirHandleInner {

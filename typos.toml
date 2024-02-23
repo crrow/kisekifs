@@ -1,2 +1,3 @@
 [default.extend-words]
 ploting = "ploting"
+mknod = "mknod"

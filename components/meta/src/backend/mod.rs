@@ -78,6 +78,19 @@ pub trait Backend: Send + Sync + 'static {
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()>;
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat>;
 
+    /// [do_mknod] creates a node in a directory with given name, type and
+    /// permissions.
+    fn do_mknod(
+        &self,
+        ctx: Arc<FuseContext>,
+        new_inode: Ino,
+        new_inode_attr: InodeAttr,
+        parent: Ino,
+        name: &str,
+        typ: FileType,
+        path: String,
+    ) -> Result<(Ino, InodeAttr)>;
+
     /// [do_rmdir] removes a directory from the filesystem. The directory must
     /// be empty. return the removed directory entry and its attribute
     fn do_rmdir(
@@ -89,4 +102,13 @@ pub trait Backend: Send + Sync + 'static {
         // than this value
         skip_dir_mtime: Duration,
     ) -> Result<(DEntry, InodeAttr)>;
+
+    /// [truncate] changes the length for given file.
+    fn do_truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        length: u64,
+        skip_perm_check: bool,
+    ) -> Result<InodeAttr>;
 }
