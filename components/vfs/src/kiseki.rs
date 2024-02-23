@@ -73,6 +73,7 @@ impl Debug for KisekiVFS {
     }
 }
 
+// All helper functions for KisekiVFS
 impl KisekiVFS {
     pub fn new(vfs_config: Config, meta: MetaEngineRef) -> Result<Self> {
         let mut internal_nodes =
@@ -123,6 +124,107 @@ impl KisekiVFS {
         Ok(vfs)
     }
 
+    async fn truncate(
+        &self,
+        ctx: Arc<FuseContext>,
+        ino: Ino,
+        size: u64,
+        _fh: Option<u64>,
+    ) -> Result<InodeAttr> {
+        ensure!(!ino.is_special(), LibcSnafu { errno: EPERM });
+        ensure!((size as usize) < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+
+        // acquire a big lock for all file handles of the inode
+        let handles = self.handle_table.get_handles(ino).await;
+        // when we release the guards, the lock will be released automatically.
+        let mut _guards = Vec::with_capacity(handles.len());
+        for h in handles {
+            if let Some(fh) = h.as_file_handle() {
+                if let Some(write_guard) = fh.write_lock(ctx.clone()).await {
+                    _guards.push(write_guard);
+                }else if matches!(_fh, Some(_fh) if _fh == h.get_fh()) {
+                    // not find FileWriter
+                    return LibcSnafu { errno: EACCES }.fail();
+                }
+            } else {
+                // Try to truncate a DirHandle
+                if matches!(_fh, Some(_fh) if _fh == h.get_fh()) {
+                    return LibcSnafu { errno: EBADF }.fail();
+                }
+            }
+        }
+
+        // safety: we hold all the locks for the exists file handles
+        self.data_manager.direct_flush(ino).await?;
+        // TODO: call meta to truncate the file length
+
+        // let attr = self.meta.get_attr(ino).await?;
+        // TODO: fix me
+        Ok(InodeAttr::default())
+    }
+
+    /// [get_entry_ttl] return the entry timeout according to the given file
+    /// type.
+    pub fn get_entry_ttl(&self, kind: FileType) -> &Duration {
+        if kind == FileType::Directory {
+            &self.config.dir_entry_timeout
+        } else {
+            &self.config.file_entry_timeout
+        }
+    }
+
+    /// [try_update_file_reader_length] is used for checking and update the file
+    /// reader length.
+    pub async fn try_update_file_reader_length(&self, inode: Ino, attr: &mut InodeAttr) {
+        if attr.is_file() {
+            let len = self.data_manager.get_length(inode);
+            if len > attr.length {
+                attr.length = len;
+            }
+            if len < attr.length {
+                self.data_manager.truncate_reader(inode, attr.length).await;
+            }
+        }
+    }
+
+    pub fn modified_since(&self, inode: Ino, start_at: std::time::Instant) -> bool {
+        match self.modified_at.get(&inode) {
+            Some(v) => v.value() > &start_at,
+            None => false,
+        }
+    }
+
+    fn invalidate_length(&self, ino: Ino) {
+        self.modified_at
+            .get_mut(&ino)
+            .map(|mut v| *v = std::time::Instant::now());
+    }
+
+    #[cfg(test)]
+    fn check_access(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        attr: &InodeAttr,
+        mask: libc::c_int,
+    ) -> Result<()> {
+        let mut my_mask = 0;
+        if mask & libc::R_OK != 0 {
+            my_mask |= libc::R_OK;
+        }
+        if mask & libc::W_OK != 0 {
+            my_mask |= libc::W_OK;
+        }
+        if mask & libc::X_OK != 0 {
+            my_mask |= libc::X_OK;
+        }
+        ctx.check_access(attr, my_mask as u8)?;
+        Ok(())
+    }
+}
+
+/// Fuse operations for KisekiVFS
+impl KisekiVFS {
     pub async fn init(&self, ctx: &FuseContext) -> Result<()> {
         debug!("vfs:init");
         // let _format = self.meta.get_format().await?;
@@ -164,36 +266,6 @@ impl KisekiVFS {
             name: name.to_string(),
             attr,
         })
-    }
-
-    /// [get_entry_ttl]
-    pub fn get_entry_ttl(&self, kind: FileType) -> &Duration {
-        if kind == FileType::Directory {
-            &self.config.dir_entry_timeout
-        } else {
-            &self.config.file_entry_timeout
-        }
-    }
-
-    /// [try_update_file_reader_length] is used for checking and update the file
-    /// reader length.
-    pub async fn try_update_file_reader_length(&self, inode: Ino, attr: &mut InodeAttr) {
-        if attr.is_file() {
-            let len = self.data_manager.get_length(inode);
-            if len > attr.length {
-                attr.length = len;
-            }
-            if len < attr.length {
-                self.data_manager.truncate_reader(inode, attr.length).await;
-            }
-        }
-    }
-
-    pub fn modified_since(&self, inode: Ino, start_at: std::time::Instant) -> bool {
-        match self.modified_at.get(&inode) {
-            Some(v) => v.value() > &start_at,
-            None => false,
-        }
     }
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
@@ -391,7 +463,7 @@ impl KisekiVFS {
         let flags = SetAttrFlags::from_bits(flags).expect("invalid set attr flags");
         if flags.contains(SetAttrFlags::SIZE) {
             if let Some(size) = size {
-                new_attr = self.truncate(ino, size, fh).await?;
+                new_attr = self.truncate(ctx.clone(), ino, size, fh).await?;
             } else {
                 return LibcSnafu { errno: EPERM }.fail()?;
             }
@@ -469,15 +541,6 @@ impl KisekiVFS {
         // TODO: invalid open_file cache
 
         Ok(new_attr)
-    }
-
-    async fn truncate(&self, ino: Ino, size: u64, _fh: Option<u64>) -> Result<InodeAttr> {
-        ensure!(!ino.is_special(), LibcSnafu { errno: EPERM });
-        ensure!((size as usize) < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
-
-        // let attr = self.meta.get_attr(ino).await?;
-        // TODO: fix me
-        Ok(InodeAttr::default())
     }
 
     pub async fn mkdir(
@@ -833,34 +896,6 @@ impl KisekiVFS {
         Ok(tokio::spawn(async move {
             ht.release_file_handle(inode, fh).await;
         }))
-    }
-
-    fn invalidate_length(&self, ino: Ino) {
-        self.modified_at
-            .get_mut(&ino)
-            .map(|mut v| *v = std::time::Instant::now());
-    }
-
-    #[cfg(test)]
-    fn check_access(
-        &self,
-        ctx: Arc<FuseContext>,
-        inode: Ino,
-        attr: &InodeAttr,
-        mask: libc::c_int,
-    ) -> Result<()> {
-        let mut my_mask = 0;
-        if mask & libc::R_OK != 0 {
-            my_mask |= libc::R_OK;
-        }
-        if mask & libc::W_OK != 0 {
-            my_mask |= libc::W_OK;
-        }
-        if mask & libc::X_OK != 0 {
-            my_mask |= libc::X_OK;
-        }
-        ctx.check_access(attr, my_mask as u8)?;
-        Ok(())
     }
 }
 

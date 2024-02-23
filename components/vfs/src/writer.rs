@@ -122,6 +122,10 @@ impl DataManager {
         Ok(write_len)
     }
 
+    /// [direct_flush] flush the content of the specified ino to the remote storage.
+    /// TODO: review me.
+    /// Problem: This function call the underlying flush logic without acquiring
+    /// lock of [FileHandle].
     #[instrument(skip(self), fields(ino))]
     pub(crate) async fn direct_flush(&self, ino: Ino) -> Result<()> {
         if let Some(fw) = self.file_writers.get(&ino) {

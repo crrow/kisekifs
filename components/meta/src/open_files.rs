@@ -1,19 +1,55 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use kiseki_common::ChunkIndex;
 use kiseki_types::{attr::InodeAttr, ino::Ino, slice::Slices};
 use tokio::sync::RwLock;
 
-pub(crate) struct OpenFile {
-    pub attr:            InodeAttr,
-    pub reference_count: usize,
-    pub last_check:      std::time::Instant,
-    pub chunks:          HashMap<usize, Arc<Slices>>, // should we add lock on it ?
+/// [OpenFile] represents an opened file in the cache.
+/// It is used for accelerating the query of the file's slices and attr.
+#[derive(Clone)]
+pub(crate) struct OpenFile(Arc<RwLock<OpenFileInner>>);
+
+impl OpenFile {
+    async fn refresh_access(&self, attr: &mut InodeAttr) {
+        let mut write_guard = self.0.write().await;
+        if attr.mtime != write_guard.attr.mtime {
+            write_guard.chunks.clear();
+        } else {
+            attr.keep_cache = write_guard.attr.keep_cache;
+        }
+        write_guard.attr = attr.clone();
+        write_guard.last_check = tokio::time::Instant::now();
+    }
+
+    async fn refresh_slices(&self, chunk_index: ChunkIndex, slices: Arc<Slices>) {
+        let mut write_guard = self.0.write().await;
+        write_guard.chunks.insert(chunk_index, slices);
+    }
+
+    async fn invalid_slices(&self, chunk_index: ChunkIndex) {
+        let mut write_guard = self.0.write().await;
+        write_guard.chunks.remove(&chunk_index);
+    }
+
+    // decreases the reference count of the open file.
+    async fn decrease_ref(&self) -> usize {
+        let mut write_guard = self.0.write().await;
+        write_guard.reference_count -= 1;
+        write_guard.reference_count
+    }
+}
+
+struct OpenFileInner {
+    attr:            InodeAttr,
+    reference_count: usize,
+    last_check:      tokio::time::Instant,
+    chunks:          HashMap<usize, Arc<Slices>>,
 }
 
 pub(crate) struct OpenFiles {
-    ttl:              Duration,
-    limit:            usize,
-    pub(crate) files: RwLock<HashMap<Ino, OpenFile>>,
+    ttl:   Duration,
+    limit: usize,
+    files: RwLock<HashMap<Ino, OpenFile>>,
     // TODO: background clean up
 }
 
@@ -26,89 +62,133 @@ impl OpenFiles {
         }
     }
 
-    pub(crate) async fn check(&self, ino: Ino) -> Option<InodeAttr> {
+    /// [load] fetches the [OpenFile] from the cache.
+    pub(crate) async fn load(&self, inode: &Ino) -> Option<OpenFile> {
         let read_guard = self.files.read().await;
-        read_guard.get(&ino).and_then(|f| {
-            if f.last_check.elapsed() < self.ttl {
-                Some(f.attr.clone())
-            } else {
-                None
-            }
-        })
+        let of = read_guard.get(inode).map(|v| v.clone());
+        drop(read_guard); // explicit drop to release the lock
+        of
     }
 
-    pub(crate) async fn update(&self, ino: Ino, attr: &mut InodeAttr) -> bool {
-        let mut write_guard = self.files.write().await;
-        write_guard
-            .get_mut(&ino)
-            .map(|mut open_file| {
-                if attr.mtime != open_file.attr.mtime {
-                    open_file.chunks = HashMap::new();
-                } else {
-                    attr.keep_cache = open_file.attr.keep_cache;
-                }
-                open_file.attr = attr.clone();
-                open_file.last_check = std::time::Instant::now();
-                Some(())
-            })
-            .is_some()
-    }
-
+    /// [open] create a new [OpenFile] if it does not exist, otherwise increase
+    /// the reference count.
     pub(crate) async fn open(&self, inode: Ino, attr: &mut InodeAttr) {
-        let mut write_guard = self.files.write().await;
-        match write_guard.get_mut(&inode) {
+        let read_guard = self.files.read().await;
+        let of = match read_guard.get(&inode) {
+            Some(of) => {
+                let of = of.clone();
+                drop(read_guard);
+                of
+            }
             None => {
-                write_guard.insert(
-                    inode,
-                    OpenFile {
-                        attr:            attr.keep_cache().clone(),
-                        reference_count: 1,
-                        last_check:      std::time::Instant::now(),
-                        chunks:          HashMap::new(),
-                    },
-                );
+                drop(read_guard);
+                let mut outer_write_guard = self.files.write().await;
+                // check again
+                let of = match outer_write_guard.get(&inode) {
+                    None => {
+                        outer_write_guard.insert(
+                            inode,
+                            OpenFile(Arc::new(RwLock::new(OpenFileInner {
+                                attr:            attr.keep_cache().clone(),
+                                reference_count: 1,
+                                last_check:      tokio::time::Instant::now(),
+                                chunks:          Default::default(),
+                            }))),
+                        );
+                        return;
+                    }
+                    Some(of) => of.clone(),
+                };
+                of
             }
-            Some(mut op) => {
-                if op.attr.mtime == attr.mtime {
-                    attr.keep_cache = op.attr.keep_cache;
-                }
-                op.attr.keep_cache = true;
-                op.reference_count += 1;
-                op.last_check = std::time::Instant::now();
-            }
+        };
+        // exists case
+        let read_guard = of.0.read().await;
+        if read_guard.attr.mtime == attr.mtime {
+            attr.keep_cache = read_guard.attr.keep_cache;
         }
+        drop(read_guard);
+        let mut write_guard = of.0.write().await;
+        write_guard.attr.keep_cache = true;
+        write_guard.reference_count += 1;
+        write_guard.last_check = tokio::time::Instant::now();
     }
 
-    pub(crate) async fn open_check(&self, ino: Ino) -> Option<InodeAttr> {
-        let mut write_guard = self.files.write().await;
-        if let Some(mut of) = write_guard.get_mut(&ino) {
-            if of.last_check.elapsed() < self.ttl {
-                of.reference_count += 1;
-                return Some(of.attr.clone());
+    /// [load_attr] fetches the [InodeAttr] from the cache, if it is not
+    /// expired.
+    pub(crate) async fn load_attr(&self, ino: Ino, add_ref: bool) -> Option<InodeAttr> {
+        let outer_read_guard = self.files.read().await;
+        if let Some(of) = outer_read_guard.get(&ino).map(|v| v.clone()) {
+            drop(outer_read_guard);
+
+            let read_guard = of.0.read().await;
+            if read_guard.last_check.elapsed() < self.ttl {
+                let attr = read_guard.attr.clone();
+                drop(read_guard);
+                if add_ref {
+                    let mut write_guard = of.0.write().await;
+                    write_guard.reference_count += 1;
+                }
+                return Some(attr);
             }
         }
-
         None
     }
 
-    pub(crate) async fn update_chunk_slices_info(
+    /// [load_slices] fetches the [Slices] from the cache, if it is not expired.
+    pub(crate) async fn load_slices(
         &self,
-        ino: Ino,
-        chunk_idx: usize,
-        views: Arc<Slices>,
-    ) {
-        let mut write_guard = self.files.write().await;
-        if let Some(mut of) = write_guard.get_mut(&ino) {
-            of.chunks.insert(chunk_idx, views);
+        inode: Ino,
+        chunk_index: ChunkIndex,
+    ) -> Option<Arc<Slices>> {
+        let outer_read_guard = self.files.read().await;
+        if let Some(of) = outer_read_guard.get(&inode).map(|of| of.clone()) {
+            drop(outer_read_guard);
+
+            let read_guard = of.0.read().await;
+            if read_guard.last_check.elapsed() < self.ttl {
+                return read_guard.chunks.get(&chunk_index).map(|s| s.clone());
+            }
+        }
+        None
+    }
+
+    /// [refresh_attr] refresh the open file's [InodeAttr].
+    pub(crate) async fn refresh_attr(&self, ino: Ino, attr: &mut InodeAttr) {
+        let read_guard = self.files.read().await;
+        if let Some(of) = read_guard.get(&ino).map(|of| of.clone()) {
+            drop(read_guard);
+            of.refresh_access(attr).await;
         }
     }
 
-    /// close a file
+    pub(crate) async fn refresh_slices(&self, ino: Ino, chunk_idx: ChunkIndex, views: Arc<Slices>) {
+        let read_guard = self.files.read().await;
+        if let Some(of) = read_guard.get(&ino) {
+            let of = of.clone();
+            drop(read_guard);
+            of.refresh_slices(chunk_idx, views).await;
+        }
+    }
+
+    pub(crate) async fn invalid_slices(&self, inode: Ino, chunk_index: ChunkIndex) {
+        let read_guard = self.files.read().await;
+        if let Some(of) = read_guard.get(&inode).map(|of| of.clone()) {
+            drop(read_guard);
+
+            of.invalid_slices(chunk_index).await;
+        }
+    }
+
+    /// [close] a file, under the hood, it just decreases the reference count.
     pub(crate) async fn close(&self, ino: Ino) -> bool {
-        let mut write_guard = self.files.write().await;
-        if let Some(mut of) = write_guard.get_mut(&ino) {
-            of.reference_count -= 1;
-            return of.reference_count <= 0;
+        let read_guard = self.files.read().await;
+        if let Some(of) = read_guard.get(&ino) {
+            let of = of.clone();
+            drop(read_guard);
+
+            let new_ref_cnt = of.decrease_ref().await;
+            return new_ref_cnt <= 0;
         }
         true
     }

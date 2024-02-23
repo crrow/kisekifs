@@ -15,7 +15,7 @@ use bitflags::bitflags;
 use crossbeam::{atomic::AtomicCell, channel::at};
 use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
-use kiseki_common::{CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
+use kiseki_common::{ChunkIndex, CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{DEntry, Entry, FullEntry},
@@ -271,7 +271,7 @@ impl MetaEngine {
         let inode = self.check_root(inode);
         // check cache
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.check(inode).await {
+            if let Some(attr) = self.open_files.load_attr(inode, false).await {
                 return Ok(attr);
             }
         }
@@ -280,7 +280,7 @@ impl MetaEngine {
         let mut attr = self.backend.get_attr(inode)?;
 
         // update cache
-        self.open_files.update(inode, &mut attr).await;
+        self.open_files.refresh_attr(inode, &mut attr).await;
         if attr.is_filetype(FileType::Directory) && !inode.is_root() && !attr.parent.is_trash() {
             self.add_dir2parent_mapping(inode, attr.parent).await;
         }
@@ -499,9 +499,8 @@ impl MetaEngine {
             }
         };
 
-        self.backend.do_mknod(
-            ctx, new_inode, attr, parent, name, typ, path,
-        )
+        self.backend
+            .do_mknod(ctx, new_inode, attr, parent, name, typ, path)
     }
 
     pub async fn create(
@@ -729,7 +728,7 @@ impl MetaEngine {
         defer!(self.refresh_atime(ctx, inode));
 
         if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.open_check(inode).await {
+            if let Some(attr) = self.open_files.load_attr(inode, true).await {
                 return Ok(attr);
             }
         }
@@ -834,11 +833,7 @@ impl MetaEngine {
         }
 
         // TODO: update the cache
-        let mut write_guard = self.open_files.files.write().await;
-        if let Some(mut open_file) = write_guard.get_mut(&inode) {
-            // invalidate the cache.
-            open_file.chunks.remove(&chunk_idx);
-        }
+        self.open_files.invalid_slices(inode, chunk_idx).await;
 
         Ok(())
     }
@@ -864,42 +859,33 @@ impl MetaEngine {
 
     /// [MetaEngine::read_slice] returns the rangemap of slices on the given
     /// chunk.
-    pub async fn read_slice(&self, inode: Ino, chunk_index: usize) -> Result<Option<Arc<Slices>>> {
+    pub async fn read_slice(
+        &self,
+        inode: Ino,
+        chunk_index: ChunkIndex,
+    ) -> Result<Option<Arc<Slices>>> {
         debug!(
             "read_slice with inode {:?}, chunk_index {:?}",
             inode, chunk_index
         );
 
-        // TODO: update access time
-        let read_guard = self.open_files.files.read().await;
-        if let Some(of) = read_guard.get(&inode) {
-            if let Some(svs) = of.chunks.get(&chunk_index) {
-                debug!(
-                    "read ino {} chunk {} slice info from cache, get count {}",
-                    inode,
-                    chunk_index,
-                    svs.len(),
-                );
-                return Ok(Some(svs.clone()));
-            }
+        if let Some(slices) = self.open_files.load_slices(inode, chunk_index).await {
+            debug!(
+                "read ino {} chunk {} slice info from cache, get count {}",
+                inode,
+                chunk_index,
+                slices.len(),
+            );
+            return Ok(Some(slices));
         }
-        drop(read_guard);
 
         let slices = self.backend.get_chunk_slices(inode, chunk_index)?;
-        // let slice_info_buf = match slice_info_buf {
-        //     Some(buf) => buf,
-        //     None => {
-        //         let attr = self.sto_must_get_attr(inode).await?;
-        //         ensure!(attr.is_file(), LibcSnafu { errno: libc::EPERM });
-        //         return Ok(None);
-        //     }
-        // };
 
         // fixme
         let slices = Arc::new(slices);
         // TODO: build cache.
         self.open_files
-            .update_chunk_slices_info(inode, chunk_index, slices.clone())
+            .refresh_slices(inode, chunk_index, slices.clone())
             .await;
 
         Ok(Some(slices))
@@ -966,6 +952,8 @@ impl MetaEngine {
         }
         Ok(())
     }
+
+    pub async fn truncate(&self, inode: Ino, size: u64) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

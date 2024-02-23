@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt::Debug,
     marker::PhantomData,
     sync::{
@@ -47,7 +47,7 @@ pub(crate) type HandleTableRef = Arc<HandleTable>;
 
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
-    handles:      RwLock<HashMap<Ino, Arc<RwLock<HashMap<FH, Handle>>>>>,
+    handles:      RwLock<HashMap<Ino, Arc<RwLock<BTreeMap<FH, Handle>>>>>,
     _next_fh:     AtomicU64,
 }
 
@@ -69,7 +69,12 @@ impl HandleTable {
         fh
     }
 
-    pub(crate) async fn new_file_handle(self: &Arc<Self>, inode: Ino, length: u64, flags: i32) -> Result<FH> {
+    pub(crate) async fn new_file_handle(
+        self: &Arc<Self>,
+        inode: Ino,
+        length: u64,
+        flags: i32,
+    ) -> Result<FH> {
         let fh = self.next_fh();
         let h = match flags & libc::O_ACCMODE {
             libc::O_RDONLY => FileHandle::new(
@@ -132,17 +137,14 @@ impl HandleTable {
         }
     }
 
-    pub(crate) async fn get_all_handles(&self, ino: Ino) -> Vec<Handle> {
+    pub(crate) async fn get_handles(&self, ino: Ino) -> Vec<Handle> {
         let outer_read_guard = self.handles.read().await;
         match outer_read_guard.get(&ino).and_then(|v| Some(v.clone())) {
             None => Default::default(),
             Some(inner_map) => {
                 drop(outer_read_guard);
                 let inner_read_guard = inner_map.read().await;
-                inner_read_guard
-                    .values()
-                    .map(|h| h.clone())
-                    .collect()
+                inner_read_guard.values().map(|h| h.clone()).collect()
             }
         }
     }
@@ -310,6 +312,9 @@ impl FileHandle {
         })
     }
 
+    /// [write_lock] will block until it gets the exclusive lock for the [FileHandle].
+    /// When there is no [FileWriter], then this function will return None.
+    /// FIXME: add timeout mechanism
     #[instrument(skip(self))]
     pub(crate) async fn write_lock(&self, ctx: Arc<FuseContext>) -> Option<FileHandleWriteGuard> {
         if self.writer.is_none() {
@@ -327,7 +332,7 @@ impl FileHandle {
                 // wait for they notify that exclusive lock has been released or reader has been
                 // released.
                 tokio::select! {
-                    _ =self.exclusive_lock_notify.notified() => {
+                    _ = self.exclusive_lock_notify.notified() => {
                         debug!("exclusive lock is released")
                     }
                     _ = self.reader_notify.notified() => {
