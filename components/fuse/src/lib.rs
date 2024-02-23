@@ -19,28 +19,27 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub use config::FuseConfig;
 use fuser::{
-    Filesystem, FileType, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow,
 };
-use libc::{__u64, c_int};
-use snafu::{ResultExt, Snafu, Whatever};
-use tokio::runtime;
-use tracing::{debug, error, field, info, instrument, Instrument};
-
-pub use config::FuseConfig;
 use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
-use kiseki_meta::context::{EMPTY_CONTEXT, FuseContext};
+use kiseki_meta::context::{FuseContext, EMPTY_CONTEXT};
 use kiseki_types::{
     attr::InodeAttr,
     entry::{Entry, FullEntry},
     ino::Ino,
+    stat::FSStat,
     ToErrno,
 };
-use kiseki_types::stat::FSStat;
 use kiseki_utils::readable_size::ReadableSize;
 use kiseki_vfs::KisekiVFS;
+use libc::{__u64, c_int};
+use snafu::{ResultExt, Snafu, Whatever};
+use tokio::runtime;
+use tracing::{debug, error, field, info, instrument, Instrument};
 
 use crate::err::Error;
 
@@ -50,8 +49,8 @@ pub mod null;
 
 #[derive(Debug)]
 pub struct KisekiFuse {
-    config: FuseConfig,
-    vfs: Arc<KisekiVFS>,
+    config:  FuseConfig,
+    vfs:     Arc<KisekiVFS>,
     runtime: runtime::Runtime,
 }
 
@@ -164,6 +163,7 @@ impl Filesystem for KisekiFuse {
         }
         Ok(())
     }
+
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = FuseContext::from(_req);
@@ -322,6 +322,18 @@ impl Filesystem for KisekiFuse {
         reply.ok();
     }
 
+    /// In UNIX-like operating systems, when a new file or directory is created,
+    /// its permissions are typically set based on the process's umask value.
+    ///
+    /// The umask is a bitmask that specifies which permissions should be
+    /// removed from the default permissions assigned to newly created files and
+    /// directories.
+    ///
+    /// For example, if mode is set to 0666 (read and write
+    /// permissions for owner, group, and others), and umask is set to
+    /// 0200, it might indicate that the write permission for the owner
+    /// should be removed, resulting in a final mode of 0466 (read-only for
+    /// owner, read and write for group and others).
     #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
     fn mknod(
         &mut self,
@@ -339,14 +351,7 @@ impl Filesystem for KisekiFuse {
 
         match self.runtime.block_on(
             self.vfs
-                .mknod(
-                    ctx.clone(),
-                    Ino(parent),
-                    name,
-                    mode as libc::mode_t,
-                    umask as u16,
-                    rdev,
-                )
+                .mknod(ctx.clone(), Ino(parent), name, mode, umask, rdev)
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
@@ -370,7 +375,7 @@ impl Filesystem for KisekiFuse {
 
         match self.runtime.block_on(
             self.vfs
-                .create(ctx.clone(), Ino(parent), &name, mode as u16, umask as u16, flags)
+                .create(ctx.clone(), Ino(parent), &name, mode, umask, flags)
                 .in_current_span(),
         ) {
             Ok((entry, fh)) => reply.created(
@@ -439,7 +444,7 @@ impl Filesystem for KisekiFuse {
         let name = name.to_string_lossy().to_string();
         match self.runtime.block_on(
             self.vfs
-                .mkdir(ctx.clone(), Ino(parent), &name, mode as u16, umask as u16)
+                .mkdir(ctx.clone(), Ino(parent), &name, mode, umask)
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
@@ -598,6 +603,19 @@ impl Filesystem for KisekiFuse {
             .runtime
             .block_on(self.vfs.release(ctx, Ino(ino), fh).in_current_span())
         {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        };
+    }
+
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .rmdir(ctx, Ino(parent), name.to_str().unwrap())
+                .in_current_span(),
+        ) {
             Ok(_) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         };

@@ -26,14 +26,14 @@ use crate::err::{DiskPoolMmapSnafu, UnknownIOSnafu};
 
 pub struct MemoryPagePool {
     page_size: usize,
-    capacity: usize,
-    queue: ArrayQueue<u64>,
+    capacity:  usize,
+    queue:     ArrayQueue<u64>,
     raw_pages: Box<[Slot]>,
-    notify: Notify,
+    notify:    Notify,
 }
 
 struct Slot {
-    inner: UnsafeCell<&'static mut [u8]>,
+    inner:     UnsafeCell<&'static mut [u8]>,
     page_size: usize,
 }
 
@@ -121,7 +121,7 @@ impl MemoryPagePool {
     pub fn try_acquire_page(self: &Arc<Self>) -> Option<Page> {
         Some(Page {
             page_id: self.queue.pop()?,
-            _pool: self.clone(),
+            _pool:   self.clone(),
         })
     }
 
@@ -137,9 +137,7 @@ impl MemoryPagePool {
         }
     }
 
-    fn notify_page_ready(self: &Arc<Self>) {
-        self.notify.notify_one();
-    }
+    fn notify_page_ready(self: &Arc<Self>) { self.notify.notify_one(); }
 
     fn recycle(self: &Arc<Self>, page_id: u64) {
         let slot = &self.raw_pages[page_id as usize];
@@ -148,19 +146,13 @@ impl MemoryPagePool {
         self.notify_page_ready();
     }
 
-    pub fn remain_page_cnt(&self) -> usize {
-        self.queue.len()
-    }
+    pub fn remain_page_cnt(&self) -> usize { self.queue.len() }
 
     #[inline]
-    pub fn total_page_cnt(&self) -> usize {
-        self.capacity / self.page_size
-    }
+    pub fn total_page_cnt(&self) -> usize { self.capacity / self.page_size }
 
     #[inline]
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
+    pub fn capacity(&self) -> usize { self.capacity }
 }
 
 impl Display for MemoryPagePool {
@@ -181,7 +173,7 @@ impl Display for MemoryPagePool {
 /// zeroed. If that is a concern, you must clear the data yourself.
 pub struct Page {
     page_id: u64,
-    _pool: Arc<MemoryPagePool>,
+    _pool:   Arc<MemoryPagePool>,
 }
 
 impl Page {
@@ -203,6 +195,7 @@ impl Page {
         debug_assert_eq!(copy_len as usize, length);
         Ok(())
     }
+
     pub(crate) async fn copy_from_reader<R>(
         &self,
         offset: usize,
@@ -222,15 +215,11 @@ impl Page {
         Ok(())
     }
 
-    pub(crate) fn size(&self) -> usize {
-        self._pool.page_size
-    }
+    pub(crate) fn size(&self) -> usize { self._pool.page_size }
 }
 
 impl Drop for Page {
-    fn drop(&mut self) {
-        self._pool.recycle(self.page_id);
-    }
+    fn drop(&mut self) { self._pool.recycle(self.page_id); }
 }
 
 #[cfg(test)]

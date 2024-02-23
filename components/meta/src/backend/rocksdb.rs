@@ -1,7 +1,9 @@
 use std::{
     fmt::{Debug, Formatter},
+    ops::Sub,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 use kiseki_common::ChunkIndex;
@@ -9,14 +11,18 @@ use kiseki_types::{
     attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat::DirStat,
     FileType,
 };
+use rocksdb::{DBAccess, MultiThreaded, WriteBatchWithTransaction};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing::debug;
 
 use super::{key, key::Counter, Backend};
-use crate::err::{
-    model_err, model_err::ModelKind, InvalidSettingSnafu, ModelSnafu, Result, RocksdbSnafu,
-    UninitializedEngineSnafu,
+use crate::{
+    context::FuseContext,
+    err::{
+        model_err, model_err::ModelKind, InvalidSettingSnafu, LibcSnafu, ModelSnafu, Result,
+        RocksdbSnafu, UninitializedEngineSnafu,
+    },
 };
 
 #[derive(Debug, Default)]
@@ -29,7 +35,8 @@ impl Builder {
         self.path = path.as_ref().to_path_buf();
         self
     }
-    pub fn build(self) -> Result<Arc<dyn Backend>> {
+
+    pub fn build(&self) -> Result<Arc<dyn Backend>> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -41,7 +48,7 @@ impl Builder {
 }
 
 pub(crate) struct RocksdbBackend {
-    db: rocksdb::OptimisticTransactionDB,
+    db: rocksdb::OptimisticTransactionDB<MultiThreaded>,
 }
 
 impl Debug for RocksdbBackend {
@@ -52,13 +59,64 @@ impl Debug for RocksdbBackend {
     }
 }
 
+impl RocksdbBackend {
+    fn do_get_dentry<Layer: DBAccess>(db: &Layer, parent: Ino, name: &str) -> Result<DEntry> {
+        let entry_key = key::dentry(parent, name);
+        let entry_buf = db
+            .get_pinned_opt(&entry_key, &rocksdb::ReadOptions::default())
+            .context(RocksdbSnafu)?
+            .context(model_err::NotFoundSnafu {
+                kind: ModelKind::DEntry,
+                key:  String::from_utf8_lossy(&entry_key).to_string(),
+            })
+            .context(ModelSnafu)?;
+
+        let entry_info: DEntry = bincode::deserialize(&entry_buf)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::DEntry,
+                key:  String::from_utf8_lossy(&entry_key).to_string(),
+            })
+            .context(ModelSnafu)?;
+        Ok(entry_info)
+    }
+
+    fn do_get_attr<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<InodeAttr> {
+        let attr_key = key::attr(inode);
+        let buf = db
+            .get_pinned_opt(&attr_key, &rocksdb::ReadOptions::default())
+            .context(RocksdbSnafu)?
+            .context(model_err::NotFoundSnafu {
+                kind: ModelKind::Attr,
+                key:  String::from_utf8_lossy(&attr_key).to_string(),
+            })
+            .context(ModelSnafu)?;
+
+        let attr: InodeAttr = bincode::deserialize(&buf)
+            .context(model_err::CorruptionSnafu {
+                kind: ModelKind::Attr,
+                key:  String::from_utf8_lossy(&attr_key).to_string(),
+            })
+            .context(ModelSnafu)?;
+        Ok(attr)
+    }
+
+    fn do_check_exist_children<DB>(txn: &rocksdb::Transaction<DB>, parent: Ino) -> Result<bool> {
+        let prefix = key::dentry_prefix(parent);
+        let mut ro = rocksdb::ReadOptions::default();
+        ro.set_iterate_range(rocksdb::PrefixRange(prefix.as_slice()));
+        let mut iter = txn.raw_iterator_opt(ro);
+        iter.seek_to_first();
+        Ok(iter.valid())
+    }
+}
+
 impl Backend for RocksdbBackend {
     // TODO: merge the exists format
     fn set_format(&self, format: &Format) -> Result<()> {
         let setting_buf = bincode::serialize(format)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
-                key: key::CURRENT_FORMAT.to_string(),
+                key:  key::CURRENT_FORMAT.to_string(),
             })
             .context(ModelSnafu)?;
 
@@ -67,6 +125,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?;
         Ok(())
     }
+
     fn load_format(&self) -> Result<Format> {
         let setting_buf = self
             .db
@@ -76,7 +135,7 @@ impl Backend for RocksdbBackend {
         let setting: Format = bincode::deserialize(&setting_buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
-                key: key::CURRENT_FORMAT.to_string(),
+                key:  key::CURRENT_FORMAT.to_string(),
             })
             .context(ModelSnafu)?;
         Ok(setting)
@@ -92,7 +151,7 @@ impl Backend for RocksdbBackend {
                 bincode::deserialize(&v)
                     .context(model_err::CorruptionSnafu {
                         kind: ModelKind::Counter,
-                        key: String::from_utf8_lossy(&key).to_string(),
+                        key:  String::from_utf8_lossy(&key).to_string(),
                     })
                     .context(ModelSnafu)
             })
@@ -103,13 +162,14 @@ impl Backend for RocksdbBackend {
         let new_buf = bincode::serialize(&new)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Counter,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         transaction.put(&key, new_buf).context(RocksdbSnafu)?;
         transaction.commit().context(RocksdbSnafu)?;
         Ok(new)
     }
+
     fn load_count(&self, counter: Counter) -> Result<u64> {
         let key: Vec<u8> = counter.into();
         let buf = self
@@ -118,70 +178,36 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Counter,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         let count: u64 = bincode::deserialize(&buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Counter,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(count)
     }
 
-    fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
-        let attr_key = key::attr(inode);
-        let buf = self
-            .db
-            .get_pinned(&attr_key)
-            .context(RocksdbSnafu)?
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::Attr,
-                key: String::from_utf8_lossy(&attr_key).to_string(),
-            })
-            .context(ModelSnafu)?;
+    fn get_attr(&self, inode: Ino) -> Result<InodeAttr> { Self::do_get_attr(&self.db, inode) }
 
-        let attr: InodeAttr = bincode::deserialize(&buf)
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::Attr,
-                key: String::from_utf8_lossy(&attr_key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        Ok(attr)
-    }
     fn set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()> {
         let attr_key = key::attr(inode);
         let buf = bincode::serialize(attr)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::Attr,
-                key: String::from_utf8_lossy(&attr_key).to_string(),
+                key:  String::from_utf8_lossy(&attr_key).to_string(),
             })
             .context(ModelSnafu)?;
         self.db.put(&attr_key, &buf).context(RocksdbSnafu)?;
         Ok(())
     }
 
-    fn get_entry_info(&self, parent: Ino, name: &str) -> Result<DEntry> {
-        let entry_key = key::dentry(parent, name);
-        let entry_buf = self
-            .db
-            .get_pinned(&entry_key)
-            .context(RocksdbSnafu)?
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::DEntry,
-                key: String::from_utf8_lossy(&entry_key).to_string(),
-            })
-            .context(ModelSnafu)?;
-
-        let entry_info: DEntry = bincode::deserialize(&entry_buf)
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::DEntry,
-                key: String::from_utf8_lossy(&entry_key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        Ok(entry_info)
+    fn get_dentry(&self, parent: Ino, name: &str) -> Result<DEntry> {
+        Self::do_get_dentry(&self.db, parent, name)
     }
+
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()> {
         let entry_key = key::dentry(parent, name);
         let entry_buf = bincode::serialize(&DEntry {
@@ -192,21 +218,19 @@ impl Backend for RocksdbBackend {
         })
         .context(model_err::CorruptionSnafu {
             kind: ModelKind::DEntry,
-            key: String::from_utf8_lossy(&entry_key).to_string(),
+            key:  String::from_utf8_lossy(&entry_key).to_string(),
         })
         .context(ModelSnafu)?;
         self.db.put(&entry_key, entry_buf).context(RocksdbSnafu)?;
         Ok(())
     }
-    fn list_entry_info(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>> {
+
+    fn list_dentry(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>> {
         let prefix = key::dentry_prefix(parent);
-        let range = prefix.as_slice()..;
-        let ro = rocksdb::ReadOptions::default();
-        // Create the iterator
+        let mut ro = rocksdb::ReadOptions::default();
+        ro.set_iterate_range(rocksdb::PrefixRange(prefix.as_slice()));
         let mut iter = self.db.raw_iterator_opt(ro);
-        // Seek to the start key
-        iter.seek(&range.start);
-        let start = range.start;
+        iter.seek_to_first();
         let mut res = Vec::default();
         // Scan the keys in the iterator
         while iter.valid() {
@@ -216,38 +240,20 @@ impl Backend for RocksdbBackend {
                 let (k, v) = (iter.key(), iter.value());
                 // Check the key and value
                 if let (Some(k), Some(v)) = (k, v) {
-                    if !k.starts_with(start) {
-                        break;
-                    }
-                    if k >= start {
-                        let dentry: DEntry = bincode::deserialize(v)
-                            .context(model_err::CorruptionSnafu {
-                                kind: ModelKind::DEntry,
-                                key: String::from_utf8_lossy(k).to_string(),
-                            })
-                            .context(ModelSnafu)?;
-                        res.push(dentry);
-                        iter.next();
-                        continue;
-                    }
+                    let dentry: DEntry = bincode::deserialize(v)
+                        .context(model_err::CorruptionSnafu {
+                            kind: ModelKind::DEntry,
+                            key:  String::from_utf8_lossy(k).to_string(),
+                        })
+                        .context(ModelSnafu)?;
+                    res.push(dentry);
+                    iter.next();
+                    continue;
                 }
             }
             // Exit
             break;
         }
-
-        // // let mut iter = self.db.prefix_iterator(&prefix);
-        // let mut res = Vec::default();
-        // while let Some(e) = iter.next() {
-        //     let (key, value) = e.context(RocksdbSnafu)?;
-        //     let dentry: DEntry = bincode::deserialize(value.as_ref())
-        //         .context(model_err::CorruptionSnafu {
-        //             kind: ModelKind::DEntry,
-        //             key,
-        //         })
-        //         .context(ModelSnafu)?;
-        //     res.push(dentry);
-        // }
         Ok(res)
     }
 
@@ -258,6 +264,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?;
         Ok(())
     }
+
     fn get_symlink(&self, inode: Ino) -> Result<String> {
         let symlink_key = key::symlink(inode);
         let path_buf = self
@@ -266,7 +273,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Symlink,
-                key: String::from_utf8_lossy(&symlink_key).to_string(),
+                key:  String::from_utf8_lossy(&symlink_key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(String::from_utf8_lossy(path_buf.as_ref()).to_string())
@@ -277,7 +284,7 @@ impl Backend for RocksdbBackend {
         let buf = bincode::serialize(&slices)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::ChunkSlices,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
@@ -301,6 +308,7 @@ impl Backend for RocksdbBackend {
         let buf = self.db.get(&key).context(RocksdbSnafu)?;
         Ok(buf)
     }
+
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices> {
         let key = key::chunk_slices(inode, chunk_index);
         let buf = self
@@ -309,7 +317,7 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::ChunkSlices,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         let slices = Slices::decode(&buf).unwrap();
@@ -328,12 +336,13 @@ impl Backend for RocksdbBackend {
         let buf = bincode::serialize(&dir_stat)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::DirStat,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
         Ok(())
     }
+
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat> {
         let key = key::dir_stat(inode);
         let buf = self
@@ -342,15 +351,169 @@ impl Backend for RocksdbBackend {
             .context(RocksdbSnafu)?
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::DirStat,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         let dir_stat = bincode::deserialize::<DirStat>(&buf)
             .context(model_err::CorruptionSnafu {
                 kind: ModelKind::DirStat,
-                key: String::from_utf8_lossy(&key).to_string(),
+                key:  String::from_utf8_lossy(&key).to_string(),
             })
             .context(ModelSnafu)?;
         Ok(dir_stat)
+    }
+
+    fn do_rmdir(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+        skip_dir_mtime: Duration,
+    ) -> Result<(DEntry, InodeAttr)> {
+        let txn = self.db.transaction();
+        let entry_info = Self::do_get_dentry(&txn, parent, name)?;
+        ensure!(
+            entry_info.typ == FileType::Directory,
+            LibcSnafu {
+                errno: libc::ENOTDIR,
+            }
+        );
+        // get parent and child's attr
+        let mut parent_attr = Self::do_get_attr(&txn, parent)?;
+        ensure!(
+            // parent must be dir.
+            parent_attr.is_dir(),
+            LibcSnafu {
+                errno: libc::ENOTDIR,
+            }
+        );
+        let child_attr = Self::do_get_attr(&txn, entry_info.inode)?;
+        ensure!(
+            // child must be dir. check again in case of we found that the entry info tells
+            // the different story.
+            child_attr.is_dir(),
+            LibcSnafu {
+                errno: libc::ENOTDIR,
+            }
+        );
+
+        ctx.check(
+            &parent_attr,
+            kiseki_common::MODE_MASK_W | kiseki_common::MODE_MASK_X,
+        )?;
+        let parent_flag = kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8).unwrap();
+        ensure!(
+            !parent_flag.contains(kiseki_types::attr::Flags::APPEND)
+                && !parent_flag.contains(kiseki_types::attr::Flags::IMMUTABLE),
+            LibcSnafu { errno: libc::EPERM }
+        );
+        ensure!(
+            !Self::do_check_exist_children(&txn, entry_info.inode)?,
+            LibcSnafu {
+                errno: libc::ENOTEMPTY,
+            }
+        );
+        // The octal number 01000 specifically represents the setuid bit in POSIX
+        // permissions. In a file's mode, the setuid bit is represented by the fourth
+        // bit from the left. When set, it indicates that the file should be executed
+        // with the privileges of its owner, rather than the privileges of the user who
+        // executed it. This is commonly used for executable files that need special
+        // permissions to perform certain tasks, such as changing passwords or accessing
+        // sensitive resources.
+        if ctx.uid != 0
+            && parent_attr.mode & 0o1000 != 0
+            && ctx.uid != parent_attr.uid
+            && ctx.uid != child_attr.uid
+        {
+            return LibcSnafu {
+                errno: libc::EACCES,
+            }
+            .fail();
+        }
+        parent_attr.nlink -= 1;
+        let now = SystemTime::now();
+
+        let need_update_parent_attr = if now
+            .duration_since(parent_attr.mtime)
+            .expect("found mtime in the future")
+            >= skip_dir_mtime
+        {
+            parent_attr.mtime = now;
+            parent_attr.ctime = now;
+            true
+        } else {
+            false
+        };
+
+        let mut batch = txn.get_writebatch();
+        // delete entry
+        batch.delete(key::dentry(parent, name));
+        // delete inode attr
+        batch.delete(key::attr(entry_info.inode));
+        if need_update_parent_attr {
+            let parent_attr_key = key::attr(parent);
+            // update parent attr
+            batch.put(
+                &parent_attr_key,
+                bincode::serialize(&parent_attr)
+                    .context(model_err::CorruptionSnafu {
+                        kind: ModelKind::Attr,
+                        key:  String::from_utf8_lossy(&parent_attr_key).to_string(),
+                    })
+                    .context(ModelSnafu)?,
+            );
+        }
+        self.db.write(batch).context(RocksdbSnafu)?;
+        Ok((entry_info, child_attr))
+    }
+}
+
+#[cfg(feature = "meta-rocksdb")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        opts.increase_parallelism(kiseki_utils::num_cpus() as i32);
+
+        let db = rocksdb::OptimisticTransactionDB::open(&opts, tempdir.path()).unwrap();
+        let backend = RocksdbBackend { db };
+        // it should be empty at first
+        let exist =
+            RocksdbBackend::do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
+        assert_eq!(exist, false);
+
+        // it should be empty after we insert a key-value pair
+        backend.set_attr(Ino(1), &InodeAttr::default()).unwrap();
+        let exist =
+            RocksdbBackend::do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
+        assert_eq!(exist, false);
+
+        // now create a new inode under the inode 1
+        backend.set_attr(Ino(2), &InodeAttr::default()).unwrap();
+        // insert a dentry
+        backend
+            .set_dentry(Ino(1), "test", Ino(2), FileType::RegularFile)
+            .unwrap();
+        // now it should exist
+        let exist =
+            RocksdbBackend::do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
+        assert_eq!(exist, true);
+
+        backend
+            .list_dentry(Ino(1), -1)
+            .unwrap()
+            .iter()
+            .for_each(|e| println!("{:?}", e));
+        backend
+            .list_dentry(Ino(2), -1)
+            .unwrap()
+            .iter()
+            .for_each(|e| println!("{:?}", e));
     }
 }

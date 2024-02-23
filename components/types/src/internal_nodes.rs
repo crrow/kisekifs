@@ -37,29 +37,29 @@ impl InternalNodeTable {
         let mut map = HashMap::new();
         let control_inode: InternalNode = InternalNode(FullEntry {
             inode: CONTROL_INODE,
-            name: CONTROL_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o666).to_owned(),
+            name:  CONTROL_INODE_NAME.to_string(),
+            attr:  InodeAttr::default().set_mode(0o666).to_owned(),
         });
         let log_inode: InternalNode = InternalNode(FullEntry {
             inode: LOG_INODE,
-            name: LOG_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).to_owned(),
+            name:  LOG_INODE_NAME.to_string(),
+            attr:  InodeAttr::default().set_mode(0o400).to_owned(),
         });
         let stats_inode: InternalNode = InternalNode(FullEntry {
             inode: STATS_INODE,
-            name: STATS_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).to_owned(),
+            name:  STATS_INODE_NAME.to_string(),
+            attr:  InodeAttr::default().set_mode(0o400).to_owned(),
         });
         let config_inode: InternalNode = InternalNode(FullEntry {
             inode: CONFIG_INODE,
-            name: CONFIG_INODE_NAME.to_string(),
-            attr: InodeAttr::default().set_perm(0o400).to_owned(),
+            name:  CONFIG_INODE_NAME.to_string(),
+            attr:  InodeAttr::default().set_mode(0o400).to_owned(),
         });
         let trash_inode: InternalNode = InternalNode(FullEntry {
             inode: MAX_INTERNAL_INODE,
-            name: TRASH_INODE_NAME.to_string(),
-            attr: InodeAttr::default()
-                .set_perm(0o555)
+            name:  TRASH_INODE_NAME.to_string(),
+            attr:  InodeAttr::default()
+                .set_mode(0o555)
                 .set_kind(fuser::FileType::Directory)
                 .set_nlink(2)
                 .set_uid(kiseki_utils::uid())
@@ -79,30 +79,29 @@ impl InternalNodeTable {
     pub fn get_internal_node_by_name(&self, name: &str) -> Option<&InternalNode> {
         self.nodes.get(name)
     }
+
     pub fn get_mut_internal_node_by_name(&mut self, name: &str) -> Option<&mut InternalNode> {
         self.nodes.get_mut(name)
     }
+
     pub fn get_internal_node(&self, ino: Ino) -> Option<&InternalNode> {
         self.nodes.values().find(|node| node.0.inode == ino)
     }
-    pub fn remove_trash_node(&mut self) {
-        self.nodes.remove(TRASH_INODE_NAME);
-    }
+
+    pub fn remove_trash_node(&mut self) { self.nodes.remove(TRASH_INODE_NAME); }
+
     pub fn add_prefix(&mut self) {
         for n in self.nodes.values_mut() {
             n.0.name = format!(".kfs{}", n.0.name);
         }
     }
-    pub fn contains_name(&self, name: &str) -> bool {
-        self.nodes.contains_key(name)
-    }
+
+    pub fn contains_name(&self, name: &str) -> bool { self.nodes.contains_key(name) }
 }
 
 #[derive(Debug)]
 pub struct InternalNode(pub FullEntry);
 
 impl InternalNode {
-    pub fn get_attr(&self) -> InodeAttr {
-        self.0.attr.clone()
-    }
+    pub fn get_attr(&self) -> InodeAttr { self.0.attr.clone() }
 }

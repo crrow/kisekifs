@@ -48,18 +48,18 @@ pub struct Config {
     /// The directory to store the stage cache.
     pub stage_cache_dir: PathBuf,
     /// The max size of the stage cache. 10GiB by default.
-    pub max_stage_size: ReadableSize,
+    pub max_stage_size:  ReadableSize,
     /// How long can an object live after it has been staged.
     /// Zero means it will never expire, default by 24 hour.
-    pub cache_ttl: Duration,
+    pub cache_ttl:       Duration,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             stage_cache_dir: PathBuf::from(kiseki_common::KISEKI_DEBUG_STAGE_CACHE),
-            max_stage_size: ReadableSize(DEFAULT_STAGE_CACHE_SIZE),
-            cache_ttl: DEFAULT_CACHE_TTL,
+            max_stage_size:  ReadableSize(DEFAULT_STAGE_CACHE_SIZE),
+            cache_ttl:       DEFAULT_CACHE_TTL,
         }
     }
 }
@@ -67,10 +67,10 @@ impl Default for Config {
 pub type FileCacheRef = Arc<FileCache>;
 
 pub struct FileCache {
-    stage_dir: PathBuf,
-    index: moka::future::Cache<SliceKey, CacheIndex>,
+    stage_dir:      PathBuf,
+    index:          moka::future::Cache<SliceKey, CacheIndex>,
     remote_storage: ObjectStorage,
-    local_storage: LocalStorage,
+    local_storage:  LocalStorage,
 }
 
 impl FileCache {
@@ -299,8 +299,8 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let config = Config {
             stage_cache_dir: tempdir.path().to_path_buf(),
-            max_stage_size: ReadableSize(30 << 20), // 30M
-            cache_ttl: Duration::from_secs(1),
+            max_stage_size:  ReadableSize(30 << 20), // 30M
+            cache_ttl:       Duration::from_secs(1),
         };
         let remote_storage = kiseki_utils::object_storage::new_memory_object_store();
         let cache = Arc::new(FileCache::new(config, remote_storage).unwrap());

@@ -39,52 +39,37 @@ const INO_SIZE: usize = std::mem::size_of::<Ino>();
 pub struct Ino(pub u64);
 
 impl Display for Ino {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
 }
 
 impl AddAssign for Ino {
-    fn add_assign(&mut self, rhs: Self) {
-        self.0 += rhs.0;
-    }
+    fn add_assign(&mut self, rhs: Self) { self.0 += rhs.0; }
 }
 
 impl Add for Ino {
     type Output = Ino;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0 + rhs.0)
-    }
+    fn add(self, rhs: Self) -> Self::Output { Self(self.0 + rhs.0) }
 }
 
 impl From<u64> for Ino {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
+    fn from(value: u64) -> Self { Self(value) }
 }
 impl From<Ino> for u64 {
-    fn from(val: Ino) -> Self {
-        val.0
-    }
+    fn from(val: Ino) -> Self { val.0 }
 }
 
 impl Ino {
-    pub fn is_trash(&self) -> bool {
-        self.0 >= TRASH_INODE.0
-    }
-    pub fn is_special(&self) -> bool {
-        *self >= MIN_INTERNAL_INODE
-    }
-    pub fn is_normal(&self) -> bool {
-        !self.is_special()
-    }
-    pub fn is_zero(&self) -> bool {
-        self.0 == 0
-    }
-    pub fn is_root(&self) -> bool {
-        self.0 == ROOT_INO.0
-    }
+    pub fn is_trash(&self) -> bool { self.0 >= TRASH_INODE.0 }
+
+    pub fn is_special(&self) -> bool { *self >= MIN_INTERNAL_INODE }
+
+    pub fn is_normal(&self) -> bool { !self.is_special() }
+
+    pub fn is_zero(&self) -> bool { self.0 == 0 }
+
+    pub fn is_root(&self) -> bool { self.0 == ROOT_INO.0 }
+
     // FIXME: use a better way
     // key: AiiiiiiiiI
     // key-len: 10
@@ -95,6 +80,7 @@ impl Ino {
         buf.write_u8(b'I').unwrap();
         buf
     }
+
     pub fn generate_key_str(&self) -> String {
         // let key_buf = self.generate_key();
         // String::from_utf8_lossy(&key_buf).to_string()

@@ -30,17 +30,17 @@ pub(crate) type DataManagerRef = Arc<DataManager>;
 
 /// DataManager is responsible for managing the data of the VFS.
 pub(crate) struct DataManager {
-    pub(crate) page_size: usize,
-    pub(crate) block_size: usize,
-    pub(crate) chunk_size: usize,
-    pub(crate) file_writers: FileWritersRef,
-    pub(crate) file_readers: RwLock<HashMap<Ino, Arc<RwLock<HashMap<FH, Arc<FileReader>>>>>>,
-    pub(crate) id_generator: Arc<sonyflake::Sonyflake>,
+    pub(crate) page_size:      usize,
+    pub(crate) block_size:     usize,
+    pub(crate) chunk_size:     usize,
+    pub(crate) file_writers:   FileWritersRef,
+    pub(crate) file_readers:   RwLock<HashMap<Ino, Arc<RwLock<HashMap<FH, Arc<FileReader>>>>>>,
+    pub(crate) id_generator:   Arc<sonyflake::Sonyflake>,
     // Dependencies
-    pub(crate) meta_engine: MetaEngineRef,
+    pub(crate) meta_engine:    MetaEngineRef,
     pub(crate) object_storage: ObjectStorage,
-    pub(crate) file_cache: FileCacheRef,
-    pub(crate) mem_cache: MemCacheRef,
+    pub(crate) file_cache:     FileCacheRef,
+    pub(crate) mem_cache:      MemCacheRef,
     // pub(crate) data_cache: CacheRef,
 }
 

@@ -6,18 +6,13 @@ use std::{
     io::Cursor,
     ops::Deref,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering}, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Weak,
     },
 };
 
 use dashmap::DashMap;
-use rangemap::RangeMap;
-use snafu::ResultExt;
-use tokio::{sync::RwLock, task::JoinHandle};
-use tracing::{debug, error, instrument};
-
-use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, ChunkIndex, FH};
+use kiseki_common::{BlockIndex, BlockSize, ChunkIndex, BLOCK_SIZE, CHUNK_SIZE, FH};
 use kiseki_meta::MetaEngineRef;
 use kiseki_storage::{
     cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef},
@@ -28,6 +23,10 @@ use kiseki_types::{
     slice::{make_slice_object_key, OverlookedSlicesRef, Slice, SliceID, SliceKey},
 };
 use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
+use rangemap::RangeMap;
+use snafu::ResultExt;
+use tokio::{sync::RwLock, task::JoinHandle};
+use tracing::{debug, error, instrument};
 
 use crate::{
     data_manager::{DataManager, DataManagerRef},
@@ -124,21 +123,21 @@ impl DataManager {
 pub(crate) struct FileReader {
     data_engine: Weak<DataManager>,
     // The file inode.
-    ino: Ino,
-    fh: FH,
+    ino:         Ino,
+    fh:          FH,
     // The max file read length, it was set when we crate the file handle.
-    length: AtomicUsize,
+    length:      AtomicUsize,
     // the write back cache.
-    file_cache: FileCacheRef,
+    file_cache:  FileCacheRef,
     // the read-only cache.
-    mem_cache: MemCacheRef,
+    mem_cache:   MemCacheRef,
     // A file be divided into multiple chunks,
     // each chunk is composed by multiple slices.
     // This map is used to store latest slices that compose the chunk.
     // TODO: get rid of DashMap
-    chunks: DashMap<ChunkIndex, OverlookedSlicesRef>,
+    chunks:      DashMap<ChunkIndex, OverlookedSlicesRef>,
     // The file is closing or not.
-    closing: AtomicBool,
+    closing:     AtomicBool,
 }
 
 impl FileReader {
@@ -220,7 +219,8 @@ impl FileReader {
                 let new_r =
                     (max(r.start, current_read_range.start)..min(r.end, current_read_range.end));
                 debug!(
-                    "find overlapping slice in chunk: {:?}, range: {:?}, new_range: {:?}, slice: {:?}",
+                    "find overlapping slice in chunk: {:?}, range: {:?}, new_range: {:?}, slice: \
+                     {:?}",
                     chunk_idx, r, new_r, s
                 );
                 virtual_slice_map.insert(new_r, VirtualSlice::Slice(s.clone()));
@@ -255,7 +255,8 @@ impl FileReader {
                     }
                     VirtualSlice::Slice(s) => {
                         debug!(
-                            "find slice in chunk: {:?}, range: {:?}, slice: {:?}, write buf [{start}, {end}]",
+                            "find slice in chunk: {:?}, range: {:?}, slice: {:?}, write buf \
+                             [{start}, {end}]",
                             chunk_idx, r, s
                         );
                         let sid = s.get_id();
@@ -268,7 +269,7 @@ impl FileReader {
                             0,
                             &mut dst[start..end],
                         )
-                            .await?;
+                        .await?;
 
                         // let rb = engine.new_read_buffer(s.get_id(),
                         // s.get_underlying_size());

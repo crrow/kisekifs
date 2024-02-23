@@ -33,20 +33,12 @@ pub fn random_id() -> u64 {
 }
 
 #[inline(always)]
-pub fn num_cpus() -> usize {
-    *NUM_CPUS
-}
+pub fn num_cpus() -> usize { *NUM_CPUS }
 #[inline(always)]
-pub fn num_physical_cpus() -> usize {
-    *NUM_PHYSICAL_CPUS
-}
+pub fn num_physical_cpus() -> usize { *NUM_PHYSICAL_CPUS }
 
 #[inline(always)]
-pub fn uid() -> u32 {
-    *UID
-}
+pub fn uid() -> u32 { *UID }
 
 #[inline(always)]
-pub fn gid() -> u32 {
-    *GID
-}
+pub fn gid() -> u32 { *GID }

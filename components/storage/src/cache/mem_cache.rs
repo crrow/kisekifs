@@ -24,7 +24,7 @@ pub type MemCacheRef = Arc<MemCache>;
 
 /// MemCache is responsible for caching the object block in memory.
 pub struct MemCache {
-    inner: moka::future::Cache<SliceKey, Bytes>,
+    inner:          moka::future::Cache<SliceKey, Bytes>,
     remote_storage: kiseki_utils::object_storage::ObjectStorage,
 }
 

@@ -42,61 +42,43 @@ pub const PIB: u64 = TIB * BINARY_DATA_MAGNITUDE;
 pub struct ReadableSize(pub u64);
 
 impl ReadableSize {
-    pub const fn kb(count: u64) -> ReadableSize {
-        ReadableSize(count * KIB)
-    }
+    pub const fn kb(count: u64) -> ReadableSize { ReadableSize(count * KIB) }
 
-    pub const fn mb(count: u64) -> ReadableSize {
-        ReadableSize(count * MIB)
-    }
+    pub const fn mb(count: u64) -> ReadableSize { ReadableSize(count * MIB) }
 
-    pub const fn gb(count: u64) -> ReadableSize {
-        ReadableSize(count * GIB)
-    }
+    pub const fn gb(count: u64) -> ReadableSize { ReadableSize(count * GIB) }
 
-    pub const fn as_mb(self) -> u64 {
-        self.0 / MIB
-    }
+    pub const fn as_mb(self) -> u64 { self.0 / MIB }
 
-    pub const fn as_bytes(self) -> u64 {
-        self.0
-    }
+    pub const fn as_bytes(self) -> u64 { self.0 }
 
     pub const fn as_bytes_usize(self) -> usize { self.0 as usize }
 
-    pub fn to_string(self) -> String {
-        format!("{:?}", self)
-    }
+    pub fn to_string(self) -> String { format!("{:?}", self) }
 }
 
 impl Div<u64> for ReadableSize {
     type Output = ReadableSize;
 
-    fn div(self, rhs: u64) -> ReadableSize {
-        ReadableSize(self.0 / rhs)
-    }
+    fn div(self, rhs: u64) -> ReadableSize { ReadableSize(self.0 / rhs) }
 }
 
 impl Div<ReadableSize> for ReadableSize {
     type Output = u64;
 
-    fn div(self, rhs: ReadableSize) -> u64 {
-        self.0 / rhs.0
-    }
+    fn div(self, rhs: ReadableSize) -> u64 { self.0 / rhs.0 }
 }
 
 impl Mul<u64> for ReadableSize {
     type Output = ReadableSize;
 
-    fn mul(self, rhs: u64) -> ReadableSize {
-        ReadableSize(self.0 * rhs)
-    }
+    fn mul(self, rhs: u64) -> ReadableSize { ReadableSize(self.0 * rhs) }
 }
 
 impl Serialize for ReadableSize {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
         let size = self.0;
         let mut buffer = String::new();
@@ -166,9 +148,7 @@ impl FromStr for ReadableSize {
 }
 
 impl Debug for ReadableSize {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self) }
 }
 
 impl Display for ReadableSize {
@@ -191,8 +171,8 @@ impl Display for ReadableSize {
 
 impl<'de> Deserialize<'de> for ReadableSize {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
+    where
+        D: Deserializer<'de>,
     {
         struct SizeVisitor;
 
@@ -204,8 +184,8 @@ impl<'de> Deserialize<'de> for ReadableSize {
             }
 
             fn visit_i64<E>(self, size: i64) -> Result<ReadableSize, E>
-                where
-                    E: de::Error,
+            where
+                E: de::Error,
             {
                 if size >= 0 {
                     self.visit_u64(size as u64)
@@ -215,15 +195,15 @@ impl<'de> Deserialize<'de> for ReadableSize {
             }
 
             fn visit_u64<E>(self, size: u64) -> Result<ReadableSize, E>
-                where
-                    E: de::Error,
+            where
+                E: de::Error,
             {
                 Ok(ReadableSize(size))
             }
 
             fn visit_str<E>(self, size_str: &str) -> Result<ReadableSize, E>
-                where
-                    E: de::Error,
+            where
+                E: de::Error,
             {
                 size_str.parse().map_err(E::custom)
             }

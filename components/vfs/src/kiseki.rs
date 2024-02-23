@@ -16,8 +16,8 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     time::{Duration, SystemTime},
 };
@@ -25,24 +25,23 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use libc::{EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM, mode_t};
-use scopeguard::defer;
-use snafu::{ensure, location, Location, OptionExt, ResultExt};
-use tokio::{task::JoinHandle, time::Instant};
-use tracing::{debug, error, info, instrument, Instrument, trace};
-
-use kiseki_common::{DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
+use kiseki_common::{DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
-    ino::{CONTROL_INODE, Ino, ROOT_INO},
-    internal_nodes::{CONFIG_INODE_NAME, CONTROL_INODE_NAME, InternalNodeTable},
+    ino::{Ino, CONTROL_INODE, ROOT_INO},
+    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME, TRASH_INODE_NAME},
     slice::SliceID,
     ToErrno,
 };
 use kiseki_utils::{object_storage, object_storage::ObjectStorage};
+use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
+use scopeguard::defer;
+use snafu::{ensure, location, Location, OptionExt, ResultExt};
+use tokio::{task::JoinHandle, time::Instant};
+use tracing::{debug, error, info, instrument, trace, Instrument};
 
 use crate::{
     config::Config,
@@ -59,8 +58,8 @@ pub struct KisekiVFS {
     pub config: Config,
 
     // Runtime status
-    internal_nodes: InternalNodeTable,
-    modified_at: DashMap<Ino, std::time::Instant>,
+    internal_nodes:          InternalNodeTable,
+    modified_at:             DashMap<Ino, std::time::Instant>,
     pub(crate) handle_table: HandleTableRef,
     pub(crate) data_manager: DataManagerRef,
 
@@ -226,7 +225,7 @@ impl KisekiVFS {
                     _ => 0, // do nothing, // Handle unexpected flags
                 };
             let attr = self.meta.get_attr(inode).await?;
-            ctx.check(inode, &attr, mmask)?;
+            ctx.check(&attr, mmask)?;
         }
         Ok(self.handle_table.new_dir_handle(inode))
     }
@@ -287,24 +286,23 @@ impl KisekiVFS {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: String,
-        mode: mode_t,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
         rdev: u32,
     ) -> Result<FullEntry> {
         if parent.is_root() && self.internal_nodes.contains_name(&name) {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-                .fail()?;
+            .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-                .fail()?;
+            .fail()?;
         }
         let file_type = get_file_type(mode)?;
-        let mode = mode as u16 & 0o777;
 
         let (ino, attr) = self
             .meta
@@ -313,8 +311,8 @@ impl KisekiVFS {
                 parent,
                 &name,
                 file_type,
-                mode,
-                cumask,
+                mode & 0o7777,
+                umask,
                 rdev,
                 String::new(),
             )
@@ -328,8 +326,8 @@ impl KisekiVFS {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
-        mode: u16,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
         flags: libc::c_int,
     ) -> Result<(FullEntry, FH)> {
         debug!("fs:create with parent {:?} name {:?}", parent, name);
@@ -337,18 +335,18 @@ impl KisekiVFS {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-                .fail()?;
+            .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-                .fail()?;
+            .fail()?;
         };
 
         let (inode, attr) = self
             .meta
-            .create(ctx, parent, name, mode & 0o777, cumask, flags)
+            .create(ctx, parent, name, mode & 0o7777, umask, flags)
             .await
             .context(MetaSnafu)?;
 
@@ -399,7 +397,7 @@ impl KisekiVFS {
         }
         if flags.contains(SetAttrFlags::MODE) {
             if let Some(mode) = mode {
-                new_attr.perm = mode as u16 & 0o777;
+                new_attr.mode = mode & 0o7777;
             } else {
                 return LibcSnafu { errno: EINVAL }.fail()?;
             }
@@ -483,21 +481,21 @@ impl KisekiVFS {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
-        mode: u16,
-        umask: u16,
+        mode: u32,
+        umask: u32,
     ) -> Result<FullEntry> {
         debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
             return LibcSnafu {
                 errno: libc::EEXIST,
             }
-                .fail()?;
+            .fail()?;
         }
         if name.len() > MAX_NAME_LENGTH {
             return LibcSnafu {
                 errno: libc::ENAMETOOLONG,
             }
-                .fail()?;
+            .fail()?;
         };
 
         let (ino, attr) = self
@@ -506,6 +504,24 @@ impl KisekiVFS {
             .await
             .context(MetaSnafu)?;
         Ok(FullEntry::new(ino, name, attr))
+    }
+
+    pub async fn rmdir(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
+        debug!("fs:rmdir with parent {:?} name {:?}", parent, name);
+        ensure!(name != DOT, LibcSnafu { errno: EINVAL });
+        ensure!(name != DOT_DOT, LibcSnafu { errno: EINVAL });
+        ensure!(
+            name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+        if parent == ROOT_INO && name == TRASH_INODE_NAME || parent.is_trash() && ctx.uid != 0 {
+            return LibcSnafu { errno: EPERM }.fail()?;
+        }
+        self.meta.rmdir(ctx, parent, name).await.context(MetaSnafu)?;
+
+        Ok(())
     }
 
     pub async fn open(&self, ctx: &FuseContext, inode: Ino, flags: i32) -> Result<Opened> {
@@ -597,7 +613,8 @@ impl KisekiVFS {
         let _read_len = read_guard.read(offset as usize, buf.as_mut_slice()).await?;
         file_handle.remove_operation(&ctx).await;
         debug!(
-            "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: {:?}",
+            "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: \
+             {:?}",
             ino, fh, offset, size, _read_len
         );
         Ok(Bytes::from(buf))
@@ -815,7 +832,7 @@ impl KisekiVFS {
 /// Reply to a `open` or `opendir` call
 #[derive(Debug)]
 pub struct Opened {
-    pub fh: u64,
+    pub fh:    u64,
     pub flags: u32,
     pub entry: FullEntry,
 }

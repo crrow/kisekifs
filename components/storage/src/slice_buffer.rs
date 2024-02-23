@@ -121,13 +121,13 @@ fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: Block
 pub struct SliceBuffer {
     /// the slice length, the total write len of the slice.
     /// we may write some block we just write before.
-    length: usize,
+    length:         usize,
     // the last flushed block index.
     flushed_length: usize,
     /// Each block is variable size when we flush, from 128KB to 4MB.
     /// So we can have max CHUNK_SIZE / PAGE_SIZE blocks,
     /// but we use CHUNK_SIZE / BLOCK_SIZE to simplify the logic.
-    block_slots: Box<[Block]>,
+    block_slots:    Box<[Block]>,
     /// how many page do we have in the slice buffer.
     total_page_cnt: usize,
 }
@@ -135,9 +135,9 @@ pub struct SliceBuffer {
 impl SliceBuffer {
     pub fn new() -> Self {
         Self {
-            length: 0,
+            length:         0,
             flushed_length: 0,
-            block_slots: (0..(CHUNK_SIZE / BLOCK_SIZE))
+            block_slots:    (0..(CHUNK_SIZE / BLOCK_SIZE))
                 .map(|_| Block::Empty)
                 .collect(),
             total_page_cnt: 0,
@@ -303,22 +303,18 @@ impl SliceBuffer {
             .count()
     }
 
-    pub fn flushed_length(&self) -> usize {
-        self.flushed_length
-    }
+    pub fn flushed_length(&self) -> usize { self.flushed_length }
 
-    pub fn length(&self) -> usize {
-        self.length
-    }
+    pub fn length(&self) -> usize { self.length }
 
     pub fn status(&self) -> SliceBufferStatus {
         let full_cnt = self.full_block_cnt();
         SliceBufferStatus {
-            length: self.length,
-            logic_size: ReadableSize(self.length as u64),
-            page_cnt: self.total_page_cnt,
-            real_size: ReadableSize((self.total_page_cnt * PAGE_SIZE) as u64),
-            full_block_cnt: full_cnt,
+            length:            self.length,
+            logic_size:        ReadableSize(self.length as u64),
+            page_cnt:          self.total_page_cnt,
+            real_size:         ReadableSize((self.total_page_cnt * PAGE_SIZE) as u64),
+            full_block_cnt:    full_cnt,
             partial_block_cnt: self.block_slots.len() - full_cnt,
         }
     }
@@ -551,12 +547,12 @@ impl SliceBuffer {
 
 #[derive(Debug)]
 pub struct SliceBufferStatus {
-    pub length: usize,
-    pub logic_size: ReadableSize,
+    pub length:            usize,
+    pub logic_size:        ReadableSize,
     // how many pages we use in the slice buffer.
-    pub page_cnt: usize,
-    pub real_size: ReadableSize,
-    pub full_block_cnt: usize,
+    pub page_cnt:          usize,
+    pub real_size:         ReadableSize,
+    pub full_block_cnt:    usize,
     pub partial_block_cnt: usize,
 }
 
@@ -581,20 +577,18 @@ enum Block {
 struct DataBlock {
     // the written len of the block
     length: usize,
-    pages: Box<[Option<Page>]>,
+    pages:  Box<[Option<Page>]>,
 }
 
 impl Default for Block {
-    fn default() -> Self {
-        Block::Empty
-    }
+    fn default() -> Self { Block::Empty }
 }
 
 impl Block {
     fn new_data_block() -> Block {
         Block::Data(DataBlock {
             length: 0,
-            pages: (0..(BLOCK_SIZE / PAGE_SIZE)).map(|_| None).collect(),
+            pages:  (0..(BLOCK_SIZE / PAGE_SIZE)).map(|_| None).collect(),
         })
     }
 

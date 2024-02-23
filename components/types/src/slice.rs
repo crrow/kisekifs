@@ -18,25 +18,25 @@ use snafu::{ensure, Location, ResultExt, Snafu};
 #[snafu(visibility(pub))]
 pub enum Error {
     InvalidSliceBuf {
-        len: usize,
+        len:      usize,
         #[snafu(implicit)]
         location: Location,
     },
     InvalidSliceKeyStr {
-        str: String,
+        str:      String,
         #[snafu(implicit)]
         location: Location,
     },
     DecodeSliceBufError {
-        source: bincode::Error,
+        source:   bincode::Error,
         #[snafu(implicit)]
         location: Location,
     },
     ParseSliceKeyFailed {
-        str: String,
+        str:      String,
         #[snafu(implicit)]
         location: Location,
-        source: ParseIntError,
+        source:   ParseIntError,
     },
 }
 
@@ -53,9 +53,7 @@ pub const EMPTY_SLICE_ID: SliceID = 0;
 
 pub type SliceID = u64;
 
-pub fn random_slice_id() -> u64 {
-    ID_GENERATOR.next_id().expect("failed to generate id")
-}
+pub fn random_slice_id() -> u64 { ID_GENERATOR.next_id().expect("failed to generate id") }
 
 pub type OverlookedSlices = RangeMap<usize, Slice>;
 pub type OverlookedSlicesRef = Arc<OverlookedSlices>;
@@ -91,9 +89,7 @@ impl Slices {
         rm
     }
 
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
+    pub fn len(&self) -> usize { self.0.len() }
 }
 
 #[derive(Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -103,23 +99,23 @@ pub enum Slice {
         /// The chunk position of the slice.
         chunk_pos: u32,
         /// The unique id of the slice.
-        id: SliceID,
+        id:        SliceID,
         /// the underlying data size
-        size: u32,
-        _padding: u64,
+        size:      u32,
+        _padding:  u64,
     },
     /// The slice is borrowed from other slice, built by File RangeCopy.
     Borrowed {
         /// The chunk position of the slice.
         chunk_pos: u32,
         /// The unique id of the slice.
-        id: SliceID,
+        id:        SliceID,
         /// the underlying data size
-        size: u32,
+        size:      u32,
         /// The offset of the borrowed slice in the owned slice.
-        off: u32,
+        off:       u32,
         /// The length of the borrowed slice.
-        len: u32,
+        len:       u32,
     },
 }
 
@@ -162,9 +158,9 @@ impl Slice {
     pub fn new_owned(chunk_pos: usize, slice_id: u64, size: usize) -> Self {
         Slice::Owned {
             chunk_pos: chunk_pos as u32,
-            id: slice_id,
-            size: size as u32,
-            _padding: 0,
+            id:        slice_id,
+            size:      size as u32,
+            _padding:  0,
         }
     }
 
@@ -211,14 +207,14 @@ pub const SLICE_BYTES: usize = 28;
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord)]
 pub struct SliceKey {
-    pub slice_id: SliceID,
-    pub block_idx: usize,
+    pub slice_id:   SliceID,
+    pub block_idx:  usize,
     pub block_size: usize,
 }
 
 pub const EMPTY_SLICE_KEY: SliceKey = SliceKey {
-    slice_id: 0,
-    block_idx: 0,
+    slice_id:   0,
+    block_idx:  0,
     block_size: 0,
 };
 
@@ -258,18 +254,14 @@ impl SliceKey {
         }
     }
 
-    pub fn gen_path_for_local_sto(&self) -> String {
-        format!("{}", self)
-    }
+    pub fn gen_path_for_local_sto(&self) -> String { format!("{}", self) }
 
-    pub fn gen_path_for_object_sto(&self) -> String {
-        format!("chunks{}", self)
-    }
+    pub fn gen_path_for_object_sto(&self) -> String { format!("chunks{}", self) }
 
     pub fn random() -> Self {
         SliceKey {
-            slice_id: ID_GENERATOR.next_id().expect("failed to generate id"),
-            block_idx: 0,
+            slice_id:   ID_GENERATOR.next_id().expect("failed to generate id"),
+            block_idx:  0,
             block_size: 0,
         }
     }
@@ -288,13 +280,13 @@ impl SliceKey {
 impl TryFrom<&str> for SliceKey {
     type Error = Error;
 
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        SliceKey::from_str(s)
-    }
+    fn try_from(s: &str) -> Result<Self, Self::Error> { SliceKey::from_str(s) }
 }
 
 impl FromStr for SliceKey {
-    type Err = Error; // Define the error type for parsing
+    type Err = Error;
+
+    // Define the error type for parsing
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts = s
@@ -309,8 +301,8 @@ impl FromStr for SliceKey {
             InvalidSliceKeyStrSnafu { str: s.to_string() }
         );
         Ok(SliceKey {
-            slice_id: parts[2],
-            block_idx: parts[3] as usize,
+            slice_id:   parts[2],
+            block_idx:  parts[3] as usize,
             block_size: parts[4] as usize,
         })
     }
@@ -324,9 +316,9 @@ mod tests {
     fn slice_v2() {
         let slice = Slice::Owned {
             chunk_pos: 0,
-            id: 1,
-            size: 1024,
-            _padding: 0,
+            id:        1,
+            size:      1024,
+            _padding:  0,
         };
         let buf = bincode::serialize(&slice).unwrap();
         let slice2 = bincode::deserialize(&buf).unwrap();
@@ -336,10 +328,10 @@ mod tests {
 
         let slice = Slice::Borrowed {
             chunk_pos: 0,
-            id: 1,
-            size: 1024,
-            off: 0,
-            len: 1024,
+            id:        1,
+            size:      1024,
+            off:       0,
+            len:       1024,
         };
         let buf = bincode::serialize(&slice).unwrap();
         let slice2 = Slice::decode(&buf).unwrap();

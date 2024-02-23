@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr, sync::Arc};
+use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
@@ -9,11 +9,12 @@ use snafu::ensure;
 use strum_macros::EnumString;
 use tracing::debug;
 
-use crate::{backend::key::Counter, err::Result};
+use crate::{backend::key::Counter, context::FuseContext, err::Result};
 
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
+
 use crate::err::UnsupportedMetaDSNSnafu;
 
 // TODO: optimize me
@@ -61,9 +62,9 @@ pub trait Backend: Send + Sync + 'static {
     fn get_attr(&self, inode: Ino) -> Result<InodeAttr>;
     fn set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()>;
 
-    fn get_entry_info(&self, parent: Ino, name: &str) -> Result<DEntry>;
+    fn get_dentry(&self, parent: Ino, name: &str) -> Result<DEntry>;
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()>;
-    fn list_entry_info(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>>;
+    fn list_dentry(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>>;
 
     fn set_symlink(&self, inode: Ino, path: String) -> Result<()>;
     fn get_symlink(&self, inode: Ino) -> Result<String>;
@@ -76,4 +77,16 @@ pub trait Backend: Send + Sync + 'static {
 
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()>;
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat>;
+
+    /// [do_rmdir] removes a directory from the filesystem. The directory must
+    /// be empty. return the removed directory entry and its attribute
+    fn do_rmdir(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+        // skip updating attribute of a directory if the mtime difference is smaller
+        // than this value
+        skip_dir_mtime: Duration,
+    ) -> Result<(DEntry, InodeAttr)>;
 }

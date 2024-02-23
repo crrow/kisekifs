@@ -31,8 +31,8 @@ pub enum Entry {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FullEntry {
     pub inode: Ino,
-    pub name: String,
-    pub attr: InodeAttr,
+    pub name:  String,
+    pub attr:  InodeAttr,
 }
 
 impl FullEntry {
@@ -43,6 +43,7 @@ impl FullEntry {
             attr,
         }
     }
+
     pub fn to_fuse_attr<I: Into<u64>>(&self, ino: I) -> fuser::FileAttr {
         self.attr.to_fuse_attr(ino)
     }
@@ -52,9 +53,9 @@ impl FullEntry {
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct DEntry {
     pub parent: Ino,
-    pub name: String,
-    pub inode: Ino,
-    pub typ: FileType,
+    pub name:   String,
+    pub inode:  Ino,
+    pub typ:    FileType,
 }
 
 impl Entry {
@@ -62,18 +63,19 @@ impl Entry {
         vec![
             Entry::DEntry(DEntry {
                 parent: ZERO_INO,
-                name: DOT.to_string(),
-                inode: ino,
-                typ: FileType::Directory,
+                name:   DOT.to_string(),
+                inode:  ino,
+                typ:    FileType::Directory,
             }),
             Entry::DEntry(DEntry {
                 parent: ZERO_INO,
-                name: DOT_DOT.to_string(),
-                inode: parent,
-                typ: FileType::Directory,
+                name:   DOT_DOT.to_string(),
+                inode:  parent,
+                typ:    FileType::Directory,
             }),
         ]
     }
+
     pub fn get_inode(&self) -> Ino {
         match self {
             Entry::Full(e) => e.inode,

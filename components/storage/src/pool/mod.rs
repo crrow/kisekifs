@@ -42,10 +42,10 @@ const DEFAULT_DISK_PAGE_POOL_PATH: &str = "/tmp/kiseki.page_pool";
 
 #[derive(Debug, Default)]
 pub struct PagePoolBuilder {
-    page_size: usize,
+    page_size:       usize,
     memory_capacity: usize,
     // disk page pool is optional
-    disk_capacity: Option<usize>,
+    disk_capacity:   Option<usize>,
 }
 
 impl PagePoolBuilder {
@@ -53,14 +53,17 @@ impl PagePoolBuilder {
         self.page_size = page_size;
         self
     }
+
     pub fn with_memory_capacity(mut self, memory_capacity: usize) -> Self {
         self.memory_capacity = memory_capacity;
         self
     }
+
     pub fn with_disk_capacity(mut self, disk_capacity: usize) -> Self {
         self.disk_capacity = Some(disk_capacity);
         self
     }
+
     pub async fn build(self) -> Result<HybridPagePool> {
         let mut total_page_cnt = self.memory_capacity / self.page_size;
         let memory_pool = memory_pool::MemoryPagePool::new(self.page_size, self.memory_capacity);
@@ -92,20 +95,21 @@ impl PagePoolBuilder {
 /// disk. It is used to store pages in memory when the memory is sufficient, and
 /// to store pages on disk when the memory is insufficient.
 pub struct HybridPagePool {
-    page_size: usize,
+    page_size:       usize,
     memory_capacity: usize,
-    disk_capacity: usize,
-    total_page_cnt: usize,
+    disk_capacity:   usize,
+    total_page_cnt:  usize,
 
     memory_pool: Arc<memory_pool::MemoryPagePool>,
-    disk_pool: Option<Arc<disk_pool::DiskPagePool>>,
+    disk_pool:   Option<Arc<disk_pool::DiskPagePool>>,
 }
 
 impl Debug for HybridPagePool {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "HybridPagePool {{ page_size: {}, memory_capacity: {}, disk_capacity: {}, disk_path: {}, remain_page_cnt: {}, total_page_cnt: {} }}",
+            "HybridPagePool {{ page_size: {}, memory_capacity: {}, disk_capacity: {}, disk_path: \
+             {}, remain_page_cnt: {}, total_page_cnt: {} }}",
             ReadableSize(self.page_size as u64),
             ReadableSize(self.memory_capacity as u64),
             ReadableSize(self.disk_capacity as u64),
@@ -130,6 +134,7 @@ impl HybridPagePool {
 
         None
     }
+
     /// acquire_page will wait and  acquire a page from the page pool.
     pub async fn acquire_page(self: &Arc<Self>) -> Page {
         // let disk_pool = self.disk_pool.as_ref().unwrap();
@@ -160,17 +165,11 @@ impl HybridPagePool {
                 .map_or(0, |pool| pool.remain_page_cnt())
     }
 
-    pub fn total_page_cnt(&self) -> usize {
-        self.total_page_cnt
-    }
+    pub fn total_page_cnt(&self) -> usize { self.total_page_cnt }
 
-    pub fn capacity(&self) -> usize {
-        self.memory_capacity + self.disk_capacity
-    }
+    pub fn capacity(&self) -> usize { self.memory_capacity + self.disk_capacity }
 
-    pub fn free_ratio(&self) -> f64 {
-        self.remain() as f64 / self.total_page_cnt as f64
-    }
+    pub fn free_ratio(&self) -> f64 { self.remain() as f64 / self.total_page_cnt as f64 }
 }
 
 pub enum Page {
@@ -193,6 +192,7 @@ impl Page {
             Page::Disk(page) => page.copy_to_writer(offset, length, writer).await,
         }
     }
+
     pub(crate) async fn copy_from_reader<R>(
         &self,
         offset: usize,

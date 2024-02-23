@@ -47,21 +47,20 @@ pub(crate) type HandleTableRef = Arc<HandleTable>;
 
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
-    handles: DashMap<Ino, DashMap<FH, Handle>>,
-    _next_fh: AtomicU64,
+    handles:      DashMap<Ino, DashMap<FH, Handle>>,
+    _next_fh:     AtomicU64,
 }
 
 impl HandleTable {
     pub(crate) fn new(data_manager_ref: DataManagerRef) -> HandleTableRef {
         Arc::new(HandleTable {
             data_manager: data_manager_ref,
-            handles: DashMap::new(),
-            _next_fh: AtomicU64::new(1),
+            handles:      DashMap::new(),
+            _next_fh:     AtomicU64::new(1),
         })
     }
-    fn next_fh(&self) -> FH {
-        self._next_fh.fetch_add(1, Ordering::SeqCst)
-    }
+
+    fn next_fh(&self) -> FH { self._next_fh.fetch_add(1, Ordering::SeqCst) }
 
     pub(crate) fn new_dir_handle(self: &Arc<Self>, inode: Ino) -> FH {
         let fh = self.next_fh();
@@ -72,8 +71,8 @@ impl HandleTable {
                 fh,
                 inode,
                 inner: RwLock::new(DirHandleInner {
-                    children: Vec::new(),
-                    read_at: None,
+                    children:  Vec::new(),
+                    read_at:   None,
                     ofd_owner: 0,
                 }),
             })),
@@ -143,6 +142,7 @@ impl Handle {
             Handle::Dir(h) => h.fh,
         }
     }
+
     pub(crate) fn get_inode(&self) -> Ino {
         match self {
             Handle::File(h) => h.inode,
@@ -173,30 +173,30 @@ impl Handle {
 }
 
 pub(crate) struct FileHandle {
-    fh: FH,
+    fh:    FH,
     // cannot be changed
     inode: Ino, // cannot be changed
 
-    reader: Arc<FileReader>,
-    reader_cnt: Arc<AtomicUsize>,
+    reader:        Arc<FileReader>,
+    reader_cnt:    Arc<AtomicUsize>,
     reader_notify: Arc<Notify>,
 
     // The underlying data structure for flushing and writing.
-    writer: Option<Arc<FileWriter>>,
+    writer:                Option<Arc<FileWriter>>,
     // record how many write operations are waiting
-    write_wait_cnt: Arc<AtomicUsize>,
+    write_wait_cnt:        Arc<AtomicUsize>,
     // is someone holding the exclusive lock right now?
-    exclusive_locking: Arc<AtomicBool>,
+    exclusive_locking:     Arc<AtomicBool>,
     // notify when exclusive lock is released
     exclusive_lock_notify: Arc<Notify>,
     // pid -> FuseContext
-    operations: RwLock<HashMap<u32, HashMap<u64, Arc<FuseContext>>>>,
+    operations:            RwLock<HashMap<u32, HashMap<u64, Arc<FuseContext>>>>,
 
     // posix-lock
     pub(crate) locks: AtomicU8,
-    flock_owner: AtomicU64,
+    flock_owner:      AtomicU64,
     // kernel 3.1- does not pass lock_owner in release()
-    ofd_owner: AtomicU64,
+    ofd_owner:        AtomicU64,
 
     closed: AtomicBool,
 }
@@ -225,15 +225,14 @@ impl FileHandle {
             closed: Default::default(),
         }
     }
+
     pub(crate) fn try_set_ofd_owner(&self, lock_owner: u64) {
         let _ = self
             .ofd_owner
             .compare_exchange(lock_owner, 0, Ordering::AcqRel, Ordering::Relaxed);
     }
 
-    pub(crate) fn has_writer(&self) -> bool {
-        self.writer.is_some()
-    }
+    pub(crate) fn has_writer(&self) -> bool { self.writer.is_some() }
 
     pub(crate) async fn read_lock(&self, ctx: Arc<FuseContext>) -> Option<FileHandleReadGuard> {
         let cancel_token = ctx.cancellation_token.clone();
@@ -417,10 +416,10 @@ impl FileHandle {
 }
 
 pub(crate) struct FileHandleWriteGuard {
-    file_writer: Arc<FileWriter>,
-    exclusive_locking: Arc<AtomicBool>,
+    file_writer:           Arc<FileWriter>,
+    exclusive_locking:     Arc<AtomicBool>,
     exclusive_lock_notify: Arc<Notify>,
-    ctx: Arc<FuseContext>,
+    ctx:                   Arc<FuseContext>,
 }
 
 impl FileHandleWriteGuard {
@@ -428,13 +427,9 @@ impl FileHandleWriteGuard {
         self.file_writer.write(offset, src).await
     }
 
-    pub(crate) async fn flush(&self) -> Result<()> {
-        self.file_writer.finish().await
-    }
+    pub(crate) async fn flush(&self) -> Result<()> { self.file_writer.finish().await }
 
-    pub(crate) fn get_length(&self) -> usize {
-        self.file_writer.get_length()
-    }
+    pub(crate) fn get_length(&self) -> usize { self.file_writer.get_length() }
 }
 
 impl Drop for FileHandleWriteGuard {
@@ -446,10 +441,10 @@ impl Drop for FileHandleWriteGuard {
 }
 
 pub(crate) struct FileHandleReadGuard {
-    reader: Arc<FileReader>,
-    reader_cnt: Arc<AtomicUsize>,
+    reader:        Arc<FileReader>,
+    reader_cnt:    Arc<AtomicUsize>,
     reader_notify: Arc<Notify>,
-    ctx: Arc<FuseContext>,
+    ctx:           Arc<FuseContext>,
 }
 
 impl FileHandleReadGuard {
@@ -467,15 +462,13 @@ impl Drop for FileHandleReadGuard {
 }
 
 pub(crate) struct DirHandle {
-    fh: FH,
-    // cannot be changed
-    inode: Ino,
-    // cannot be changed
+    fh:               FH,
+    inode:            Ino,
     pub(crate) inner: RwLock<DirHandleInner>,
 }
 
 pub(crate) struct DirHandleInner {
-    pub(crate) children: Vec<Entry>,
-    pub(crate) read_at: Option<Instant>,
+    pub(crate) children:  Vec<Entry>,
+    pub(crate) read_at:   Option<Instant>,
     pub(crate) ofd_owner: u64, // OFD lock
 }

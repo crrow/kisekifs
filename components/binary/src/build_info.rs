@@ -43,6 +43,4 @@ pub const FULL_VERSION: &str = {
         const_format::concatcp!(built::PKG_VERSION, UNOFFICIAL_SUFFIX)
     }
 };
-const fn is_official_release() -> bool {
-    option_env!("KISEKI_RELEASE").is_some()
-}
+const fn is_official_release() -> bool { option_env!("KISEKI_RELEASE").is_some() }
