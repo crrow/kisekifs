@@ -14,6 +14,7 @@ use crate::{backend::key::Counter, err::Result};
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
+
 use crate::err::UnsupportedMetaDSNSnafu;
 
 // TODO: optimize me
@@ -61,9 +62,9 @@ pub trait Backend: Send + Sync + 'static {
     fn get_attr(&self, inode: Ino) -> Result<InodeAttr>;
     fn set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()>;
 
-    fn get_entry_info(&self, parent: Ino, name: &str) -> Result<DEntry>;
+    fn get_dentry(&self, parent: Ino, name: &str) -> Result<DEntry>;
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()>;
-    fn list_entry_info(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>>;
+    fn list_dentry(&self, parent: Ino, limit: i64) -> Result<Vec<DEntry>>;
 
     fn set_symlink(&self, inode: Ino, path: String) -> Result<()>;
     fn get_symlink(&self, inode: Ino) -> Result<String>;
@@ -77,5 +78,5 @@ pub trait Backend: Send + Sync + 'static {
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()>;
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat>;
 
-    fn do_rmdir(&self, parent: Ino, name: &str) -> Result<Ino>;
+    fn do_rmdir(&self, parent: Ino, name: &str, check: Box<dyn Fn(&InodeAttr, u8) -> Result<()>>) -> Result<Ino>;
 }

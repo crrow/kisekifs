@@ -55,7 +55,7 @@ pub struct InodeAttr {
     /// Kind of file (directory, file, pipe, etc)
     pub kind:       FileType,
     /// permission mode
-    pub perm:       u16,
+    pub mode:       u32,
     /// owner id
     pub uid:        u32,
     /// group id of owner
@@ -95,7 +95,7 @@ impl InodeAttr {
         Self {
             flags:      0,
             kind:       FileType::Directory,
-            perm:       if is_trash { 0o555 } else { 0o777 },
+            mode:       if is_trash { 0o555 } else { 0o777 },
             uid:        0,
             gid:        0,
             rdev:       0,
@@ -115,8 +115,8 @@ impl InodeAttr {
         self
     }
 
-    pub fn set_perm(&mut self, perm: u16) -> &mut Self {
-        self.perm = perm;
+    pub fn set_mode(&mut self, perm: u32) -> &mut Self {
+        self.mode = perm;
         self
     }
 
@@ -188,7 +188,7 @@ impl InodeAttr {
             // If uid is 0 (root user), returns 0x7 (full access) unconditionally.
             return 0x7;
         }
-        let perm = self.perm;
+        let perm = self.mode;
         if uid == self.uid {
             // If uid matches attr.Uid (file owner),
             // extracts owner permissions by shifting mode 6 bits to the right and masking
@@ -221,8 +221,11 @@ impl InodeAttr {
             ctime:   self.ctime,
             crtime:  self.crtime,
             kind:    self.kind,
-            // TODO juice combine the file type and file perm together.
-            perm:    self.perm,
+            // POSIX-compliant file systems typically represent file types and permissions together
+            // in a single attribute, known as the mode. This is a widely recognized convention
+            // that aligns with how file attributes are managed in traditional UNIX-like operating
+            // systems
+            perm:    make_smode(&self.kind, self.mode),
             nlink:   self.nlink,
             uid:     self.uid,
             gid:     self.gid,
@@ -248,6 +251,24 @@ impl InodeAttr {
     }
 }
 
+fn get_mode_t_from_filetype(kind: &FileType) -> libc::mode_t {
+    match kind {
+        FileType::Directory => libc::S_IFDIR,
+        FileType::RegularFile => libc::S_IFREG,
+        FileType::Symlink => libc::S_IFLNK,
+        FileType::BlockDevice => libc::S_IFBLK,
+        FileType::CharDevice => libc::S_IFCHR,
+        FileType::NamedPipe => libc::S_IFIFO,
+        FileType::Socket => libc::S_IFSOCK,
+    }
+}
+
+fn make_smode(kind: &FileType, perm: u32) -> u16 {
+    let mode = get_mode_t_from_filetype(kind);
+    let r = mode | perm;
+    r as u16
+}
+
 impl Default for InodeAttr {
     fn default() -> Self {
         let now = SystemTime::now();
@@ -257,7 +278,7 @@ impl Default for InodeAttr {
             ctime:      now,
             crtime:     now,
             kind:       FileType::RegularFile,
-            perm:       0,
+            mode:       0,
             nlink:      1,
             length:     0,
             parent:     Default::default(),
@@ -277,17 +298,30 @@ mod tests {
     #[test]
     fn attr_modify() {
         let mut attr = InodeAttr::default()
-            .set_perm(0o777)
+            .set_mode(0o777)
             .set_kind(FileType::Directory)
             .set_gid(11)
             .set_uid(22)
             .to_owned();
         attr.set_parent(Ino::from(1));
 
-        assert_eq!(attr.perm, 0o777);
+        assert_eq!(attr.mode, 0o777);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.gid, 11);
         assert_eq!(attr.uid, 22);
         assert_eq!(attr.parent, Ino::from(1));
+
+        let mode = 0o2777u32;
+        let mode_u16 = mode as u16;
+        assert_eq!(mode_u16, 0o2777u16);
+        // println!("{:?}", mode as u16)
+    }
+
+    #[test]
+    fn smode() {
+        let mode = get_mode_t_from_filetype(&FileType::Directory);
+        let new_mode = mode | 0o777;
+        let new_mode_u16 = new_mode as u16;
+        println!("{:?}, {:?}", new_mode, new_mode_u16);
     }
 }

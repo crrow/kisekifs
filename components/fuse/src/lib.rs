@@ -322,6 +322,18 @@ impl Filesystem for KisekiFuse {
         reply.ok();
     }
 
+    /// In UNIX-like operating systems, when a new file or directory is created,
+    /// its permissions are typically set based on the process's umask value.
+    ///
+    /// The umask is a bitmask that specifies which permissions should be
+    /// removed from the default permissions assigned to newly created files and
+    /// directories.
+    ///
+    /// For example, if mode is set to 0666 (read and write
+    /// permissions for owner, group, and others), and umask is set to
+    /// 0200, it might indicate that the write permission for the owner
+    /// should be removed, resulting in a final mode of 0466 (read-only for
+    /// owner, read and write for group and others).
     #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
     fn mknod(
         &mut self,
@@ -343,8 +355,8 @@ impl Filesystem for KisekiFuse {
                     ctx.clone(),
                     Ino(parent),
                     name,
-                    mode as libc::mode_t,
-                    umask as u16,
+                    mode,
+                    umask,
                     rdev,
                 )
                 .in_current_span(),
@@ -374,8 +386,8 @@ impl Filesystem for KisekiFuse {
                     ctx.clone(),
                     Ino(parent),
                     &name,
-                    mode as u16,
-                    umask as u16,
+                    mode,
+                    umask,
                     flags,
                 )
                 .in_current_span(),
@@ -446,7 +458,7 @@ impl Filesystem for KisekiFuse {
         let name = name.to_string_lossy().to_string();
         match self.runtime.block_on(
             self.vfs
-                .mkdir(ctx.clone(), Ino(parent), &name, mode as u16, umask as u16)
+                .mkdir(ctx.clone(), Ino(parent), &name, mode, umask)
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),

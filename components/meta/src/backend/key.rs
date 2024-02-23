@@ -61,7 +61,9 @@ pub fn attr(inode: Ino) -> Vec<u8> { format!("A{:0>8}I", inode.0).into_bytes() }
 pub fn dentry(parent: Ino, name: &str) -> Vec<u8> {
     format!("A{:0>8}D/{}", parent.0, name).into_bytes()
 }
-pub fn dentry_prefix(parent: Ino) -> Vec<u8> { format!("A{:0>8}D/", parent.0).into_bytes() }
+pub fn dentry_prefix(parent: Ino) -> Vec<u8> {
+    format!("A{:0>8}D/", parent.0).into_bytes()
+}
 
 pub fn symlink(inode: Ino) -> Vec<u8> { format!("A{:0>8}S", inode.0).into_bytes() }
 

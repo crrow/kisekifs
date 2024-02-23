@@ -38,28 +38,28 @@ impl InternalNodeTable {
         let control_inode: InternalNode = InternalNode(FullEntry {
             inode: CONTROL_INODE,
             name:  CONTROL_INODE_NAME.to_string(),
-            attr:  InodeAttr::default().set_perm(0o666).to_owned(),
+            attr:  InodeAttr::default().set_mode(0o666).to_owned(),
         });
         let log_inode: InternalNode = InternalNode(FullEntry {
             inode: LOG_INODE,
             name:  LOG_INODE_NAME.to_string(),
-            attr:  InodeAttr::default().set_perm(0o400).to_owned(),
+            attr:  InodeAttr::default().set_mode(0o400).to_owned(),
         });
         let stats_inode: InternalNode = InternalNode(FullEntry {
             inode: STATS_INODE,
             name:  STATS_INODE_NAME.to_string(),
-            attr:  InodeAttr::default().set_perm(0o400).to_owned(),
+            attr:  InodeAttr::default().set_mode(0o400).to_owned(),
         });
         let config_inode: InternalNode = InternalNode(FullEntry {
             inode: CONFIG_INODE,
             name:  CONFIG_INODE_NAME.to_string(),
-            attr:  InodeAttr::default().set_perm(0o400).to_owned(),
+            attr:  InodeAttr::default().set_mode(0o400).to_owned(),
         });
         let trash_inode: InternalNode = InternalNode(FullEntry {
             inode: MAX_INTERNAL_INODE,
             name:  TRASH_INODE_NAME.to_string(),
             attr:  InodeAttr::default()
-                .set_perm(0o555)
+                .set_mode(0o555)
                 .set_kind(fuser::FileType::Directory)
                 .set_nlink(2)
                 .set_uid(kiseki_utils::uid())

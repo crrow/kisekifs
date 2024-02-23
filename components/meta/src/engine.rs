@@ -106,7 +106,7 @@ pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
     if format.trash_days > 0 {
         if let Err(e) = backend.get_attr(TRASH_INODE) {
             if e.is_not_found() {
-                basic_attr.set_perm(0o555);
+                basic_attr.set_mode(0o555);
                 backend.set_attr(TRASH_INODE, &basic_attr)?;
             } else {
                 return Err(e);
@@ -115,7 +115,7 @@ pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
     }
     backend.set_format(&format)?;
     if need_init_root {
-        basic_attr.set_perm(0o777);
+        basic_attr.set_mode(0o777);
         backend.set_attr(ROOT_INO, &basic_attr)?;
         backend.increase_count_by(Counter::NextInode, 2)?;
     }
@@ -242,7 +242,7 @@ impl MetaEngine {
     }
 
     fn do_lookup(&self, parent: Ino, name: &str) -> Result<(Ino, InodeAttr)> {
-        let entry_info = self.backend.get_entry_info(parent, name)?;
+        let entry_info = self.backend.get_dentry(parent, name)?;
         let inode = entry_info.inode;
         let attr = self.backend.get_attr(inode)?;
         Ok((inode, attr))
@@ -311,7 +311,7 @@ impl MetaEngine {
         _limit: i64,
     ) -> Result<()> {
         let backend = self.backend.clone();
-        let entries = tokio::task::spawn_blocking(move || backend.list_entry_info(inode, _limit))
+        let entries = tokio::task::spawn_blocking(move || backend.list_dentry(inode, _limit))
             .await
             .context(TokioJoinSnafu)??;
         // let entries = self.backend.list_entry_info(inode, _limit)?;
@@ -368,8 +368,8 @@ impl MetaEngine {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
-        mode: u16,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
     ) -> Result<(Ino, InodeAttr)> {
         self.mknod(
             ctx,
@@ -377,7 +377,7 @@ impl MetaEngine {
             name,
             FileType::Directory,
             mode,
-            cumask,
+            umask,
             0,
             String::new(),
         )
@@ -389,7 +389,7 @@ impl MetaEngine {
     }
 
     // Mknod creates a node in a directory with given name, type and permissions.
-    #[instrument(skip(self, ctx), fields(parent = ? parent, name = ? name, typ = ? typ, mode = ? mode, cumask = ? cumask, rdev = ? rdev, path = ? path))]
+    #[instrument(skip(self, ctx), fields(parent = ? parent, name = ? name, typ = ? typ, mode = ? mode, cumask = ? umask, rdev = ? rdev, path = ? path))]
     #[allow(clippy::too_many_arguments)]
     pub async fn mknod(
         &self,
@@ -397,8 +397,8 @@ impl MetaEngine {
         parent: Ino,
         name: &str,
         typ: FileType,
-        mode: u16,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
         rdev: u32,
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
@@ -416,7 +416,7 @@ impl MetaEngine {
 
         let parent = self.check_root(parent);
         let r = self
-            .do_mknod(ctx, parent, name, typ, mode, cumask, rdev, path)
+            .do_mknod(ctx, parent, name, typ, mode, umask, rdev, path)
             .await?;
 
         self.fs_stat_file_count.fetch_add(1, Ordering::AcqRel);
@@ -432,8 +432,8 @@ impl MetaEngine {
         parent: Ino,
         name: &str,
         typ: FileType,
-        mode: u16,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
         rdev: u32,
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
@@ -446,7 +446,7 @@ impl MetaEngine {
         debug!("new inode: {}", inode);
 
         let mut attr = InodeAttr::default()
-            .set_perm(mode & !cumask)
+            .set_mode(mode & !umask) // erase umask
             .set_kind(typ)
             .set_gid(ctx.gid)
             .set_uid(ctx.uid)
@@ -492,7 +492,7 @@ impl MetaEngine {
         );
 
         // check if the entry already exists
-        if let Err(e) = self.backend.get_entry_info(parent, name) {
+        if let Err(e) = self.backend.get_dentry(parent, name) {
             if !e.is_not_found() {
                 return Err(e);
             }
@@ -528,16 +528,16 @@ impl MetaEngine {
         // TODO: review the logic here
         #[cfg(target_os = "linux")]
         {
-            if parent_attr.perm & 0o2000 != 0 {
+            if parent_attr.mode & 0o2000 != 0 {
                 attr.set_gid(parent_attr.gid);
             }
             if typ == FileType::Directory {
-                attr.perm |= 0o2000;
-            } else if attr.perm & 0o2010 == 0o2010
+                attr.mode |= 0o2000;
+            } else if attr.mode & 0o2010 == 0o2010
                 && ctx.uid != 0
                 && !ctx.gid_list.contains(&parent_attr.gid)
             {
-                attr.perm &= !0o2010;
+                attr.mode &= !0o2010;
             }
         }
 
@@ -561,13 +561,13 @@ impl MetaEngine {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
-        mode: u16,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
         flags: i32,
     ) -> Result<(Ino, InodeAttr)> {
         debug!(
-            "create with parent {:?}, name {:?}, mode {:?}, cumask {:?}, flags {:?}",
-            parent, name, mode, cumask, flags
+            "create with parent {:?}, name {:?}, mode {:?}, umask {:?}, flags {:?}",
+            parent, name, mode, umask, flags
         );
         let mut x = match self
             .mknod(
@@ -576,7 +576,7 @@ impl MetaEngine {
                 name,
                 FileType::RegularFile,
                 mode,
-                cumask,
+                umask,
                 0,
                 String::new(),
             )
@@ -647,21 +647,21 @@ impl MetaEngine {
         {
             // This operation isolates the file permission bits representing the user's file
             // type (setuid, setgid, or sticky bit).
-            dirty_attr.perm |= cur.perm & 0o6000;
+            dirty_attr.mode |= cur.mode & 0o6000;
         }
         let mut changed = false;
-        if cur.perm & 0o6000 != 0 && flags.contains(SetAttrFlags::UID | SetAttrFlags::GID) {
+        if cur.mode & 0o6000 != 0 && flags.contains(SetAttrFlags::UID | SetAttrFlags::GID) {
             #[cfg(target_os = "linux")]
             {
                 if !dirty_attr.is_dir() {
-                    if ctx.uid != 0 || (dirty_attr.perm >> 3) & 1 != 0 {
+                    if ctx.uid != 0 || (dirty_attr.mode >> 3) & 1 != 0 {
                         // clear SUID and SGID
-                        dirty_attr.perm &= 0o1777; // WHY ?
-                        new_attr.perm &= 0o1777;
+                        dirty_attr.mode &= 0o1777; // WHY ?
+                        new_attr.mode &= 0o1777;
                     } else {
                         // keep SGID if the file is non-group-executable
-                        dirty_attr.perm &= 0o3777;
-                        new_attr.perm &= 0o3777;
+                        dirty_attr.mode &= 0o3777;
+                        new_attr.mode &= 0o3777;
                     }
                 }
             }
@@ -692,20 +692,20 @@ impl MetaEngine {
             changed = true;
         }
         if flags.contains(SetAttrFlags::MODE) {
-            if ctx.uid != 0 && new_attr.perm & 0o2000 != 0 && ctx.uid != cur.gid {
-                new_attr.perm &= 0o5777;
+            if ctx.uid != 0 && new_attr.mode & 0o2000 != 0 && ctx.uid != cur.gid {
+                new_attr.mode &= 0o5777;
             }
-            if cur.perm != new_attr.perm {
+            if cur.mode != new_attr.mode {
                 if ctx.uid != 0
                     && ctx.uid != cur.uid
-                    && (cur.perm & 0o1777 != new_attr.perm & 0o1777
-                        || new_attr.perm & 0o2000 > cur.perm & 0o2000
-                        || new_attr.perm & 0o4000 > cur.perm & 0o4000)
+                    && (cur.mode & 0o1777 != new_attr.mode & 0o1777
+                        || new_attr.mode & 0o2000 > cur.mode & 0o2000
+                        || new_attr.mode & 0o4000 > cur.mode & 0o4000)
                 {
                     LibcSnafu { errno: libc::EPERM }.fail()?;
                 }
 
-                dirty_attr.perm = new_attr.perm;
+                dirty_attr.mode = new_attr.mode;
                 changed = true;
             }
         }
@@ -950,7 +950,7 @@ impl MetaEngine {
         let slices = Arc::new(slices);
         // TODO: build cache.
         self.open_files
-            .update_chunk_slices_info(inode, chunk_index, slices.clone());
+            .update_chunk_slices_info(inode, chunk_index, slices.clone()).await;
 
         Ok(Some(slices))
     }

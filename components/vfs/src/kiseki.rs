@@ -287,8 +287,8 @@ impl KisekiVFS {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: String,
-        mode: mode_t,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
         rdev: u32,
     ) -> Result<FullEntry> {
         if parent.is_root() && self.internal_nodes.contains_name(&name) {
@@ -304,7 +304,6 @@ impl KisekiVFS {
             .fail()?;
         }
         let file_type = get_file_type(mode)?;
-        let mode = mode as u16 & 0o777;
 
         let (ino, attr) = self
             .meta
@@ -313,8 +312,8 @@ impl KisekiVFS {
                 parent,
                 &name,
                 file_type,
-                mode,
-                cumask,
+                mode & 0o7777,
+                umask,
                 rdev,
                 String::new(),
             )
@@ -328,8 +327,8 @@ impl KisekiVFS {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
-        mode: u16,
-        cumask: u16,
+        mode: u32,
+        umask: u32,
         flags: libc::c_int,
     ) -> Result<(FullEntry, FH)> {
         debug!("fs:create with parent {:?} name {:?}", parent, name);
@@ -348,7 +347,7 @@ impl KisekiVFS {
 
         let (inode, attr) = self
             .meta
-            .create(ctx, parent, name, mode & 0o777, cumask, flags)
+            .create(ctx, parent, name, mode & 0o7777, umask, flags)
             .await
             .context(MetaSnafu)?;
 
@@ -399,7 +398,7 @@ impl KisekiVFS {
         }
         if flags.contains(SetAttrFlags::MODE) {
             if let Some(mode) = mode {
-                new_attr.perm = mode as u16 & 0o777;
+                new_attr.mode = mode & 0o7777;
             } else {
                 return LibcSnafu { errno: EINVAL }.fail()?;
             }
@@ -483,8 +482,8 @@ impl KisekiVFS {
         ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
-        mode: u16,
-        umask: u16,
+        mode: u32,
+        umask: u32,
     ) -> Result<FullEntry> {
         debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
         if parent.is_root() && self.internal_nodes.contains_name(name) {
