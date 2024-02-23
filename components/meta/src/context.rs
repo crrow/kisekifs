@@ -39,7 +39,7 @@ impl<'a> From<&'a kiseki_types::Request<'a>> for FuseContext {
 }
 
 impl FuseContext {
-    pub fn check(&self, _inode: Ino, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
+    pub fn check(&self, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
         if self.uid == 0 {
             return Ok(());
         }

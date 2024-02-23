@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr, sync::Arc};
+use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
@@ -9,7 +9,7 @@ use snafu::ensure;
 use strum_macros::EnumString;
 use tracing::debug;
 
-use crate::{backend::key::Counter, err::Result};
+use crate::{backend::key::Counter, context::FuseContext, err::Result};
 
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
@@ -78,5 +78,15 @@ pub trait Backend: Send + Sync + 'static {
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()>;
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat>;
 
-    fn do_rmdir(&self, parent: Ino, name: &str, check: Box<dyn Fn(&InodeAttr, u8) -> Result<()>>) -> Result<Ino>;
+    /// [do_rmdir] removes a directory from the filesystem. The directory must
+    /// be empty. return the removed directory entry and its attribute
+    fn do_rmdir(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+        // skip updating attribute of a directory if the mtime difference is smaller
+        // than this value
+        skip_dir_mtime: Duration,
+    ) -> Result<(DEntry, InodeAttr)>;
 }

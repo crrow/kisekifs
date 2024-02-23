@@ -32,7 +32,7 @@ use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
     ino::{Ino, CONTROL_INODE, ROOT_INO},
-    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
+    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME, TRASH_INODE_NAME},
     slice::SliceID,
     ToErrno,
 };
@@ -42,7 +42,6 @@ use scopeguard::defer;
 use snafu::{ensure, location, Location, OptionExt, ResultExt};
 use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, error, info, instrument, trace, Instrument};
-use kiseki_types::internal_nodes::TRASH_INODE_NAME;
 
 use crate::{
     config::Config,
@@ -226,7 +225,7 @@ impl KisekiVFS {
                     _ => 0, // do nothing, // Handle unexpected flags
                 };
             let attr = self.meta.get_attr(inode).await?;
-            ctx.check(inode, &attr, mmask)?;
+            ctx.check(&attr, mmask)?;
         }
         Ok(self.handle_table.new_dir_handle(inode))
     }
@@ -520,8 +519,7 @@ impl KisekiVFS {
         if parent == ROOT_INO && name == TRASH_INODE_NAME || parent.is_trash() && ctx.uid != 0 {
             return LibcSnafu { errno: EPERM }.fail()?;
         }
-
-        self.meta.rmdir(parent, name).await.context(MetaSnafu)?;
+        self.meta.rmdir(ctx, parent, name).await.context(MetaSnafu)?;
 
         Ok(())
     }

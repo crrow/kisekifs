@@ -1,7 +1,9 @@
 use std::{
     fmt::{Debug, Formatter},
+    ops::Sub,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 use kiseki_common::ChunkIndex;
@@ -9,15 +11,18 @@ use kiseki_types::{
     attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat::DirStat,
     FileType,
 };
-use rocksdb::{DBAccess, MultiThreaded};
+use rocksdb::{DBAccess, MultiThreaded, WriteBatchWithTransaction};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing::debug;
 
 use super::{key, key::Counter, Backend};
-use crate::err::{
-    model_err, model_err::ModelKind, InvalidSettingSnafu, LibcSnafu, ModelSnafu, Result,
-    RocksdbSnafu, UninitializedEngineSnafu,
+use crate::{
+    context::FuseContext,
+    err::{
+        model_err, model_err::ModelKind, InvalidSettingSnafu, LibcSnafu, ModelSnafu, Result,
+        RocksdbSnafu, UninitializedEngineSnafu,
+    },
 };
 
 #[derive(Debug, Default)]
@@ -360,10 +365,11 @@ impl Backend for RocksdbBackend {
 
     fn do_rmdir(
         &self,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
-        check: Box<dyn Fn(&InodeAttr, u8) -> Result<()>>,
-    ) -> Result<Ino> {
+        skip_dir_mtime: Duration,
+    ) -> Result<(DEntry, InodeAttr)> {
         let txn = self.db.transaction();
         let entry_info = Self::do_get_dentry(&txn, parent, name)?;
         ensure!(
@@ -373,7 +379,7 @@ impl Backend for RocksdbBackend {
             }
         );
         // get parent and child's attr
-        let parent_attr = Self::do_get_attr(&txn, parent)?;
+        let mut parent_attr = Self::do_get_attr(&txn, parent)?;
         ensure!(
             // parent must be dir.
             parent_attr.is_dir(),
@@ -390,7 +396,8 @@ impl Backend for RocksdbBackend {
                 errno: libc::ENOTDIR,
             }
         );
-        check(
+
+        ctx.check(
             &parent_attr,
             kiseki_common::MODE_MASK_W | kiseki_common::MODE_MASK_X,
         )?;
@@ -406,9 +413,58 @@ impl Backend for RocksdbBackend {
                 errno: libc::ENOTEMPTY,
             }
         );
+        // The octal number 01000 specifically represents the setuid bit in POSIX
+        // permissions. In a file's mode, the setuid bit is represented by the fourth
+        // bit from the left. When set, it indicates that the file should be executed
+        // with the privileges of its owner, rather than the privileges of the user who
+        // executed it. This is commonly used for executable files that need special
+        // permissions to perform certain tasks, such as changing passwords or accessing
+        // sensitive resources.
+        if ctx.uid != 0
+            && parent_attr.mode & 0o1000 != 0
+            && ctx.uid != parent_attr.uid
+            && ctx.uid != child_attr.uid
+        {
+            return LibcSnafu {
+                errno: libc::EACCES,
+            }
+            .fail();
+        }
+        parent_attr.nlink -= 1;
+        let now = SystemTime::now();
 
+        let need_update_parent_attr = if now
+            .duration_since(parent_attr.mtime)
+            .expect("found mtime in the future")
+            >= skip_dir_mtime
+        {
+            parent_attr.mtime = now;
+            parent_attr.ctime = now;
+            true
+        } else {
+            false
+        };
 
-        todo!()
+        let mut batch = txn.get_writebatch();
+        // delete entry
+        batch.delete(key::dentry(parent, name));
+        // delete inode attr
+        batch.delete(key::attr(entry_info.inode));
+        if need_update_parent_attr {
+            let parent_attr_key = key::attr(parent);
+            // update parent attr
+            batch.put(
+                &parent_attr_key,
+                bincode::serialize(&parent_attr)
+                    .context(model_err::CorruptionSnafu {
+                        kind: ModelKind::Attr,
+                        key:  String::from_utf8_lossy(&parent_attr_key).to_string(),
+                    })
+                    .context(ModelSnafu)?,
+            );
+        }
+        self.db.write(batch).context(RocksdbSnafu)?;
+        Ok((entry_info, child_attr))
     }
 }
 

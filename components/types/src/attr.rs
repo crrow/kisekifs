@@ -323,5 +323,9 @@ mod tests {
         let new_mode = mode | 0o777;
         let new_mode_u16 = new_mode as u16;
         println!("{:?}, {:?}", new_mode, new_mode_u16);
+
+        let x = libc::S_ISUID;
+        let x2  = 0o1000;
+        println!("{:x}, {:x}", x, x2)
     }
 }

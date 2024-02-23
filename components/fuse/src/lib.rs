@@ -351,14 +351,7 @@ impl Filesystem for KisekiFuse {
 
         match self.runtime.block_on(
             self.vfs
-                .mknod(
-                    ctx.clone(),
-                    Ino(parent),
-                    name,
-                    mode,
-                    umask,
-                    rdev,
-                )
+                .mknod(ctx.clone(), Ino(parent), name, mode, umask, rdev)
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
@@ -382,14 +375,7 @@ impl Filesystem for KisekiFuse {
 
         match self.runtime.block_on(
             self.vfs
-                .create(
-                    ctx.clone(),
-                    Ino(parent),
-                    &name,
-                    mode,
-                    umask,
-                    flags,
-                )
+                .create(ctx.clone(), Ino(parent), &name, mode, umask, flags)
                 .in_current_span(),
         ) {
             Ok((entry, fh)) => reply.created(
@@ -617,6 +603,19 @@ impl Filesystem for KisekiFuse {
             .runtime
             .block_on(self.vfs.release(ctx, Ino(ino), fh).in_current_span())
         {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        };
+    }
+
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .rmdir(ctx, Ino(parent), name.to_str().unwrap())
+                .in_current_span(),
+        ) {
             Ok(_) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         };

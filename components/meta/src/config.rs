@@ -47,17 +47,20 @@ pub enum AccessTimeMode {
 impl Default for AccessTimeMode {
     fn default() -> Self { Self::Never }
 }
+
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct MetaConfig {
     pub dsn: String,
 
-    pub skip_dir_nlink:   usize,
     pub read_only:        bool,
     /// The duration to reuse open file without checking update (0 means disable
     /// this feature)
     pub open_cache:       Duration,
     /// max number of open files to cache (soft limit, 0 means unlimited)
     pub open_cache_limit: usize,
+    /// [skip_dir_mtime] skip updating attribute of a directory if the mtime
+    /// difference is smaller than this value
+    pub skip_dir_mtime:   Duration,
 }
 
 impl MetaConfig {
@@ -71,10 +74,10 @@ impl Default for MetaConfig {
     fn default() -> Self {
         Self {
             dsn:              kiseki_common::KISEKI_DEBUG_META_ADDR.to_string(),
-            skip_dir_nlink:   0,
             read_only:        false,
             open_cache:       Duration::default(),
             open_cache_limit: 10_000,
+            skip_dir_mtime:   Duration::from_millis(100),
         }
     }
 }

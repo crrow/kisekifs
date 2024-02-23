@@ -1,6 +1,6 @@
 use std::{
     cmp::{max, min},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
     ops::Add,
     path::{Component, Path},
@@ -137,8 +137,9 @@ pub struct MetaEngine {
     open_files:    OpenFiles,
     removed_files: RwLock<HashSet<Ino>>,
 
+    // directory inode -> parent inode
+    dir_parents:        RwLock<HashMap<Ino, Ino>>,
     // stats
-    dir_parents:        DashMap<Ino, Ino>,
     fs_stat_used_size:  AtomicU64,
     fs_stat_file_count: AtomicU64,
 
@@ -154,6 +155,24 @@ impl Display for MetaEngine {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // TODO
         write!(f, "MetaEngine: {}", self.format.name)
+    }
+}
+
+impl MetaEngine {
+    async fn add_dir2parent_mapping(&self, inode: Ino, parent: Ino) {
+        let read_guard = self.dir_parents.read().await;
+        if !read_guard.contains_key(&inode) {
+            drop(read_guard);
+            let mut write_guard = self.dir_parents.write().await;
+            if !write_guard.contains_key(&inode) {
+                write_guard.insert(inode, parent);
+            }
+        }
+    }
+
+    async fn del_dir2parents_mapping(&self, inode: Ino) {
+        let mut write_guard = self.dir_parents.write().await;
+        write_guard.remove(&inode);
     }
 }
 
@@ -202,7 +221,7 @@ impl MetaEngine {
         let parent = self.check_root(parent);
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
-            ctx.check(parent, &parent_attr, MODE_MASK_X)?;
+            ctx.check(&parent_attr, MODE_MASK_X)?;
         }
         let mut name = name;
         if name == DOT_DOT {
@@ -235,7 +254,7 @@ impl MetaEngine {
         let (inode, attr) = self.do_lookup(parent, name)?;
 
         if attr.kind == FileType::Directory && !parent.is_trash() {
-            self.dir_parents.insert(inode, parent);
+            self.add_dir2parent_mapping(inode, parent).await;
         }
 
         Ok((inode, attr))
@@ -263,7 +282,7 @@ impl MetaEngine {
         // update cache
         self.open_files.update(inode, &mut attr).await;
         if attr.is_filetype(FileType::Directory) && !inode.is_root() && !attr.parent.is_trash() {
-            self.dir_parents.insert(inode, attr.parent);
+            self.add_dir2parent_mapping(inode, attr.parent).await;
         }
         Ok(attr)
     }
@@ -280,7 +299,7 @@ impl MetaEngine {
             MODE_MASK_X
         };
 
-        ctx.check(inode, &attr, mmask)?;
+        ctx.check(&attr, mmask)?;
 
         if inode == self.root {
             attr.parent = self.root;
@@ -371,21 +390,37 @@ impl MetaEngine {
         mode: u32,
         umask: u32,
     ) -> Result<(Ino, InodeAttr)> {
-        self.mknod(
-            ctx,
-            parent,
-            name,
-            FileType::Directory,
-            mode,
-            umask,
-            0,
-            String::new(),
-        )
-        .await
-        .map(|r| {
-            self.dir_parents.insert(r.0, parent);
-            r
-        })
+        return match self
+            .mknod(
+                ctx,
+                parent,
+                name,
+                FileType::Directory,
+                mode,
+                umask,
+                0,
+                String::new(),
+            )
+            .await
+        {
+            Ok(r) => {
+                self.add_dir2parent_mapping(r.0, parent).await;
+                Ok(r)
+            }
+            Err(e) => Err(e),
+        };
+    }
+
+    /// [rmdir] removes an empty subdirectory.
+    pub async fn rmdir(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
+        let parent = self.check_root(parent);
+        let (dentry, _) = self
+            .backend
+            .do_rmdir(ctx, parent, name, self.config.skip_dir_mtime)?;
+        self.fs_stat_file_count.fetch_sub(1, Ordering::AcqRel);
+        self.fs_stat_used_size.fetch_sub(4096, Ordering::AcqRel);
+        self.del_dir2parents_mapping(dentry.inode).await;
+        Ok(())
     }
 
     // Mknod creates a node in a directory with given name, type and permissions.
@@ -425,6 +460,7 @@ impl MetaEngine {
         Ok(r)
     }
 
+    /// FIXME: implement me in the backend side.
     #[allow(clippy::too_many_arguments)]
     async fn do_mknod(
         &self,
@@ -482,7 +518,7 @@ impl MetaEngine {
             }
         );
         // check if the parent have the permission
-        ctx.check(parent, &parent_attr, kiseki_common::MODE_MASK_W)?;
+        ctx.check(&parent_attr, kiseki_common::MODE_MASK_W)?;
 
         ensure!(
             !kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8)
@@ -507,12 +543,11 @@ impl MetaEngine {
         let mut update_parent_attr = false;
         if !parent.is_trash() && typ == FileType::Directory {
             parent_attr.set_nlink(parent_attr.nlink + 1);
-            if self.config.skip_dir_nlink == 0 {
-                let now = SystemTime::now();
-                parent_attr.mtime = now;
-                parent_attr.ctime = now;
-                update_parent_attr = true;
-            }
+
+            let now = SystemTime::now();
+            parent_attr.mtime = now;
+            parent_attr.ctime = now;
+            update_parent_attr = true;
         };
 
         let now = SystemTime::now();
@@ -710,7 +745,7 @@ impl MetaEngine {
             }
         }
         if flags.contains(SetAttrFlags::ATIME_NOW) {
-            if ctx.check(inode, cur, MODE_MASK_W).is_err() {
+            if ctx.check(cur, MODE_MASK_W).is_err() {
                 ensure!(ctx.uid == cur.uid, LibcSnafu { errno: libc::EPERM });
             }
             dirty_attr.atime = now;
@@ -722,7 +757,7 @@ impl MetaEngine {
                     errno: libc::EACCES,
                 }
             );
-            if ctx.check(inode, cur, MODE_MASK_W).is_err() {
+            if ctx.check(cur, MODE_MASK_W).is_err() {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
@@ -734,7 +769,7 @@ impl MetaEngine {
             changed = true;
         }
         if flags.contains(SetAttrFlags::MTIME_NOW) {
-            if ctx.check(inode, cur, MODE_MASK_W).is_err() {
+            if ctx.check(cur, MODE_MASK_W).is_err() {
                 ensure!(
                     ctx.uid == cur.uid,
                     LibcSnafu {
@@ -751,7 +786,7 @@ impl MetaEngine {
                     errno: libc::EACCES,
                 }
             );
-            if ctx.check(inode, cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
+            if ctx.check(cur, MODE_MASK_W).is_err() && ctx.uid != cur.uid {
                 LibcSnafu {
                     errno: libc::EACCES,
                 }
@@ -797,7 +832,7 @@ impl MetaEngine {
             .fail()?,
         };
 
-        ctx.check(inode, &attr, mask)?;
+        ctx.check(&attr, mask)?;
 
         let attr_flags = kiseki_types::attr::Flags::from_bits(attr.flags as u8).unwrap();
         if (attr_flags.contains(kiseki_types::attr::Flags::IMMUTABLE) || attr.parent.is_trash())
@@ -950,7 +985,8 @@ impl MetaEngine {
         let slices = Arc::new(slices);
         // TODO: build cache.
         self.open_files
-            .update_chunk_slices_info(inode, chunk_index, slices.clone()).await;
+            .update_chunk_slices_info(inode, chunk_index, slices.clone())
+            .await;
 
         Ok(Some(slices))
     }
@@ -1015,12 +1051,6 @@ impl MetaEngine {
             }
         }
         Ok(())
-    }
-
-    /// [rmdir] removes an empty subdirectory.
-    pub async fn rmdir(&self, parent: Ino, name: &str) -> Result<()>{
-        let parent = self.check_root(parent);
-        todo!()
     }
 }
 
