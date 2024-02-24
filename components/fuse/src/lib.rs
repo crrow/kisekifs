@@ -166,7 +166,7 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let ctx = Arc::new( FuseContext::from(_req));
+        let ctx = Arc::new(FuseContext::from(_req));
         let name = match name.to_str() {
             Some(n) => n,
             None => {
@@ -503,14 +503,14 @@ impl Filesystem for KisekiFuse {
     // Optionally opendir may also return an arbitrary filehandle in the
     // fuse_file_info structure, which will be passed to readdir, releasedir and
     // fsyncdir.
-    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = _ino, name = field::Empty))]
-    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, flags = flags, name = field::Empty))]
+    fn opendir(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         let ctx = FuseContext::from(_req);
         match self
             .runtime
-            .block_on(self.vfs.open_dir(&ctx, _ino, _flags).in_current_span())
+            .block_on(self.vfs.open_dir(&ctx, ino, flags).in_current_span())
         {
-            Ok(fh) => reply.opened(fh, _flags as u32),
+            Ok(fh) => reply.opened(fh, flags as u32),
             Err(e) => reply.error(e.to_errno()),
         }
     }

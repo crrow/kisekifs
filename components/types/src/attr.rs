@@ -223,25 +223,25 @@ impl InodeAttr {
             // If uid is 0 (root user), returns 0x7 (full access) unconditionally.
             return 0x7;
         }
-        let perm = self.mode as u8;
+        let perm = self.mode;
         if uid == self.uid {
             // If uid matches attr.Uid (file owner),
             // extracts owner permissions by shifting mode 6 bits to the right and masking
             // with 7, returning a value like 4 (read-only),
             // 6 (read-write), or 7 (read-write-execute).
-            return (perm >> 6) & 7;
+            return (perm >> 6) as u8 & 7;
         }
         // If any gid matches attr.Gid (file group),
         // extracts group permissions by shifting mode 3 bits to the right and masking
         // with 7.
         for gid in gids {
             if *gid == self.gid {
-                return (perm >> 3) & 7;
+                return (perm >> 3) as u8 & 7;
             }
         }
         // If no previous conditions match,
         // returns other permissions by masking mode with 7.
-        perm & 7
+        (perm & 7 ) as u8
     }
 
     pub fn to_fuse_attr<I: Into<u64>>(&self, ino: I) -> fuser::FileAttr {
@@ -342,8 +342,8 @@ impl Default for InodeAttr {
             nlink:      1,
             length:     0,
             parent:     Default::default(),
-            uid:        kiseki_utils::uid(),
-            gid:        kiseki_utils::gid(),
+            uid:        0,
+            gid:        0,
             rdev:       0,
             flags:      0,
             keep_cache: false,

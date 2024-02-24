@@ -71,16 +71,6 @@ pub struct FormatArgs {
     help_heading = MANAGEMENT_OPTIONS_HEADER,
     )]
     pub inodes: Option<usize>,
-
-    #[arg(
-    long,
-    short,
-    help = "number of days after which removed files will be permanently deleted",
-    help_heading = MANAGEMENT_OPTIONS_HEADER,
-    default_value = "1",
-    value_parser = validate_trash_day,
-    )]
-    pub trash_days: usize,
 }
 
 impl FormatArgs {
@@ -90,7 +80,6 @@ impl FormatArgs {
         if let Some(inodes) = self.inodes {
             format.max_inodes = Some(inodes);
         }
-        format.trash_days = self.trash_days;
         format.block_size = self.block_size.as_bytes_usize();
         format.name = self.name.clone();
         format

@@ -82,9 +82,6 @@ pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
     match backend.load_format() {
         Ok(old_format) => {
             debug!("found exists format, need to update");
-            if !old_format.cache_dir_stat && format.cache_dir_stat {
-                // remove dir stats as they are outdated
-            }
             // TODO: update the old format
         }
         Err(e) => {
@@ -100,7 +97,7 @@ pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
     }
 
     let mut basic_attr = InodeAttr::default()
-        .set_kind(kiseki_types::FileType::Directory)
+        .set_kind(FileType::Directory)
         .set_nlink(2)
         .set_length(4 << 10)
         .set_parent(ROOT_INO)
@@ -305,9 +302,8 @@ impl MetaEngine {
             attr.parent = self.root;
         }
 
-        let mut basic_entries = Entry::new_basic_entry_pair(inode, attr.parent);
-        // let mut basic_entries = vec![];
-
+        // let mut basic_entries = Entry::new_basic_entry_pair(inode, attr.parent);
+        let mut basic_entries = vec![];
         self.do_read_dir(inode, plus, &mut basic_entries, -1)
             .await?;
 

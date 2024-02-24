@@ -713,7 +713,7 @@ impl KisekiVFS {
         flags: i32,
     ) -> Result<FH> {
         let inode = inode.into();
-        trace!("vfs:open_dir with inode {:?}", inode);
+        trace!("vfs:open_dir with {:?}, flags: {:o}", inode, flags);
         if ctx.check_permission {
             let mmask =
                 match flags as libc::c_int & (libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR) {
@@ -1087,9 +1087,24 @@ mod tests {
         let stat = vfs.stat_fs(ctx.clone(), ROOT_INO)?;
         debug!("{:?}", stat);
 
+        let root = vfs.get_attr(ROOT_INO).await?;
+        assert_eq!(root.mode, 511);
+
         // dirs
         let dir1 = vfs.mkdir(ctx.clone(), ROOT_INO, "d1", 0o755, 0).await?;
+        assert_eq!(dir1.attr.mode, 493);
         let dir2 = vfs.mkdir(ctx.clone(), dir1.inode, "d2", 0o755, 0).await?;
+        assert_eq!(dir2.attr.mode, 493);
+
+        let root_dir_handle = vfs.open_dir(&ctx, ROOT_INO, libc::O_RDONLY).await?;
+        let entries = vfs
+            .read_dir(&ctx, ROOT_INO, root_dir_handle, 0, true)
+            .await?;
+        assert_eq!(entries.len(), 1);
+        let dir1_handle = vfs.open_dir(&ctx, dir1.inode, libc::O_RDONLY).await?;
+        let entries = vfs.read_dir(&ctx, dir1.inode, dir1_handle, 0, true).await?;
+        assert_eq!(entries.len(), 1);
+
         assert_eq!(
             vfs.rmdir(ctx.clone(), ROOT_INO, &dir1.name)
                 .await
@@ -1163,4 +1178,5 @@ mod tests {
 
         Ok(())
     }
+
 }

@@ -601,24 +601,24 @@ impl Backend for RocksdbBackend {
             // the group ID of the parent directory (pattr.Gid).
             if parent_attr.mode & 0o2000 != 0 {
                 new_inode_attr.set_gid(parent_attr.gid);
-            }
-            // If the type of the node being created is a directory (_type ==
-            // TypeDirectory), it sets the SGID bit (02000) in the mode (attr.Mode) of the
-            // new node. This ensures that newly created directories inherit the group ID of
-            // their parent directory.
-            if typ == FileType::Directory {
-                new_inode_attr.mode |= 0o2000;
-            } else if new_inode_attr.mode & 0o2010 == 0o2010
-                && ctx.uid != 0
-                && !ctx.gid_list.contains(&parent_attr.gid)
-            {
-                // If the mode of the new node has both the set group ID bit (02000) and the set
-                // group execute bit (010) (attr.Mode&02010 == 02010), and if the user ID
-                // (ctx.Uid()) is not 0 (i.e., the user is not root), it further checks if the
-                // user belongs to the group of the parent directory (pattr.Gid). If not, it
-                // removes the SGID bit from the mode of the new node (attr.Mode &=
-                // ^uint16(02000)).
-                new_inode_attr.mode &= !0o2010;
+                // If the type of the node being created is a directory (_type ==
+                // TypeDirectory), it sets the SGID bit (02000) in the mode (attr.Mode) of the
+                // new node. This ensures that newly created directories inherit the group ID of
+                // their parent directory.
+                if typ == FileType::Directory {
+                    new_inode_attr.mode |= 0o2000;
+                } else if new_inode_attr.mode & 0o2010 == 0o2010
+                    && ctx.uid != 0
+                    && !ctx.gid_list.contains(&parent_attr.gid)
+                {
+                    // If the mode of the new node has both the set group ID bit (02000) and the set
+                    // group execute bit (010) (attr.Mode&02010 == 02010), and if the user ID
+                    // (ctx.Uid()) is not 0 (i.e., the user is not root), it further checks if the
+                    // user belongs to the group of the parent directory (pattr.Gid). If not, it
+                    // removes the SGID bit from the mode of the new node (attr.Mode &=
+                    // ^uint16(02000)).
+                    new_inode_attr.mode &= !0o2010;
+                }
             }
         }
 
