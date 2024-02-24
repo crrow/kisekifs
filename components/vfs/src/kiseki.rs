@@ -25,7 +25,9 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use kiseki_common::{DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
+use kiseki_common::{
+    DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
+};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
@@ -212,15 +214,15 @@ impl KisekiVFS {
     ) -> Result<()> {
         let mut my_mask = 0;
         if mask & libc::R_OK != 0 {
-            my_mask |= libc::R_OK;
+            my_mask |= MODE_MASK_R;
         }
         if mask & libc::W_OK != 0 {
-            my_mask |= libc::W_OK;
+            my_mask |= MODE_MASK_W;
         }
         if mask & libc::X_OK != 0 {
-            my_mask |= libc::X_OK;
+            my_mask |= MODE_MASK_X;
         }
-        ctx.check_access(attr, my_mask as u8)?;
+        ctx.check_access(attr, my_mask)?;
         Ok(())
     }
 }
@@ -1089,6 +1091,9 @@ mod tests {
         assert_eq!(f_new_attr.atime, time);
         assert_eq!(f_new_attr.mtime, time);
         assert_eq!(f_new_attr.length, 1024);
+
+        vfs.check_access(ctx.clone(), f.inode, &f_new_attr, libc::X_OK)?;
+
         Ok(())
     }
 }
