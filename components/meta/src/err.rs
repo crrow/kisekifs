@@ -78,6 +78,9 @@ pub mod model_err {
         Counter,
         ChunkSlices,
         DirStat,
+        HardLinkCount,
+        Sustained,
+        DeleteInode,
     }
 
     #[derive(Debug, Snafu)]

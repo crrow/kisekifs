@@ -1,8 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use kiseki_common::ChunkIndex;
 use kiseki_types::{attr::InodeAttr, ino::Ino, slice::Slices};
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, time::Instant};
 
 /// [OpenFile] represents an opened file in the cache.
 /// It is used for accelerating the query of the file's slices and attr.
@@ -18,12 +22,13 @@ impl OpenFile {
             attr.keep_cache = write_guard.attr.keep_cache;
         }
         write_guard.attr = attr.clone();
-        write_guard.last_check = tokio::time::Instant::now();
+        write_guard.last_check = SystemTime::now();
     }
 
     async fn refresh_slices(&self, chunk_index: ChunkIndex, slices: Arc<Slices>) {
         let mut write_guard = self.0.write().await;
         write_guard.chunks.insert(chunk_index, slices);
+        write_guard.last_check = UNIX_EPOCH;
     }
 
     async fn invalid_slices(&self, chunk_index: ChunkIndex) {
@@ -36,6 +41,12 @@ impl OpenFile {
         write_guard.chunks.clear();
     }
 
+    async fn invalid_attr(&self) {
+        let mut write_guard = self.0.write().await;
+        write_guard.attr.keep_cache = false;
+        write_guard.last_check = UNIX_EPOCH;
+    }
+
     // decreases the reference count of the open file.
     async fn decrease_ref(&self) -> usize {
         let mut write_guard = self.0.write().await;
@@ -46,14 +57,21 @@ impl OpenFile {
     pub(crate) async fn read_guard(&self) -> tokio::sync::RwLockReadGuard<OpenFileInner> {
         self.0.read().await
     }
+
+    pub(crate) async fn is_opened(&self) -> bool {
+        let read_guard = self.0.read().await;
+        read_guard.reference_count > 0
+    }
 }
 
 pub(crate) struct OpenFileInner {
-    pub(crate) attr:            InodeAttr,
+    pub(crate) attr: InodeAttr,
     reference_count: usize,
-    last_check:      tokio::time::Instant,
+    last_check:      SystemTime,
     chunks:          HashMap<usize, Arc<Slices>>,
 }
+
+pub(crate) type OpenFilesRef = Arc<OpenFiles>;
 
 pub(crate) struct OpenFiles {
     ttl:   Duration,
@@ -100,7 +118,7 @@ impl OpenFiles {
                             OpenFile(Arc::new(RwLock::new(OpenFileInner {
                                 attr:            attr.keep_cache().clone(),
                                 reference_count: 1,
-                                last_check:      tokio::time::Instant::now(),
+                                last_check:      SystemTime::now(),
                                 chunks:          Default::default(),
                             }))),
                         );
@@ -120,7 +138,7 @@ impl OpenFiles {
         let mut write_guard = of.0.write().await;
         write_guard.attr.keep_cache = true;
         write_guard.reference_count += 1;
-        write_guard.last_check = tokio::time::Instant::now();
+        write_guard.last_check = SystemTime::now();
     }
 
     /// [load_attr] fetches the [InodeAttr] from the cache, if it is not
@@ -131,7 +149,7 @@ impl OpenFiles {
             drop(outer_read_guard);
 
             let read_guard = of.0.read().await;
-            if read_guard.last_check.elapsed() < self.ttl {
+            if read_guard.last_check.elapsed().unwrap() < self.ttl {
                 let attr = read_guard.attr.clone();
                 drop(read_guard);
                 if add_ref {
@@ -155,7 +173,7 @@ impl OpenFiles {
             drop(outer_read_guard);
 
             let read_guard = of.0.read().await;
-            if read_guard.last_check.elapsed() < self.ttl {
+            if read_guard.last_check.elapsed().unwrap() < self.ttl {
                 return read_guard.chunks.get(&chunk_index).map(|s| s.clone());
             }
         }
@@ -180,16 +198,19 @@ impl OpenFiles {
         }
     }
 
-    pub(crate) async fn invalid_slices(&self, inode: Ino, req: InvalidSliceReq) {
+    pub(crate) async fn invalid(&self, inode: Ino, req: InvalidReq) {
         let read_guard = self.files.read().await;
         if let Some(of) = read_guard.get(&inode).map(|of| of.clone()) {
             drop(read_guard);
             match req {
-                InvalidSliceReq::One(idx) => {
+                InvalidReq::OneChunk(idx) => {
                     of.invalid_slices(idx).await;
                 }
-                InvalidSliceReq::All => {
+                InvalidReq::All => {
                     of.invalid_all_chunk().await;
+                }
+                InvalidReq::OnlyAttr => {
+                    of.invalid_attr().await;
                 }
             }
         }
@@ -209,7 +230,8 @@ impl OpenFiles {
     }
 }
 
-pub(crate) enum InvalidSliceReq {
-    One(ChunkIndex),
+pub(crate) enum InvalidReq {
+    OneChunk(ChunkIndex),
     All,
+    OnlyAttr,
 }

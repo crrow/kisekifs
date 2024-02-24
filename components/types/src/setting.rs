@@ -32,11 +32,6 @@ pub struct Format {
     pub max_capacity:   Option<usize>,
     /// [max_inodes] set limit on the number of inodes
     pub max_inodes:     Option<usize>,
-    /// [trash_days] days to keep trash
-    pub trash_days:     usize,
-    /// [cache_dir_stat] cache the dir stats or not, which is necessary
-    /// for fast summary and dir quota.
-    pub cache_dir_stat: bool,
 }
 
 impl Default for Format {
@@ -48,8 +43,6 @@ impl Default for Format {
             page_size:      PAGE_SIZE,  // 64KB
             max_capacity:   None,
             max_inodes:     None,
-            trash_days:     0,
-            cache_dir_stat: false,
         }
     }
 }

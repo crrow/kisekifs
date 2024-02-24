@@ -26,7 +26,6 @@ pub const LOG_INODE_NAME: &str = ".accesslog";
 pub const CONTROL_INODE_NAME: &str = ".control";
 pub const STATS_INODE_NAME: &str = ".stats";
 pub const CONFIG_INODE_NAME: &str = ".config";
-pub const TRASH_INODE_NAME: &str = ".trash";
 #[derive(Debug)]
 pub struct InternalNodeTable {
     nodes: HashMap<&'static str, InternalNode>,
@@ -55,22 +54,10 @@ impl InternalNodeTable {
             name:  CONFIG_INODE_NAME.to_string(),
             attr:  InodeAttr::default().set_mode(0o400).to_owned(),
         });
-        let trash_inode: InternalNode = InternalNode(FullEntry {
-            inode: MAX_INTERNAL_INODE,
-            name:  TRASH_INODE_NAME.to_string(),
-            attr:  InodeAttr::default()
-                .set_mode(0o555)
-                .set_kind(fuser::FileType::Directory)
-                .set_nlink(2)
-                .set_uid(kiseki_utils::uid())
-                .set_gid(kiseki_utils::gid())
-                .to_owned(),
-        });
         map.insert(LOG_INODE_NAME, log_inode);
         map.insert(CONTROL_INODE_NAME, control_inode);
         map.insert(STATS_INODE_NAME, stats_inode);
         map.insert(CONFIG_INODE_NAME, config_inode);
-        map.insert(TRASH_INODE_NAME, trash_inode);
         Self { nodes: map }
     }
 }
@@ -87,8 +74,6 @@ impl InternalNodeTable {
     pub fn get_internal_node(&self, ino: Ino) -> Option<&InternalNode> {
         self.nodes.values().find(|node| node.0.inode == ino)
     }
-
-    pub fn remove_trash_node(&mut self) { self.nodes.remove(TRASH_INODE_NAME); }
 
     pub fn add_prefix(&mut self) {
         for n in self.nodes.values_mut() {

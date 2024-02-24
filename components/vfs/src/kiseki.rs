@@ -25,14 +25,16 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
-use kiseki_common::{DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W};
+use kiseki_common::{
+    DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
+};
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
     ino::{Ino, CONTROL_INODE, ROOT_INO},
-    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME, TRASH_INODE_NAME},
+    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
     slice::SliceID,
     ToErrno,
 };
@@ -212,20 +214,19 @@ impl KisekiVFS {
     ) -> Result<()> {
         let mut my_mask = 0;
         if mask & libc::R_OK != 0 {
-            my_mask |= libc::R_OK;
+            my_mask |= MODE_MASK_R;
         }
         if mask & libc::W_OK != 0 {
-            my_mask |= libc::W_OK;
+            my_mask |= MODE_MASK_W;
         }
         if mask & libc::X_OK != 0 {
-            my_mask |= libc::X_OK;
+            my_mask |= MODE_MASK_X;
         }
-        ctx.check_access(attr, my_mask as u8)?;
+        ctx.check_access(attr, my_mask)?;
         Ok(())
     }
 }
 
-/// Fuse operations for KisekiVFS
 impl KisekiVFS {
     pub async fn init(&self, ctx: &FuseContext) -> Result<()> {
         debug!("vfs:init");
@@ -249,7 +250,12 @@ impl KisekiVFS {
         Ok(h)
     }
 
-    pub async fn lookup(&self, ctx: &FuseContext, parent: Ino, name: &str) -> Result<FullEntry> {
+    pub async fn lookup(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+    ) -> Result<FullEntry> {
         trace!("fs:lookup with parent {:?} name {:?}", parent, name);
         // TODO: handle the special case
         if parent == ROOT_INO || name.eq(CONTROL_INODE_NAME) {
@@ -280,158 +286,6 @@ impl KisekiVFS {
         let attr = self.meta.get_attr(inode).await?;
         debug!("vfs:get_attr with inode {:?} attr {:?}", inode, attr);
         Ok(attr)
-    }
-
-    pub async fn open_dir<I: Into<Ino>>(
-        &self,
-        ctx: &FuseContext,
-        inode: I,
-        flags: i32,
-    ) -> Result<FH> {
-        let inode = inode.into();
-        trace!("vfs:open_dir with inode {:?}", inode);
-        if ctx.check_permission {
-            let mmask =
-                match flags as libc::c_int & (libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR) {
-                    libc::O_RDONLY => MODE_MASK_R,
-                    libc::O_WRONLY => MODE_MASK_W,
-                    libc::O_RDWR => MODE_MASK_R | MODE_MASK_W,
-                    _ => 0, // do nothing, // Handle unexpected flags
-                };
-            let attr = self.meta.get_attr(inode).await?;
-            ctx.check_access(&attr, mmask)?;
-        }
-        Ok(self.handle_table.new_dir_handle(inode).await)
-    }
-
-    pub async fn read_dir<I: Into<Ino>>(
-        &self,
-        ctx: &FuseContext,
-        inode: I,
-        fh: u64,
-        offset: i64,
-        plus: bool,
-    ) -> Result<Vec<Entry>> {
-        let inode = inode.into();
-        debug!(
-            "fs:readdir with ino {:?} fh {:?} offset {:?}",
-            inode, fh, offset
-        );
-
-        let h = self
-            .handle_table
-            .find_handle(inode, fh)
-            .await
-            .context(LibcSnafu { errno: EBADF })?;
-        let h = h.as_dir_handle().context(LibcSnafu { errno: EBADF })?;
-
-        let mut read_guard = h.inner.read().await;
-        if read_guard.children.is_empty() || offset == 0 {
-            drop(read_guard);
-            let mut write_guard = h.inner.write().await;
-            // FIXME
-            write_guard.read_at = Some(Instant::now());
-            write_guard.children = self
-                .meta
-                .read_dir(ctx, inode, plus)
-                .await
-                .context(MetaSnafu)?;
-            if (offset as usize) < write_guard.children.len() {
-                let result = write_guard.children[offset as usize..]
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                return Ok(result);
-            } else {
-                return Ok(vec![]);
-            }
-        }
-        if (offset as usize) < read_guard.children.len() {
-            let result = read_guard.children[offset as usize..]
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            return Ok(result);
-        }
-        Ok(Vec::new())
-    }
-
-    pub async fn mknod(
-        &self,
-        ctx: Arc<FuseContext>,
-        parent: Ino,
-        name: String,
-        mode: u32,
-        umask: u32,
-        rdev: u32,
-    ) -> Result<FullEntry> {
-        if parent.is_root() && self.internal_nodes.contains_name(&name) {
-            return LibcSnafu {
-                errno: libc::EEXIST,
-            }
-            .fail()?;
-        }
-        if name.len() > MAX_NAME_LENGTH {
-            return LibcSnafu {
-                errno: libc::ENAMETOOLONG,
-            }
-            .fail()?;
-        }
-        let file_type = get_file_type(mode)?;
-
-        let (ino, attr) = self
-            .meta
-            .mknod(
-                ctx,
-                parent,
-                &name,
-                file_type,
-                mode & 0o7777,
-                umask,
-                rdev,
-                String::new(),
-            )
-            .await
-            .context(MetaSnafu)?;
-        Ok(FullEntry::new(ino, &name, attr))
-    }
-
-    pub async fn create(
-        &self,
-        ctx: Arc<FuseContext>,
-        parent: Ino,
-        name: &str,
-        mode: u32,
-        umask: u32,
-        flags: libc::c_int,
-    ) -> Result<(FullEntry, FH)> {
-        debug!("fs:create with parent {:?} name {:?}", parent, name);
-        if parent.is_root() && self.internal_nodes.contains_name(name) {
-            return LibcSnafu {
-                errno: libc::EEXIST,
-            }
-            .fail()?;
-        }
-        if name.len() > MAX_NAME_LENGTH {
-            return LibcSnafu {
-                errno: libc::ENAMETOOLONG,
-            }
-            .fail()?;
-        };
-
-        let (inode, attr) = self
-            .meta
-            .create(ctx, parent, name, mode & 0o7777, umask, flags)
-            .await
-            .context(MetaSnafu)?;
-
-        let mut e = FullEntry::new(inode, name, attr);
-        self.try_update_file_reader_length(inode, &mut e.attr).await;
-        let fh = self
-            .handle_table
-            .new_file_handle(inode, e.attr.length, flags)
-            .await?;
-        Ok((e, fh))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -543,57 +397,6 @@ impl KisekiVFS {
         // TODO: invalid open_file cache
 
         Ok(new_attr)
-    }
-
-    pub async fn mkdir(
-        &self,
-        ctx: Arc<FuseContext>,
-        parent: Ino,
-        name: &str,
-        mode: u32,
-        umask: u32,
-    ) -> Result<FullEntry> {
-        debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
-        if parent.is_root() && self.internal_nodes.contains_name(name) {
-            return LibcSnafu {
-                errno: libc::EEXIST,
-            }
-            .fail()?;
-        }
-        if name.len() > MAX_NAME_LENGTH {
-            return LibcSnafu {
-                errno: libc::ENAMETOOLONG,
-            }
-            .fail()?;
-        };
-
-        let (ino, attr) = self
-            .meta
-            .mkdir(ctx, parent, name, mode, umask)
-            .await
-            .context(MetaSnafu)?;
-        Ok(FullEntry::new(ino, name, attr))
-    }
-
-    pub async fn rmdir(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
-        debug!("fs:rmdir with parent {:?} name {:?}", parent, name);
-        ensure!(name != DOT, LibcSnafu { errno: EINVAL });
-        ensure!(name != DOT_DOT, LibcSnafu { errno: EINVAL });
-        ensure!(
-            name.len() < MAX_NAME_LENGTH,
-            LibcSnafu {
-                errno: libc::ENAMETOOLONG,
-            }
-        );
-        if parent == ROOT_INO && name == TRASH_INODE_NAME || parent.is_trash() && ctx.uid != 0 {
-            return LibcSnafu { errno: EPERM }.fail()?;
-        }
-        self.meta
-            .rmdir(ctx, parent, name)
-            .await
-            .context(MetaSnafu)?;
-
-        Ok(())
     }
 
     pub async fn open(&self, ctx: &FuseContext, inode: Ino, flags: i32) -> Result<Opened> {
@@ -901,6 +704,258 @@ impl KisekiVFS {
     }
 }
 
+// Dir
+impl KisekiVFS {
+    pub async fn open_dir<I: Into<Ino>>(
+        &self,
+        ctx: &FuseContext,
+        inode: I,
+        flags: i32,
+    ) -> Result<FH> {
+        let inode = inode.into();
+        trace!("vfs:open_dir with {:?}, flags: {:o}", inode, flags);
+        if ctx.check_permission {
+            let mmask =
+                match flags as libc::c_int & (libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR) {
+                    libc::O_RDONLY => MODE_MASK_R,
+                    libc::O_WRONLY => MODE_MASK_W,
+                    libc::O_RDWR => MODE_MASK_R | MODE_MASK_W,
+                    _ => 0, // do nothing, // Handle unexpected flags
+                };
+            let attr = self.meta.get_attr(inode).await?;
+            ctx.check_access(&attr, mmask)?;
+        }
+        Ok(self.handle_table.new_dir_handle(inode).await)
+    }
+
+    pub async fn read_dir<I: Into<Ino>>(
+        &self,
+        ctx: &FuseContext,
+        inode: I,
+        fh: u64,
+        offset: i64,
+        plus: bool,
+    ) -> Result<Vec<Entry>> {
+        let inode = inode.into();
+        debug!(
+            "fs:readdir with ino {:?} fh {:?} offset {:?}",
+            inode, fh, offset
+        );
+
+        let h = self
+            .handle_table
+            .find_handle(inode, fh)
+            .await
+            .context(LibcSnafu { errno: EBADF })?;
+        let h = h.as_dir_handle().context(LibcSnafu { errno: EBADF })?;
+
+        let mut read_guard = h.inner.read().await;
+        if read_guard.children.is_empty() || offset == 0 {
+            drop(read_guard);
+            let mut write_guard = h.inner.write().await;
+            // FIXME
+            write_guard.read_at = Some(Instant::now());
+            write_guard.children = self
+                .meta
+                .read_dir(ctx, inode, plus)
+                .await
+                .context(MetaSnafu)?;
+            if (offset as usize) < write_guard.children.len() {
+                let result = write_guard.children[offset as usize..]
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Ok(result);
+            } else {
+                return Ok(vec![]);
+            }
+        }
+        if (offset as usize) < read_guard.children.len() {
+            let result = read_guard.children[offset as usize..]
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            return Ok(result);
+        }
+        Ok(Vec::new())
+    }
+
+    pub async fn mkdir(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+        mode: u32,
+        umask: u32,
+    ) -> Result<FullEntry> {
+        debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
+        if parent.is_root() && self.internal_nodes.contains_name(name) {
+            return LibcSnafu {
+                errno: libc::EEXIST,
+            }
+            .fail()?;
+        }
+        if name.len() > MAX_NAME_LENGTH {
+            return LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+            .fail()?;
+        };
+
+        let (ino, attr) = self
+            .meta
+            .mkdir(ctx, parent, name, mode, umask)
+            .await
+            .context(MetaSnafu)?;
+        Ok(FullEntry::new(ino, name, attr))
+    }
+
+    pub async fn rmdir(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
+        debug!("fs:rmdir with parent {:?} name {:?}", parent, name);
+        ensure!(name != DOT, LibcSnafu { errno: EINVAL });
+        ensure!(name != DOT_DOT, LibcSnafu { errno: EINVAL });
+        ensure!(
+            name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+        self.meta
+            .rmdir(ctx, parent, name)
+            .await
+            .context(MetaSnafu)?;
+
+        Ok(())
+    }
+}
+
+// File
+impl KisekiVFS {
+    pub async fn mknod(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: String,
+        mode: u32,
+        umask: u32,
+        rdev: u32,
+    ) -> Result<FullEntry> {
+        if parent.is_root() && self.internal_nodes.contains_name(&name) {
+            return LibcSnafu {
+                errno: libc::EEXIST,
+            }
+            .fail()?;
+        }
+        if name.len() > MAX_NAME_LENGTH {
+            return LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+            .fail()?;
+        }
+        let file_type = get_file_type(mode)?;
+
+        let (ino, attr) = self
+            .meta
+            .mknod(
+                ctx,
+                parent,
+                &name,
+                file_type,
+                mode & 0o7777,
+                umask,
+                rdev,
+                String::new(),
+            )
+            .await
+            .context(MetaSnafu)?;
+        Ok(FullEntry::new(ino, &name, attr))
+    }
+
+    pub async fn create(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        flags: libc::c_int,
+    ) -> Result<(FullEntry, FH)> {
+        debug!("fs:create with parent {:?} name {:?}", parent, name);
+        if parent.is_root() && self.internal_nodes.contains_name(name) {
+            return LibcSnafu {
+                errno: libc::EEXIST,
+            }
+            .fail()?;
+        }
+        if name.len() > MAX_NAME_LENGTH {
+            return LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+            .fail()?;
+        };
+
+        let (inode, attr) = self
+            .meta
+            .create(ctx, parent, name, mode & 0o7777, umask, flags)
+            .await
+            .context(MetaSnafu)?;
+
+        let mut e = FullEntry::new(inode, name, attr);
+        self.try_update_file_reader_length(inode, &mut e.attr).await;
+        let fh = self
+            .handle_table
+            .new_file_handle(inode, e.attr.length, flags)
+            .await?;
+        Ok((e, fh))
+    }
+}
+
+// Link
+impl KisekiVFS {
+    pub async fn link(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        new_parent: Ino,
+        new_name: &str,
+    ) -> Result<FullEntry> {
+        ensure!(
+            new_name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+        ensure!(
+            new_name.len() != 0,
+            LibcSnafu {
+                errno: libc::ENOENT,
+            }
+        );
+
+        let attr = self.meta.link(ctx, inode, new_parent, new_name).await?;
+        let e = FullEntry::new(inode, new_name, attr);
+        Ok(e)
+    }
+
+    pub async fn unlink(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
+        ensure!(
+            name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+        ensure!(
+            name.len() != 0,
+            LibcSnafu {
+                errno: libc::ENOENT,
+            }
+        );
+
+        self.meta.unlink(ctx, parent, name).await?;
+        Ok(())
+    }
+}
+
 /// Reply to a `open` or `opendir` call
 #[derive(Debug)]
 pub struct Opened {
@@ -1032,9 +1087,24 @@ mod tests {
         let stat = vfs.stat_fs(ctx.clone(), ROOT_INO)?;
         debug!("{:?}", stat);
 
+        let root = vfs.get_attr(ROOT_INO).await?;
+        assert_eq!(root.mode, 511);
+
         // dirs
         let dir1 = vfs.mkdir(ctx.clone(), ROOT_INO, "d1", 0o755, 0).await?;
+        assert_eq!(dir1.attr.mode, 493);
         let dir2 = vfs.mkdir(ctx.clone(), dir1.inode, "d2", 0o755, 0).await?;
+        assert_eq!(dir2.attr.mode, 493);
+
+        let root_dir_handle = vfs.open_dir(&ctx, ROOT_INO, libc::O_RDONLY).await?;
+        let entries = vfs
+            .read_dir(&ctx, ROOT_INO, root_dir_handle, 0, true)
+            .await?;
+        assert_eq!(entries.len(), 1);
+        let dir1_handle = vfs.open_dir(&ctx, dir1.inode, libc::O_RDONLY).await?;
+        let entries = vfs.read_dir(&ctx, dir1.inode, dir1_handle, 0, true).await?;
+        assert_eq!(entries.len(), 1);
+
         assert_eq!(
             vfs.rmdir(ctx.clone(), ROOT_INO, &dir1.name)
                 .await
@@ -1045,7 +1115,7 @@ mod tests {
         vfs.rmdir(ctx.clone(), dir1.inode, &dir2.name).await?;
 
         // files
-        let f = vfs
+        let f1 = vfs
             .mknod(
                 ctx.clone(),
                 dir1.inode,
@@ -1056,17 +1126,17 @@ mod tests {
             )
             .await?;
         assert_eq!(
-            vfs.check_access(ctx.clone(), f.inode, &f.attr, libc::X_OK)
+            vfs.check_access(ctx.clone(), f1.inode, &f1.attr, libc::X_OK)
                 .unwrap_err()
                 .to_errno(),
             libc::EACCES
         );
 
         let time = SystemTime::now();
-        let f_new_attr = vfs
+        let f1_attr = vfs
             .set_attr(
                 ctx.clone(),
-                f.inode,
+                f1.inode,
                 (SetAttrFlags::MODE
                     | SetAttrFlags::UID
                     | SetAttrFlags::GID
@@ -1083,12 +1153,30 @@ mod tests {
                 None,
             )
             .await?;
-        assert_eq!(f_new_attr.mode, 0o755);
-        assert_eq!(f_new_attr.uid, 1);
-        assert_eq!(f_new_attr.gid, 3);
-        assert_eq!(f_new_attr.atime, time);
-        assert_eq!(f_new_attr.mtime, time);
-        assert_eq!(f_new_attr.length, 1024);
+        assert_eq!(f1_attr.mode, 0o755);
+        assert_eq!(f1_attr.uid, 1);
+        assert_eq!(f1_attr.gid, 3);
+        assert_eq!(f1_attr.atime, time);
+        assert_eq!(f1_attr.mtime, time);
+        assert_eq!(f1_attr.length, 1024);
+
+        vfs.check_access(ctx.clone(), f1.inode, &f1_attr, libc::X_OK)?;
+
+        // link root/f2 -> d1/f1
+        let f2_entry = vfs.link(ctx.clone(), f1.inode, ROOT_INO, "f2").await?;
+        let f1_attr = vfs.get_attr(f1.inode).await?;
+        assert_eq!(f1_attr.nlink, 2);
+
+        // unlink d1/f1
+        vfs.unlink(ctx.clone(), dir1.inode, &f1.name).await?;
+        // lookup root/f2
+        if let Ok(e) = vfs.lookup(ctx.clone(), ROOT_INO, &f2_entry.name).await {
+            assert_eq!(e.attr.nlink, 1);
+        } else {
+            panic!("lookup f2 failed");
+        }
+
         Ok(())
     }
+
 }

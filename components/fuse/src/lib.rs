@@ -166,7 +166,7 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new(FuseContext::from(_req));
         let name = match name.to_str() {
             Some(n) => n,
             None => {
@@ -182,7 +182,7 @@ impl Filesystem for KisekiFuse {
 
         let entry = match self.runtime.block_on(
             self.vfs
-                .lookup(&ctx, Ino::from(parent), name)
+                .lookup(ctx.clone(), Ino::from(parent), name)
                 .in_current_span(),
         ) {
             Ok(n) => n,
@@ -211,182 +211,6 @@ impl Filesystem for KisekiFuse {
                 reply.error(e.to_errno())
             }
         };
-    }
-
-    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = _ino, name = field::Empty))]
-    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        // 	http://man.he.net/man2/statfs
-        // struct statfs {
-        // __fsword_t f_type;    // Type of filesystem (see below)
-        // __fsword_t f_bsize;   // Optimal transfer block size
-        // fsblkcnt_t f_blocks;  // Total data blocks in filesystem
-        // fsblkcnt_t f_bfree;   // Free blocks in filesystem
-        // fsblkcnt_t f_bavail;  // Free blocks available to
-        // unprivileged user
-        // fsfilcnt_t f_files;   // Total file nodes in filesystem
-        // fsfilcnt_t f_ffree;   // Free file nodes in filesystem
-        // fsid_t     f_fsid;    // Filesystem ID
-        // __fsword_t f_namelen; // Maximum length of filenames
-        // __fsword_t f_frsize;  // Fragment size (since Linux 2.6)
-        // __fsword_t f_flags;   // Mount flags of filesystem
-        // (since Linux 2.6.36)
-        // __fsword_t f_spare[xxx];
-        // Padding bytes reserved for future use
-        // };
-
-        let ctx = Arc::new(FuseContext::from(_req));
-        // in case we can't get the stat_fs, we just return a default one.
-        let state = self.vfs.stat_fs(ctx, _ino).unwrap_or(FSStat::default());
-
-        // Compute the total number of available blocks
-        let total_blocks = max(state.total_size / BLOCK_SIZE as u64, 1);
-        // Compute the total number of used blocks
-        let used_blocks = state.used_size / BLOCK_SIZE as u64;
-        // Compute the total number of remaining blocks
-        let remain_blocks = max(total_blocks as i64 - used_blocks as i64, 0) as u64;
-
-        reply.statfs(
-            // blocks the total number of available blocks
-            total_blocks,
-            // bfree: Number of free blocks available for use.
-            remain_blocks,
-            // bavail: Number of blocks available to unprivileged users.
-            remain_blocks,
-            // files: Total number of inodes (file system objects) in the file system.
-            u64::MAX,
-            // ffree: Number of free inodes available for creating new files.
-            u64::MAX - state.file_count,
-            // bsize: Fundamental block size of the file system (in bytes).
-            BLOCK_SIZE as u32,
-            // namelen: Maximum length of a filename.
-            MAX_NAME_LENGTH as u32,
-            // frsize: Fragment size (if file system supports fragmentation).
-            BLOCK_SIZE as u32,
-        );
-    }
-
-    // Open directory.
-    // Unless the 'default_permissions' mount option is given,
-    // this method should check if opendir is permitted for this directory.
-    // Optionally opendir may also return an arbitrary filehandle in the
-    // fuse_file_info structure, which will be passed to readdir, releasedir and
-    // fsyncdir.
-    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = _ino, name = field::Empty))]
-    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        let ctx = FuseContext::from(_req);
-        match self
-            .runtime
-            .block_on(self.vfs.open_dir(&ctx, _ino, _flags).in_current_span())
-        {
-            Ok(fh) => reply.opened(fh, _flags as u32),
-            Err(e) => reply.error(e.to_errno()),
-        }
-    }
-
-    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, offset = offset))]
-    fn readdir(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
-        let ctx = FuseContext::from(_req);
-        let entries = match self.runtime.block_on(
-            self.vfs
-                .read_dir(&ctx, ino, fh, offset, false)
-                .in_current_span(),
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                reply.error(e.to_errno());
-                return;
-            }
-        };
-
-        let mut offset = offset + 1;
-        debug!("get entry length: { }", entries.len());
-        for entry in entries.iter() {
-            if reply.add(
-                entry.get_inode().0,
-                offset,
-                entry.get_file_type(),
-                &entry.get_name(),
-            ) {
-                break;
-            } else {
-                offset += 1;
-            }
-        }
-        reply.ok();
-    }
-
-    /// In UNIX-like operating systems, when a new file or directory is created,
-    /// its permissions are typically set based on the process's umask value.
-    ///
-    /// The umask is a bitmask that specifies which permissions should be
-    /// removed from the default permissions assigned to newly created files and
-    /// directories.
-    ///
-    /// For example, if mode is set to 0666 (read and write
-    /// permissions for owner, group, and others), and umask is set to
-    /// 0200, it might indicate that the write permission for the owner
-    /// should be removed, resulting in a final mode of 0466 (read-only for
-    /// owner, read and write for group and others).
-    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
-    fn mknod(
-        &mut self,
-        _req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        rdev: u32,
-        reply: ReplyEntry,
-    ) {
-        // mode_t is u32 on Linux but u16 on macOS, so cast it here
-        let ctx = Arc::new(FuseContext::from(_req));
-        let name = name.to_string_lossy().to_string();
-
-        match self.runtime.block_on(
-            self.vfs
-                .mknod(ctx.clone(), Ino(parent), name, mode, umask, rdev)
-                .in_current_span(),
-        ) {
-            Ok(entry) => self.reply_entry(&ctx, reply, entry),
-            Err(e) => reply.error(e.to_errno()),
-        }
-    }
-
-    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
-    fn create(
-        &mut self,
-        _req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        flags: i32,
-        reply: ReplyCreate,
-    ) {
-        let ctx = Arc::new(FuseContext::from(_req));
-        let name = name.to_string_lossy().to_string();
-
-        match self.runtime.block_on(
-            self.vfs
-                .create(ctx.clone(), Ino(parent), &name, mode, umask, flags)
-                .in_current_span(),
-        ) {
-            Ok((entry, fh)) => reply.created(
-                self.vfs.get_entry_ttl(entry.attr.kind),
-                &entry.attr.to_fuse_attr(entry.inode),
-                1,
-                fh,
-                flags as u32,
-            ),
-            Err(e) => reply.error(e.to_errno()),
-        }
     }
 
     #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, name = field::Empty))]
@@ -430,6 +254,43 @@ impl Filesystem for KisekiFuse {
         }
     }
 
+    /// In UNIX-like operating systems, when a new file or directory is created,
+    /// its permissions are typically set based on the process's umask value.
+    ///
+    /// The umask is a bitmask that specifies which permissions should be
+    /// removed from the default permissions assigned to newly created files and
+    /// directories.
+    ///
+    /// For example, if mode is set to 0666 (read and write
+    /// permissions for owner, group, and others), and umask is set to
+    /// 0200, it might indicate that the write permission for the owner
+    /// should be removed, resulting in a final mode of 0466 (read-only for
+    /// owner, read and write for group and others).
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
+    fn mknod(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        // mode_t is u32 on Linux but u16 on macOS, so cast it here
+        let ctx = Arc::new(FuseContext::from(_req));
+        let name = name.to_string_lossy().to_string();
+
+        match self.runtime.block_on(
+            self.vfs
+                .mknod(ctx.clone(), Ino(parent), name, mode, umask, rdev)
+                .in_current_span(),
+        ) {
+            Ok(entry) => self.reply_entry(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
     #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
     fn mkdir(
         &mut self,
@@ -445,6 +306,56 @@ impl Filesystem for KisekiFuse {
         match self.runtime.block_on(
             self.vfs
                 .mkdir(ctx.clone(), Ino(parent), &name, mode, umask)
+                .in_current_span(),
+        ) {
+            Ok(entry) => self.reply_entry(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .unlink(ctx, Ino(parent), name.to_str().unwrap())
+                .in_current_span(),
+        ) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .rmdir(ctx, Ino(parent), name.to_str().unwrap())
+                .in_current_span(),
+        ) {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        };
+    }
+
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, new_parent = new_parent, new_name = ? new_name))]
+    fn link(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        new_parent: u64,
+        new_name: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .link(
+                    ctx.clone(),
+                    Ino(ino),
+                    Ino(new_parent),
+                    new_name.to_str().unwrap(),
+                )
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
@@ -552,6 +463,27 @@ impl Filesystem for KisekiFuse {
         }
     }
 
+    #[instrument(level = "info", skip_all, fields(req = req.unique(), ino = ino, fh = fh, name = field::Empty))]
+    fn release(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        _flags: i32,
+        _ock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        let ctx = Arc::new(FuseContext::from(req));
+        match self
+            .runtime
+            .block_on(self.vfs.release(ctx, Ino(ino), fh).in_current_span())
+        {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        };
+    }
+
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, datasync = datasync, name = field::Empty))]
     fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, _reply: ReplyEmpty) {
         let ctx = Arc::new(FuseContext::from(_req));
@@ -562,6 +494,145 @@ impl Filesystem for KisekiFuse {
         ) {
             Ok(()) => _reply.ok(),
             Err(e) => _reply.error(e.to_errno()),
+        }
+    }
+
+    // Open directory.
+    // Unless the 'default_permissions' mount option is given,
+    // this method should check if opendir is permitted for this directory.
+    // Optionally opendir may also return an arbitrary filehandle in the
+    // fuse_file_info structure, which will be passed to readdir, releasedir and
+    // fsyncdir.
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, flags = flags, name = field::Empty))]
+    fn opendir(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
+        let ctx = FuseContext::from(_req);
+        match self
+            .runtime
+            .block_on(self.vfs.open_dir(&ctx, ino, flags).in_current_span())
+        {
+            Ok(fh) => reply.opened(fh, flags as u32),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, offset = offset))]
+    fn readdir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let ctx = FuseContext::from(_req);
+        let entries = match self.runtime.block_on(
+            self.vfs
+                .read_dir(&ctx, ino, fh, offset, false)
+                .in_current_span(),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                reply.error(e.to_errno());
+                return;
+            }
+        };
+
+        let mut offset = offset + 1;
+        debug!("get entry length: { }", entries.len());
+        for entry in entries.iter() {
+            if reply.add(
+                entry.get_inode().0,
+                offset,
+                entry.get_file_type(),
+                &entry.get_name(),
+            ) {
+                break;
+            } else {
+                offset += 1;
+            }
+        }
+        reply.ok();
+    }
+
+    #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = _ino, name = field::Empty))]
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        // 	http://man.he.net/man2/statfs
+        // struct statfs {
+        // __fsword_t f_type;    // Type of filesystem (see below)
+        // __fsword_t f_bsize;   // Optimal transfer block size
+        // fsblkcnt_t f_blocks;  // Total data blocks in filesystem
+        // fsblkcnt_t f_bfree;   // Free blocks in filesystem
+        // fsblkcnt_t f_bavail;  // Free blocks available to
+        // unprivileged user
+        // fsfilcnt_t f_files;   // Total file nodes in filesystem
+        // fsfilcnt_t f_ffree;   // Free file nodes in filesystem
+        // fsid_t     f_fsid;    // Filesystem ID
+        // __fsword_t f_namelen; // Maximum length of filenames
+        // __fsword_t f_frsize;  // Fragment size (since Linux 2.6)
+        // __fsword_t f_flags;   // Mount flags of filesystem
+        // (since Linux 2.6.36)
+        // __fsword_t f_spare[xxx];
+        // Padding bytes reserved for future use
+        // };
+
+        let ctx = Arc::new(FuseContext::from(_req));
+        // in case we can't get the stat_fs, we just return a default one.
+        let state = self.vfs.stat_fs(ctx, _ino).unwrap_or(FSStat::default());
+
+        // Compute the total number of available blocks
+        let total_blocks = max(state.total_size / BLOCK_SIZE as u64, 1);
+        // Compute the total number of used blocks
+        let used_blocks = state.used_size / BLOCK_SIZE as u64;
+        // Compute the total number of remaining blocks
+        let remain_blocks = max(total_blocks as i64 - used_blocks as i64, 0) as u64;
+
+        reply.statfs(
+            // blocks the total number of available blocks
+            total_blocks,
+            // bfree: Number of free blocks available for use.
+            remain_blocks,
+            // bavail: Number of blocks available to unprivileged users.
+            remain_blocks,
+            // files: Total number of inodes (file system objects) in the file system.
+            u64::MAX,
+            // ffree: Number of free inodes available for creating new files.
+            u64::MAX - state.file_count,
+            // bsize: Fundamental block size of the file system (in bytes).
+            BLOCK_SIZE as u32,
+            // namelen: Maximum length of a filename.
+            MAX_NAME_LENGTH as u32,
+            // frsize: Fragment size (if file system supports fragmentation).
+            BLOCK_SIZE as u32,
+        );
+    }
+
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        let name = name.to_string_lossy().to_string();
+
+        match self.runtime.block_on(
+            self.vfs
+                .create(ctx.clone(), Ino(parent), &name, mode, umask, flags)
+                .in_current_span(),
+        ) {
+            Ok((entry, fh)) => reply.created(
+                self.vfs.get_entry_ttl(entry.attr.kind),
+                &entry.attr.to_fuse_attr(entry.inode),
+                1,
+                fh,
+                flags as u32,
+            ),
+            Err(e) => reply.error(e.to_errno()),
         }
     }
 
@@ -585,39 +656,5 @@ impl Filesystem for KisekiFuse {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         }
-    }
-
-    #[instrument(level = "info", skip_all, fields(req = req.unique(), ino = ino, fh = fh, name = field::Empty))]
-    fn release(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        _flags: i32,
-        _ock_owner: Option<u64>,
-        _flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        let ctx = Arc::new(FuseContext::from(req));
-        match self
-            .runtime
-            .block_on(self.vfs.release(ctx, Ino(ino), fh).in_current_span())
-        {
-            Ok(_) => reply.ok(),
-            Err(e) => reply.error(e.to_errno()),
-        };
-    }
-
-    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
-    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let ctx = Arc::new(FuseContext::from(_req));
-        match self.runtime.block_on(
-            self.vfs
-                .rmdir(ctx, Ino(parent), name.to_str().unwrap())
-                .in_current_span(),
-        ) {
-            Ok(_) => reply.ok(),
-            Err(e) => reply.error(e.to_errno()),
-        };
     }
 }
