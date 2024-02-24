@@ -984,6 +984,29 @@ impl MetaEngine {
     }
 }
 
+// Link
+impl MetaEngine {
+    /// [link] creates an entry for node.
+    pub async fn link(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        new_parent: Ino,
+        new_name: &str,
+    ) -> Result<InodeAttr> {
+        let current_attr = self.get_attr(inode).await?;
+        ensure!(!current_attr.is_dir(), LibcSnafu { errno: libc::EPERM });
+
+        let mut new_attr =
+            self.backend
+                .do_link(ctx, inode, new_parent, new_name, self.config.skip_dir_mtime)?;
+
+        self.open_files.refresh_attr(inode, &mut new_attr).await;
+
+        Ok(new_attr)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallocateMode(pub u8);
 

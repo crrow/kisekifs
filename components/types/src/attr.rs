@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use bitflags::bitflags;
 use fuser::{FileAttr, FileType};
@@ -80,36 +80,8 @@ pub struct InodeAttr {
     pub keep_cache: bool,
 }
 
+// Setter
 impl InodeAttr {
-    pub fn get_filetype(&self) -> FileType { self.kind }
-
-    pub fn is_filetype(&self, typ: FileType) -> bool { self.kind == typ }
-
-    pub fn is_dir(&self) -> bool { self.kind == FileType::Directory }
-
-    pub fn is_file(&self) -> bool { self.kind == FileType::RegularFile }
-
-    /// Providing default values guarantees for some critical inode,
-    /// makes them always available, even under slow or unreliable conditions.
-    pub fn hard_code_inode_attr(is_trash: bool) -> Self {
-        Self {
-            flags:      0,
-            kind:       FileType::Directory,
-            mode:       if is_trash { 0o555 } else { 0o777 },
-            uid:        0,
-            gid:        0,
-            rdev:       0,
-            atime:      SystemTime::UNIX_EPOCH,
-            mtime:      SystemTime::UNIX_EPOCH,
-            ctime:      SystemTime::UNIX_EPOCH,
-            crtime:     SystemTime::UNIX_EPOCH,
-            nlink:      2,
-            length:     4 << 10,
-            parent:     ROOT_INO,
-            keep_cache: false,
-        }
-    }
-
     pub fn set_flags(&mut self, flags: u32) -> &mut Self {
         self.flags = flags;
         self
@@ -169,6 +141,32 @@ impl InodeAttr {
         self.ctime = t;
         self
     }
+}
+
+// Getter
+impl InodeAttr {
+    pub fn get_filetype(&self) -> FileType { self.kind }
+
+    /// Providing default values guarantees for some critical inode,
+    /// makes them always available, even under slow or unreliable conditions.
+    pub fn hard_code_inode_attr(is_trash: bool) -> Self {
+        Self {
+            flags:      0,
+            kind:       FileType::Directory,
+            mode:       if is_trash { 0o555 } else { 0o777 },
+            uid:        0,
+            gid:        0,
+            rdev:       0,
+            atime:      SystemTime::UNIX_EPOCH,
+            mtime:      SystemTime::UNIX_EPOCH,
+            ctime:      SystemTime::UNIX_EPOCH,
+            crtime:     SystemTime::UNIX_EPOCH,
+            nlink:      2,
+            length:     4 << 10,
+            parent:     ROOT_INO,
+            keep_cache: false,
+        }
+    }
 
     pub fn keep_cache(&mut self) -> &mut Self {
         self.keep_cache = true;
@@ -183,6 +181,18 @@ impl InodeAttr {
     pub fn update_modification_time(&mut self) {
         self.mtime = SystemTime::now();
         self.ctime = SystemTime::now();
+    }
+
+    /// [update_modification_time_if] check if we need to update the
+    /// modification time  according to the [skip_update_duration]
+    pub fn update_modification_time_if(&mut self, now: SystemTime, skip_update_duration: Duration) -> bool {
+        if now.duration_since(self.mtime).unwrap() > skip_update_duration {
+            self.mtime = now;
+            self.ctime = now;
+            true
+        } else {
+            false
+        }
     }
 
     // Enforces different access levels for owner, group, and others.
@@ -253,6 +263,31 @@ impl InodeAttr {
         }
 
         fa
+    }
+}
+
+// Checker
+impl InodeAttr {
+    pub fn is_filetype(&self, typ: FileType) -> bool { self.kind == typ }
+
+    pub fn is_dir(&self) -> bool { self.kind == FileType::Directory }
+
+    pub fn is_file(&self) -> bool { self.kind == FileType::RegularFile }
+
+    pub fn is_immutable(&self) -> bool {
+        let flag = Flags::from_bits(self.flags as u8).unwrap();
+        flag.contains(Flags::IMMUTABLE)
+    }
+
+    pub fn is_append_only(&self) -> bool {
+        let flag = Flags::from_bits(self.flags as u8).unwrap();
+        flag.contains(Flags::APPEND)
+    }
+
+    pub fn is_normal(&self) -> bool {
+        let flag = Flags::from_bits(self.flags as u8).unwrap();
+        let contains = flag.contains(Flags::IMMUTABLE) || flag.contains(Flags::APPEND);
+        !contains
     }
 }
 

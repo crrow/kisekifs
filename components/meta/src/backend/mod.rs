@@ -111,4 +111,16 @@ pub trait Backend: Send + Sync + 'static {
         length: u64,
         skip_perm_check: bool,
     ) -> Result<InodeAttr>;
+
+    /// [do_link] creates an entry for the inode, return the new [InodeAttr].
+    /// Creating another directory entry (filename) that points directly to the
+    /// same inode as the original file.
+    fn do_link(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        new_parent: Ino,
+        new_name: &str,
+        skip_dir_mtime: Duration,
+    ) -> Result<InodeAttr>;
 }

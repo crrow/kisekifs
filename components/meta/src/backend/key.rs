@@ -61,8 +61,15 @@ pub fn attr(inode: Ino) -> Vec<u8> { format!("A{:0>8}I", inode.0).into_bytes() }
 pub fn dentry(parent: Ino, name: &str) -> Vec<u8> {
     format!("A{:0>8}D/{}", parent.0, name).into_bytes()
 }
-pub fn dentry_prefix(parent: Ino) -> Vec<u8> {
-    format!("A{:0>8}D/", parent.0).into_bytes()
+
+pub fn dentry_prefix(parent: Ino) -> Vec<u8> { format!("A{:0>8}D/", parent.0).into_bytes() }
+
+/// [parent] generate key for hard links.
+///
+/// This key is used to store the hard link count of a file.
+pub fn parent(inode: Ino, parent: Ino) -> Vec<u8> {
+    // AiiiiiiiiPiiiiiiii parents
+    format!("A{:0>8}P{:0>8}", inode.0, parent.0).into_bytes()
 }
 
 pub fn symlink(inode: Ino) -> Vec<u8> { format!("A{:0>8}S", inode.0).into_bytes() }

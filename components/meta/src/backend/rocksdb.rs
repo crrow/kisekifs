@@ -66,55 +66,73 @@ impl Debug for RocksdbBackend {
     }
 }
 
-impl RocksdbBackend {
-    fn do_get_dentry<Layer: DBAccess>(db: &Layer, parent: Ino, name: &str) -> Result<DEntry> {
-        let entry_key = key::dentry(parent, name);
-        let entry_buf = db
-            .get_pinned_opt(&entry_key, &rocksdb::ReadOptions::default())
-            .context(RocksdbSnafu)?
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::DEntry,
-                key:  String::from_utf8_lossy(&entry_key).to_string(),
-            })
-            .context(ModelSnafu)?;
+fn do_get_hard_link_count<Layer: DBAccess>(db: &Layer, inode: Ino, parent: Ino) -> Result<u64> {
+    let key = key::parent(inode, parent);
 
-        let entry_info: DEntry = bincode::deserialize(&entry_buf)
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::DEntry,
-                key:  String::from_utf8_lossy(&entry_key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        Ok(entry_info)
+    let buf = db
+        .get_pinned_opt(&key, &rocksdb::ReadOptions::default())
+        .context(RocksdbSnafu)?;
+    match buf {
+        Some(buf) => {
+            let count: u64 = bincode::deserialize(&buf)
+                .context(model_err::CorruptionSnafu {
+                    kind: ModelKind::HardLinkCount,
+                    key:  String::from_utf8_lossy(&key).to_string(),
+                })
+                .context(ModelSnafu)?;
+            Ok(count)
+        }
+        None => Ok(0),
     }
+}
 
-    fn do_get_attr<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<InodeAttr> {
-        let attr_key = key::attr(inode);
-        let buf = db
-            .get_pinned_opt(&attr_key, &rocksdb::ReadOptions::default())
-            .context(RocksdbSnafu)?
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::Attr,
-                key:  String::from_utf8_lossy(&attr_key).to_string(),
-            })
-            .context(ModelSnafu)?;
+fn do_get_dentry<Layer: DBAccess>(db: &Layer, parent: Ino, name: &str) -> Result<DEntry> {
+    let entry_key = key::dentry(parent, name);
+    let entry_buf = db
+        .get_pinned_opt(&entry_key, &rocksdb::ReadOptions::default())
+        .context(RocksdbSnafu)?
+        .context(model_err::NotFoundSnafu {
+            kind: ModelKind::DEntry,
+            key:  String::from_utf8_lossy(&entry_key).to_string(),
+        })
+        .context(ModelSnafu)?;
 
-        let attr: InodeAttr = bincode::deserialize(&buf)
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::Attr,
-                key:  String::from_utf8_lossy(&attr_key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        Ok(attr)
-    }
+    let entry_info: DEntry = bincode::deserialize(&entry_buf)
+        .context(model_err::CorruptionSnafu {
+            kind: ModelKind::DEntry,
+            key:  String::from_utf8_lossy(&entry_key).to_string(),
+        })
+        .context(ModelSnafu)?;
+    Ok(entry_info)
+}
 
-    fn do_check_exist_children<DB>(txn: &rocksdb::Transaction<DB>, parent: Ino) -> Result<bool> {
-        let prefix = key::dentry_prefix(parent);
-        let mut ro = rocksdb::ReadOptions::default();
-        ro.set_iterate_range(rocksdb::PrefixRange(prefix.as_slice()));
-        let mut iter = txn.raw_iterator_opt(ro);
-        iter.seek_to_first();
-        Ok(iter.valid())
-    }
+fn do_get_attr<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<InodeAttr> {
+    let attr_key = key::attr(inode);
+    let buf = db
+        .get_pinned_opt(&attr_key, &rocksdb::ReadOptions::default())
+        .context(RocksdbSnafu)?
+        .context(model_err::NotFoundSnafu {
+            kind: ModelKind::Attr,
+            key:  String::from_utf8_lossy(&attr_key).to_string(),
+        })
+        .context(ModelSnafu)?;
+
+    let attr: InodeAttr = bincode::deserialize(&buf)
+        .context(model_err::CorruptionSnafu {
+            kind: ModelKind::Attr,
+            key:  String::from_utf8_lossy(&attr_key).to_string(),
+        })
+        .context(ModelSnafu)?;
+    Ok(attr)
+}
+
+fn do_check_exist_children<DB>(txn: &rocksdb::Transaction<DB>, parent: Ino) -> Result<bool> {
+    let prefix = key::dentry_prefix(parent);
+    let mut ro = rocksdb::ReadOptions::default();
+    ro.set_iterate_range(rocksdb::PrefixRange(prefix.as_slice()));
+    let mut iter = txn.raw_iterator_opt(ro);
+    iter.seek_to_first();
+    Ok(iter.valid())
 }
 
 fn txn_put_attr<DB>(txn: &rocksdb::Transaction<DB>, inode: Ino, attr: &InodeAttr) -> Result<()> {
@@ -126,6 +144,65 @@ fn txn_put_attr<DB>(txn: &rocksdb::Transaction<DB>, inode: Ino, attr: &InodeAttr
         })
         .context(ModelSnafu)?;
     txn.put(&attr_key, &buf).context(RocksdbSnafu)?;
+    Ok(())
+}
+
+fn set_dentry_in_write_batch<const TRANSACTION: bool>(
+    batch: &mut rocksdb::WriteBatchWithTransaction<TRANSACTION>,
+    parent: Ino,
+    name: &str,
+    inode: Ino,
+    typ: FileType,
+) -> Result<()> {
+    let entry_key = key::dentry(parent, name);
+    set_value_in_write_batch(
+        batch,
+        ModelKind::DEntry,
+        entry_key.as_slice(),
+        &DEntry {
+            parent,
+            name: name.to_string(),
+            inode,
+            typ,
+        },
+    )
+}
+
+fn set_attr_in_write_batch<const TRANSACTION: bool>(
+    batch: &mut rocksdb::WriteBatchWithTransaction<TRANSACTION>,
+    inode: Ino,
+    attr: &InodeAttr,
+) -> Result<()> {
+    let attr_key = key::attr(inode);
+    set_value_in_write_batch(batch, ModelKind::Attr, attr_key.as_slice(), attr)
+}
+
+fn set_hard_link_count_in_write_batch<const TRANSACTION: bool>(
+    batch: &mut rocksdb::WriteBatchWithTransaction<TRANSACTION>,
+    inode: Ino,
+    parent: Ino,
+    cnt: u64,
+) -> Result<()> {
+    let key = key::parent(inode, parent);
+    set_value_in_write_batch(batch, ModelKind::HardLinkCount, key.as_slice(), cnt)
+}
+
+fn set_value_in_write_batch<const TRANSACTION: bool, V>(
+    batch: &mut rocksdb::WriteBatchWithTransaction<TRANSACTION>,
+    kind: ModelKind,
+    key: &[u8],
+    value: V,
+) -> Result<()>
+where
+    V: Serialize,
+{
+    let buf = bincode::serialize(&value)
+        .context(model_err::CorruptionSnafu {
+            kind,
+            key: String::from_utf8_lossy(key).to_string(),
+        })
+        .context(ModelSnafu)?;
+    batch.put(key, buf);
     Ok(())
 }
 
@@ -209,7 +286,7 @@ impl Backend for RocksdbBackend {
         Ok(count)
     }
 
-    fn get_attr(&self, inode: Ino) -> Result<InodeAttr> { Self::do_get_attr(&self.db, inode) }
+    fn get_attr(&self, inode: Ino) -> Result<InodeAttr> { do_get_attr(&self.db, inode) }
 
     fn set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()> {
         let attr_key = key::attr(inode);
@@ -224,7 +301,7 @@ impl Backend for RocksdbBackend {
     }
 
     fn get_dentry(&self, parent: Ino, name: &str) -> Result<DEntry> {
-        Self::do_get_dentry(&self.db, parent, name)
+        do_get_dentry(&self.db, parent, name)
     }
 
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()> {
@@ -394,7 +471,7 @@ impl Backend for RocksdbBackend {
     ) -> Result<(Ino, InodeAttr)> {
         let txn = self.db.transaction();
         debug!("get attr {} from backend", parent);
-        let mut parent_attr = Self::do_get_attr(&txn, parent)?;
+        let mut parent_attr = do_get_attr(&txn, parent)?;
         ensure!(
             parent_attr.is_dir(),
             LibcSnafu {
@@ -418,10 +495,10 @@ impl Backend for RocksdbBackend {
         );
 
         // check if the entry already exists
-        if let Ok(found_entry) = Self::do_get_dentry(&txn, parent, name) {
+        if let Ok(found_entry) = do_get_dentry(&txn, parent, name) {
             if matches!(found_entry.typ, FileType::Directory | FileType::RegularFile) {
                 // load the exists inode attr
-                match Self::do_get_attr(&txn, found_entry.inode) {
+                match do_get_attr(&txn, found_entry.inode) {
                     Ok(found_attr) => {
                         new_inode_attr = found_attr;
                     }
@@ -551,7 +628,7 @@ impl Backend for RocksdbBackend {
         skip_dir_mtime: Duration,
     ) -> Result<(DEntry, InodeAttr)> {
         let txn = self.db.transaction();
-        let entry_info = Self::do_get_dentry(&txn, parent, name)?;
+        let entry_info = do_get_dentry(&txn, parent, name)?;
         ensure!(
             entry_info.typ == FileType::Directory,
             LibcSnafu {
@@ -559,7 +636,7 @@ impl Backend for RocksdbBackend {
             }
         );
         // get parent and child's attr
-        let mut parent_attr = Self::do_get_attr(&txn, parent)?;
+        let mut parent_attr = do_get_attr(&txn, parent)?;
         ensure!(
             // parent must be dir.
             parent_attr.is_dir(),
@@ -567,7 +644,7 @@ impl Backend for RocksdbBackend {
                 errno: libc::ENOTDIR,
             }
         );
-        let child_attr = Self::do_get_attr(&txn, entry_info.inode)?;
+        let child_attr = do_get_attr(&txn, entry_info.inode)?;
         ensure!(
             // child must be dir. check again in case of we found that the entry info tells
             // the different story.
@@ -588,7 +665,7 @@ impl Backend for RocksdbBackend {
             LibcSnafu { errno: libc::EPERM }
         );
         ensure!(
-            !Self::do_check_exist_children(&txn, entry_info.inode)?,
+            !do_check_exist_children(&txn, entry_info.inode)?,
             LibcSnafu {
                 errno: libc::ENOTEMPTY,
             }
@@ -657,7 +734,7 @@ impl Backend for RocksdbBackend {
         skip_perm_check: bool,
     ) -> Result<InodeAttr> {
         let txn = self.db.transaction();
-        let mut old_attr = Self::do_get_attr(&txn, inode)?;
+        let mut old_attr = do_get_attr(&txn, inode)?;
         ensure!(
             matches!(old_attr.kind, FileType::RegularFile),
             LibcSnafu { errno: libc::EPERM }
@@ -682,6 +759,67 @@ impl Backend for RocksdbBackend {
         txn.commit().context(RocksdbSnafu)?;
         Ok(old_attr.clone())
     }
+
+    fn do_link(
+        &self,
+        ctx: Arc<FuseContext>,
+        inode: Ino,
+        new_parent: Ino,
+        new_name: &str,
+        skip_dir_mtime: Duration,
+    ) -> Result<InodeAttr> {
+        let txn = self.db.transaction();
+
+        // get parent and child's attr
+        let mut parent_attr = do_get_attr(&txn, new_parent)?;
+        ensure!(
+            // parent must be dir.
+            parent_attr.is_dir(),
+            LibcSnafu {
+                errno: libc::ENOTDIR,
+            }
+        );
+        ctx.check_access(&parent_attr, kiseki_common::MODE_MASK_W)?;
+        ensure!(
+            !parent_attr.is_immutable(),
+            LibcSnafu { errno: libc::EPERM }
+        );
+
+        let mut child_attr = do_get_attr(&txn, inode)?;
+        ensure!(!child_attr.is_dir(), LibcSnafu { errno: libc::EPERM });
+        ensure!(child_attr.is_normal(), LibcSnafu { errno: libc::EPERM });
+        ensure!(
+            // the target inode must be empty
+            do_get_dentry(&txn, new_parent, new_name).is_err(),
+            LibcSnafu {
+                errno: libc::EEXIST,
+            }
+        );
+        // check if we need to update the parent
+        let now = SystemTime::now();
+        let need_update_parent_attr = parent_attr.update_modification_time_if(now, skip_dir_mtime);
+        let old_parent = child_attr.parent;
+        child_attr.ctime = now;
+        child_attr.nlink += 1;
+
+        let mut batch = txn.get_writebatch();
+        // 1. create an entry that points to the original inode.
+        set_dentry_in_write_batch(&mut batch, new_parent, new_name, inode, child_attr.kind)?;
+        if need_update_parent_attr {
+            // 2. update parent attr
+            set_attr_in_write_batch(&mut batch, new_parent, &parent_attr)?;
+        }
+        // 3. update child attr
+        set_attr_in_write_batch(&mut batch, inode, &child_attr)?;
+        if !child_attr.parent.is_zero() {
+            let cnt = do_get_hard_link_count(&txn, inode, old_parent)?;
+            set_hard_link_count_in_write_batch(&mut batch, inode, old_parent, cnt + 1)?;
+        }
+        let cnt = do_get_hard_link_count(&txn, inode, new_parent)?;
+        set_hard_link_count_in_write_batch(&mut batch, inode, new_parent, cnt + 1)?;
+        self.db.write(batch).context(RocksdbSnafu)?;
+        Ok(child_attr)
+    }
 }
 
 #[cfg(feature = "meta-rocksdb")]
@@ -700,14 +838,12 @@ mod tests {
         let db = rocksdb::OptimisticTransactionDB::open(&opts, tempdir.path()).unwrap();
         let backend = RocksdbBackend { db };
         // it should be empty at first
-        let exist =
-            RocksdbBackend::do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
+        let exist = do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
         assert_eq!(exist, false);
 
         // it should be empty after we insert a key-value pair
         backend.set_attr(Ino(1), &InodeAttr::default()).unwrap();
-        let exist =
-            RocksdbBackend::do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
+        let exist = do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
         assert_eq!(exist, false);
 
         // now create a new inode under the inode 1
@@ -717,8 +853,7 @@ mod tests {
             .set_dentry(Ino(1), "test", Ino(2), FileType::RegularFile)
             .unwrap();
         // now it should exist
-        let exist =
-            RocksdbBackend::do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
+        let exist = do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
         assert_eq!(exist, true);
 
         backend
