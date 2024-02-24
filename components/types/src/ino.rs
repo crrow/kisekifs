@@ -29,7 +29,6 @@ pub const CONTROL_INODE: Ino = Ino(0x7FFFFFFF00000002);
 pub const STATS_INODE: Ino = Ino(0x7FFFFFFF00000003);
 pub const CONFIG_INODE: Ino = Ino(0x7FFFFFFF00000004);
 pub const MAX_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF10000000);
-pub const TRASH_INODE: Ino = MAX_INTERNAL_INODE;
 
 const INO_SIZE: usize = std::mem::size_of::<Ino>();
 
@@ -60,7 +59,6 @@ impl From<Ino> for u64 {
 }
 
 impl Ino {
-    pub fn is_trash(&self) -> bool { self.0 >= TRASH_INODE.0 }
 
     pub fn is_special(&self) -> bool { *self >= MIN_INTERNAL_INODE }
 

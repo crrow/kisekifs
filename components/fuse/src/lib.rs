@@ -166,7 +166,7 @@ impl Filesystem for KisekiFuse {
 
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let ctx = FuseContext::from(_req);
+        let ctx = Arc::new( FuseContext::from(_req));
         let name = match name.to_str() {
             Some(n) => n,
             None => {
@@ -182,7 +182,7 @@ impl Filesystem for KisekiFuse {
 
         let entry = match self.runtime.block_on(
             self.vfs
-                .lookup(&ctx, Ino::from(parent), name)
+                .lookup(ctx.clone(), Ino::from(parent), name)
                 .in_current_span(),
         ) {
             Ok(n) => n,
@@ -309,6 +309,18 @@ impl Filesystem for KisekiFuse {
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .unlink(ctx, Ino(parent), name.to_str().unwrap())
+                .in_current_span(),
+        ) {
+            Ok(()) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         }
     }

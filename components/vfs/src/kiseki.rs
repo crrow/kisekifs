@@ -34,7 +34,7 @@ use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
     ino::{Ino, CONTROL_INODE, ROOT_INO},
-    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME, TRASH_INODE_NAME},
+    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
     slice::SliceID,
     ToErrno,
 };
@@ -250,7 +250,12 @@ impl KisekiVFS {
         Ok(h)
     }
 
-    pub async fn lookup(&self, ctx: &FuseContext, parent: Ino, name: &str) -> Result<FullEntry> {
+    pub async fn lookup(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+    ) -> Result<FullEntry> {
         trace!("fs:lookup with parent {:?} name {:?}", parent, name);
         // TODO: handle the special case
         if parent == ROOT_INO || name.eq(CONTROL_INODE_NAME) {
@@ -815,9 +820,6 @@ impl KisekiVFS {
                 errno: libc::ENAMETOOLONG,
             }
         );
-        if parent == ROOT_INO && name == TRASH_INODE_NAME || parent.is_trash() && ctx.uid != 0 {
-            return LibcSnafu { errno: EPERM }.fail()?;
-        }
         self.meta
             .rmdir(ctx, parent, name)
             .await
@@ -917,7 +919,6 @@ impl KisekiVFS {
         new_parent: Ino,
         new_name: &str,
     ) -> Result<FullEntry> {
-        ensure!(!inode.is_special(), LibcSnafu { errno: libc::EPERM });
         ensure!(
             new_name.len() < MAX_NAME_LENGTH,
             LibcSnafu {
@@ -930,11 +931,28 @@ impl KisekiVFS {
                 errno: libc::ENOENT,
             }
         );
-        ensure!(!new_parent.is_trash(), LibcSnafu { errno: libc::EPERM });
 
         let attr = self.meta.link(ctx, inode, new_parent, new_name).await?;
         let e = FullEntry::new(inode, new_name, attr);
         Ok(e)
+    }
+
+    pub async fn unlink(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
+        ensure!(
+            name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+        ensure!(
+            name.len() != 0,
+            LibcSnafu {
+                errno: libc::ENOENT,
+            }
+        );
+
+        self.meta.unlink(ctx, parent, name).await?;
+        Ok(())
     }
 }
 
@@ -1100,7 +1118,7 @@ mod tests {
         );
 
         let time = SystemTime::now();
-        let f_new_attr = vfs
+        let f1_attr = vfs
             .set_attr(
                 ctx.clone(),
                 f1.inode,
@@ -1120,16 +1138,28 @@ mod tests {
                 None,
             )
             .await?;
-        assert_eq!(f_new_attr.mode, 0o755);
-        assert_eq!(f_new_attr.uid, 1);
-        assert_eq!(f_new_attr.gid, 3);
-        assert_eq!(f_new_attr.atime, time);
-        assert_eq!(f_new_attr.mtime, time);
-        assert_eq!(f_new_attr.length, 1024);
+        assert_eq!(f1_attr.mode, 0o755);
+        assert_eq!(f1_attr.uid, 1);
+        assert_eq!(f1_attr.gid, 3);
+        assert_eq!(f1_attr.atime, time);
+        assert_eq!(f1_attr.mtime, time);
+        assert_eq!(f1_attr.length, 1024);
 
-        vfs.check_access(ctx.clone(), f1.inode, &f_new_attr, libc::X_OK)?;
+        vfs.check_access(ctx.clone(), f1.inode, &f1_attr, libc::X_OK)?;
 
+        // link root/f2 -> d1/f1
         let f2_entry = vfs.link(ctx.clone(), f1.inode, ROOT_INO, "f2").await?;
+        let f1_attr = vfs.get_attr(f1.inode).await?;
+        assert_eq!(f1_attr.nlink, 2);
+
+        // unlink d1/f1
+        vfs.unlink(ctx.clone(), dir1.inode, &f1.name).await?;
+        // lookup root/f2
+        if let Ok(e) = vfs.lookup(ctx.clone(), ROOT_INO, &f2_entry.name).await {
+            assert_eq!(e.attr.nlink, 1);
+        } else {
+            panic!("lookup f2 failed");
+        }
 
         Ok(())
     }

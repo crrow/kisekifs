@@ -15,17 +15,17 @@ pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
 
-use crate::err::UnsupportedMetaDSNSnafu;
+use crate::{err::UnsupportedMetaDSNSnafu, open_files::OpenFilesRef};
 
 // TODO: optimize me
-pub fn open_backend(dsn: &str) -> Result<BackendRef> {
+pub fn open_backend(dsn: &str, skip_dir_mtime: Duration) -> Result<BackendRef> {
     let x = dsn.splitn(2, "://:").collect::<Vec<_>>();
     ensure!(x.len() == 2, UnsupportedMetaDSNSnafu { dsn: dsn.clone() });
     let backend_kind = x[0];
     let path = x[1];
 
     let backend = BackendKinds::from_str(backend_kind).expect("unsupported backend kind");
-    backend.build(path)
+    backend.build(path, skip_dir_mtime)
 }
 
 #[derive(Debug, EnumString)]
@@ -36,12 +36,12 @@ enum BackendKinds {
 }
 
 impl BackendKinds {
-    fn build(&self, path: &str) -> Result<BackendRef> {
+    fn build(&self, path: &str, skip_dir_mtime: Duration) -> Result<BackendRef> {
         match self {
             #[cfg(feature = "meta-rocksdb")]
             BackendKinds::Rocksdb => {
                 let mut builder = rocksdb::Builder::default();
-                builder.with_path(path);
+                builder.with_path(path).with_skip_dir_mtime(skip_dir_mtime);
                 debug!("backend [rocksdb] is built with path: {}", path);
                 builder.build()
             }
@@ -52,7 +52,8 @@ impl BackendKinds {
 
 pub type BackendRef = Arc<dyn Backend>;
 
-pub trait Backend: Send + Sync + 'static {
+#[async_trait::async_trait]
+pub trait Backend: Send + Sync {
     fn set_format(&self, format: &Format) -> Result<()>;
     fn load_format(&self) -> Result<Format>;
 
@@ -121,6 +122,33 @@ pub trait Backend: Send + Sync + 'static {
         inode: Ino,
         new_parent: Ino,
         new_name: &str,
-        skip_dir_mtime: Duration,
     ) -> Result<InodeAttr>;
+
+    /// [do_unlink] removes a file entry from a directory.
+    /// return the freed space size and inode count.
+    async fn do_unlink(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: String,
+        session_id: u64,
+        open_files_ref: OpenFilesRef,
+    ) -> Result<UnlinkResult>;
+
+    /// do_delete_chunks try to delete all [free] slices of a file,
+    /// free means that slice is not been borrowed.
+    fn do_delete_chunks(&self, inode: Ino);
+}
+
+pub struct UnlinkResult {
+    // The inode of the file
+    pub inode:       Ino,
+    // the removed inode attr, if the file is removed
+    pub removed:     Option<InodeAttr>,
+    // the freed space size
+    pub freed_space: u64,
+    // the freed inode count
+    pub freed_inode: u64,
+    // whether the file is opened while we're trying to unlink
+    pub is_opened:   bool,
 }

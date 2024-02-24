@@ -20,7 +20,7 @@ use kiseki_common::BlockSize;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::ino::{Ino, ROOT_INO};
+use crate::ino::{Ino, ROOT_INO, ZERO_INO};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetAttrFlags(pub u32);
@@ -166,6 +166,26 @@ impl InodeAttr {
             parent:     ROOT_INO,
             keep_cache: false,
         }
+    }
+
+    pub fn empty ()  -> Self{
+        Self {
+            flags:      0,
+            kind:       FileType::Directory,
+            mode:       0,
+            uid:        0,
+            gid:        0,
+            rdev:       0,
+            atime:      SystemTime::UNIX_EPOCH,
+            mtime:      SystemTime::UNIX_EPOCH,
+            ctime:      SystemTime::UNIX_EPOCH,
+            crtime:     SystemTime::UNIX_EPOCH,
+            nlink:      0,
+            length:     0,
+            parent:     ROOT_INO,
+            keep_cache: false,
+        }
+
     }
 
     pub fn keep_cache(&mut self) -> &mut Self {

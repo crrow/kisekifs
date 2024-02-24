@@ -19,8 +19,8 @@ use kiseki_common::{ChunkIndex, CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{DEntry, Entry, FullEntry},
-    ino::{Ino, ROOT_INO, TRASH_INODE},
-    internal_nodes::{InternalNode, TRASH_INODE_NAME},
+    ino::{Ino, ROOT_INO},
+    internal_nodes::InternalNode,
     setting::Format,
     slice::{Slice, SliceID, Slices, SLICE_BYTES},
     stat::{DirStat, FSStat},
@@ -31,7 +31,7 @@ use scopeguard::defer;
 use serde::Serialize;
 use snafu::{ensure, ResultExt};
 use tokio::{
-    sync::RwLock,
+    sync::{RwLock, Semaphore},
     time::{timeout, Instant},
 };
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -42,22 +42,25 @@ use crate::{
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
     id_table::IdTable,
-    open_files::{InvalidSliceReq, OpenFiles},
+    open_files::{InvalidReq, OpenFiles, OpenFilesRef},
 };
 
 pub type MetaEngineRef = Arc<MetaEngine>;
 
 pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
-    let backend = open_backend(&config.dsn)?;
+    let backend = open_backend(&config.dsn, config.skip_dir_mtime)?;
     let format = backend.load_format()?;
-    let open_files = OpenFiles::new(config.open_cache, config.open_cache_limit);
+    let open_files = Arc::new(OpenFiles::new(config.open_cache, config.open_cache_limit));
 
     let me = MetaEngine {
         config,
         format,
         root: ROOT_INO,
+        session_id: 0,
         open_files,
         removed_files: Default::default(),
+        // Limit the number of incoming requests being handled at the same time
+        delete_semaphore: Arc::new(Semaphore::const_new(100)),
         dir_parents: Default::default(),
         fs_stat_used_size: Default::default(),
         fs_stat_file_count: Default::default(),
@@ -73,7 +76,7 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
 
 // update_format is used to change the file system's setting.
 pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
-    let backend = open_backend(dsn)?;
+    let backend = open_backend(dsn, Duration::from_millis(100))?;
 
     let mut need_init_root = false;
     match backend.load_format() {
@@ -103,16 +106,6 @@ pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
         .set_parent(ROOT_INO)
         .to_owned();
 
-    if format.trash_days > 0 {
-        if let Err(e) = backend.get_attr(TRASH_INODE) {
-            if e.is_not_found() {
-                basic_attr.set_mode(0o555);
-                backend.set_attr(TRASH_INODE, &basic_attr)?;
-            } else {
-                return Err(e);
-            }
-        }
-    }
     backend.set_format(&format)?;
     if need_init_root {
         basic_attr.set_mode(0o777);
@@ -133,9 +126,19 @@ pub struct MetaEngine {
     // TODO: review me. JuiceFS use it for enabling chroot.
     root:   Ino,
 
-    // track opened/deleted files
-    open_files:    OpenFiles,
-    removed_files: RwLock<HashSet<Ino>>,
+    session_id: u64,
+
+    // track the open files, since we cannot remove the associated
+    // info of the file when it is being opened.
+    open_files:       OpenFilesRef,
+    // track those inodes that has been being removed totally since
+    // someone has opened it.
+    //
+    // check this set when closing the inode, when we actually close
+    // the inode, we should call the actual delete operation.
+    removed_files:    RwLock<HashSet<Ino>>,
+    // when do actual delete operation, try to acquire the permit first.
+    delete_semaphore: Arc<Semaphore>,
 
     // directory inode -> parent inode
     dir_parents:        RwLock<HashMap<Ino, Ino>>,
@@ -212,7 +215,7 @@ impl MetaEngine {
     /// directory.
     pub async fn lookup(
         &self,
-        ctx: &FuseContext,
+        ctx: Arc<FuseContext>,
         parent: Ino,
         name: &str,
         check_perm: bool,
@@ -248,12 +251,9 @@ impl MetaEngine {
             let attr = self.get_attr(parent).await?;
             return Ok((parent, attr));
         }
-        if parent == ROOT_INO && name == TRASH_INODE_NAME {
-            return Ok((TRASH_INODE, self.get_attr(TRASH_INODE).await?));
-        }
         let (inode, attr) = self.do_lookup(parent, name)?;
 
-        if attr.kind == FileType::Directory && !parent.is_trash() {
+        if attr.kind == FileType::Directory {
             self.add_dir2parent_mapping(inode, parent).await;
         }
 
@@ -281,7 +281,7 @@ impl MetaEngine {
 
         // update cache
         self.open_files.refresh_attr(inode, &mut attr).await;
-        if attr.is_filetype(FileType::Directory) && !inode.is_root() && !attr.parent.is_trash() {
+        if attr.is_filetype(FileType::Directory) && !inode.is_root() {
             self.add_dir2parent_mapping(inode, attr.parent).await;
         }
         Ok(attr)
@@ -308,14 +308,8 @@ impl MetaEngine {
         let mut basic_entries = Entry::new_basic_entry_pair(inode, attr.parent);
         // let mut basic_entries = vec![];
 
-        if let Err(e) = self.do_read_dir(inode, plus, &mut basic_entries, -1).await {
-            return if e.is_not_found() && inode.is_trash() {
-                Ok(basic_entries)
-            } else {
-                error!("readdir failed: {:?}", e);
-                Err(e)
-            };
-        }
+        self.do_read_dir(inode, plus, &mut basic_entries, -1)
+            .await?;
 
         debug!("find entries: {:?}", &basic_entries);
 
@@ -437,10 +431,6 @@ impl MetaEngine {
         rdev: u32,
         path: String,
     ) -> Result<(Ino, InodeAttr)> {
-        ensure!(
-            !parent.is_trash() && !(parent.is_root() && name == TRASH_INODE_NAME),
-            LibcSnafu { errno: libc::EPERM }
-        );
         ensure!(!self.config.read_only, LibcSnafu { errno: libc::EROFS });
         ensure!(
             !name.is_empty(),
@@ -450,35 +440,8 @@ impl MetaEngine {
         );
 
         let parent = self.check_root(parent);
-        let r = self
-            .do_mknod(ctx, parent, name, typ, mode, umask, rdev, path)
-            .await?;
 
-        self.fs_stat_file_count.fetch_add(1, Ordering::AcqRel);
-        self.fs_stat_used_size.fetch_add(4096, Ordering::Acquire);
-
-        Ok(r)
-    }
-
-    /// FIXME: implement me in the backend side.
-    #[allow(clippy::too_many_arguments)]
-    async fn do_mknod(
-        &self,
-        ctx: Arc<FuseContext>,
-        parent: Ino,
-        name: &str,
-        typ: FileType,
-        mode: u32,
-        umask: u32,
-        rdev: u32,
-        path: String,
-    ) -> Result<(Ino, InodeAttr)> {
-        let new_inode = if parent.is_trash() {
-            let next = self.backend.increase_count_by(Counter::NextTrash, 1)?;
-            TRASH_INODE + Ino::from(next)
-        } else {
-            Ino::from(self.free_inodes.next().await?)
-        };
+        let new_inode = Ino::from(self.free_inodes.next().await?);
         debug!("new inode: {}", new_inode);
 
         let mut attr = InodeAttr::default()
@@ -499,8 +462,14 @@ impl MetaEngine {
             }
         };
 
-        self.backend
-            .do_mknod(ctx, new_inode, attr, parent, name, typ, path)
+        let r = self
+            .backend
+            .do_mknod(ctx, new_inode, attr, parent, name, typ, path)?;
+
+        self.fs_stat_file_count.fetch_add(1, Ordering::AcqRel);
+        self.fs_stat_used_size.fetch_add(4096, Ordering::Acquire);
+
+        Ok(r)
     }
 
     pub async fn create(
@@ -568,10 +537,6 @@ impl MetaEngine {
         let inode = self.check_root(ino);
 
         let cur_attr = self.backend.get_attr(inode)?;
-        ensure!(
-            !cur_attr.parent.is_trash(),
-            LibcSnafu { errno: libc::EPERM }
-        );
         let now = SystemTime::now();
         let mut dirty_attr = self.merge_attr(ctx, flags, ino, &cur_attr, new_attr, now)?;
         dirty_attr.ctime = now;
@@ -747,7 +712,7 @@ impl MetaEngine {
         ctx.check_access(&attr, mask)?;
 
         let attr_flags = kiseki_types::attr::Flags::from_bits(attr.flags as u8).unwrap();
-        if (attr_flags.contains(kiseki_types::attr::Flags::IMMUTABLE) || attr.parent.is_trash())
+        if (attr_flags.contains(kiseki_types::attr::Flags::IMMUTABLE))
             && flags & (libc::O_WRONLY | libc::O_RDWR) != 0
         {
             LibcSnafu { errno: libc::EPERM }.fail()?;
@@ -834,7 +799,7 @@ impl MetaEngine {
 
         // TODO: update the cache
         self.open_files
-            .invalid_slices(inode, InvalidSliceReq::One(chunk_idx))
+            .invalid(inode, InvalidReq::OneChunk(chunk_idx))
             .await;
 
         Ok(())
@@ -986,7 +951,7 @@ impl MetaEngine {
 
 // Link
 impl MetaEngine {
-    /// [link] creates an entry for node.
+    /// [MetaEngine::link] creates an entry for the inode.
     pub async fn link(
         &self,
         ctx: Arc<FuseContext>,
@@ -997,13 +962,67 @@ impl MetaEngine {
         let current_attr = self.get_attr(inode).await?;
         ensure!(!current_attr.is_dir(), LibcSnafu { errno: libc::EPERM });
 
-        let mut new_attr =
-            self.backend
-                .do_link(ctx, inode, new_parent, new_name, self.config.skip_dir_mtime)?;
+        let new_attr = self.backend.do_link(ctx, inode, new_parent, new_name)?;
 
-        self.open_files.refresh_attr(inode, &mut new_attr).await;
+        self.open_files.invalid(inode, InvalidReq::OnlyAttr).await;
 
         Ok(new_attr)
+    }
+
+    /// [MetaEngine::unlink] removes a file entry from a directory.
+    /// The file will be deleted if it's not linked by any entries and not open
+    /// by any sessions.
+    pub async fn unlink(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
+        let open_files = self.open_files.clone();
+        let unlink_result = self
+            .backend
+            .do_unlink(
+                ctx,
+                parent,
+                name.to_string(),
+                self.session_id.clone(),
+                open_files,
+            )
+            .await?;
+        self.fs_stat_used_size
+            .fetch_sub(unlink_result.freed_space, Ordering::AcqRel);
+        self.fs_stat_file_count
+            .fetch_sub(unlink_result.freed_inode, Ordering::AcqRel);
+        self.open_files
+            .invalid(unlink_result.inode, InvalidReq::OnlyAttr)
+            .await;
+        if let Some(_) = unlink_result.removed {
+            self.delete_file(unlink_result.is_opened, unlink_result.inode)
+                .await;
+        }
+        Ok(())
+    }
+}
+
+// Delete Helper
+impl MetaEngine {
+    // delete_file may be unable to delete the file directly since the file may be
+    // still in using.
+    //
+    // If the file is opened, then we just add the file to the removed_files set.
+    // When close the file, we should check the remove set, when we actually close
+    // the file, we can do the actual remove.
+    async fn delete_file(&self, opened: bool, inode: Ino) {
+        if opened {
+            let mut write_guard = self.removed_files.write().await;
+            write_guard.insert(inode);
+            drop(write_guard);
+        } else {
+            // spawn a task to delete the file
+            let sem = self.delete_semaphore.clone();
+            let backend = self.backend.clone();
+            // spawn task here since we use semaphore to limit the concurrent
+            tokio::spawn(async move {
+                // Safety: the semaphore's lifetime is binding to the MetaEngine.
+                let _permit = sem.acquire().await.unwrap();
+                backend.do_delete_chunks(inode);
+            });
+        }
     }
 }
 
