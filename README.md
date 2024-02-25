@@ -5,9 +5,17 @@ of [JuiceFS](https://github.com/juicedata/juicefs).
 
 **It's just a rust learning project and not ready for production.**
 
-If you don't know juicefs very much, you can check
-the [juicefs's architecture](https://juicefs.com/docs/en/overview/architecture.html).
+If you don't know juicefs very much, the following is the introduction of juicefs:
 
+```
+JuiceFS is an open-source, high-performance distributed file system designed for the cloud. By providing full POSIX
+compatibility, it allows almost all kinds of object storage to be used as massive
+local disks and to be mounted and accessed on different hosts across platforms and regions.
+
+JuiceFS separates "data" and "metadata" storage. Files are split into chunks and stored in object storage like Amazon
+S3. The corresponding metadata can be stored in various databases such as Redis, MySQL, TiKV, and SQLite, based on the
+scenarios and requirements.
+```
 
 # Quick Start
 
