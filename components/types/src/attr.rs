@@ -203,6 +203,11 @@ impl InodeAttr {
         self.ctime = SystemTime::now();
     }
 
+    pub fn update_modification_time_with(&mut self, time: SystemTime) {
+        self.mtime = time;
+        self.ctime = time;
+    }
+
     /// [update_modification_time_if] check if we need to update the
     /// modification time  according to the [skip_update_duration]
     pub fn update_modification_time_if(&mut self, now: SystemTime, skip_update_duration: Duration) -> bool {
