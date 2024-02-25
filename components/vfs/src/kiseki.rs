@@ -821,6 +821,14 @@ impl KisekiVFS {
 
         Ok(())
     }
+
+    pub async fn release_dir(&self, inode: Ino, fh: FH) -> Result<()> {
+        if let Some(dh) = self.handle_table.find_handle(inode, fh).await {
+            let _ = dh.as_dir_handle().context(LibcSnafu { errno: EBADF })?;
+            self.handle_table.release_file_handle(inode, fh).await;
+        }
+        Ok(())
+    }
 }
 
 // File
