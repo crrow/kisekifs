@@ -363,7 +363,12 @@ impl Filesystem for KisekiFuse {
         let ctx = Arc::new(FuseContext::from(_req));
         match self.runtime.block_on(
             self.vfs
-                .symlink(ctx.clone(), Ino(parent), link_name.to_str().unwrap(), target)
+                .symlink(
+                    ctx.clone(),
+                    Ino(parent),
+                    link_name.to_str().unwrap(),
+                    target,
+                )
                 .in_current_span(),
         ) {
             Ok(e) => self.reply_entry(&ctx, reply, e),
@@ -482,8 +487,6 @@ impl Filesystem for KisekiFuse {
     }
 
     #[instrument(level = "debug", skip_all, fields(req = _req.unique(), ino = ino, fh = fh, offset = ReadableSize(offset as u64).to_string(), length = ReadableSize(data.len() as u64).to_string(), pid = _req.pid(), name = field::Empty))]
-    // #[instrument(fields(req=_req.unique(), ino=ino, fh=fh, offset=offset,
-    // length=data.len(), pid=_req.pid(), name=field::Empty))]
     fn write(
         &mut self,
         _req: &Request<'_>,
@@ -565,12 +568,6 @@ impl Filesystem for KisekiFuse {
         }
     }
 
-    // Open directory.
-    // Unless the 'default_permissions' mount option is given,
-    // this method should check if opendir is permitted for this directory.
-    // Optionally opendir may also return an arbitrary filehandle in the
-    // fuse_file_info structure, which will be passed to readdir, releasedir and
-    // fsyncdir.
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, flags = flags, name = field::Empty))]
     fn opendir(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         let ctx = FuseContext::from(_req);
@@ -620,6 +617,68 @@ impl Filesystem for KisekiFuse {
             }
         }
         reply.ok();
+    }
+
+    fn readdirplus(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        let ctx = FuseContext::from(_req);
+        let entries = match self.runtime.block_on(
+            self.vfs
+                .read_dir(&ctx, ino, fh, offset, true)
+                .in_current_span(),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                reply.error(e.to_errno());
+                return;
+            }
+        };
+
+        let mut offset = offset + 1;
+        debug!("get entry length: { }", entries.len());
+        for entry in entries.iter() {
+            match entry {
+                Entry::Full(fe) => {
+                    if reply.add(
+                        entry.get_inode().0,
+                        offset,
+                        &entry.get_name(),
+                        self.vfs.get_entry_ttl(entry.get_file_type()),
+                        &fe.attr.to_fuse_attr(fe.inode),
+                        1,
+                    ) {
+                        break;
+                    } else {
+                        offset += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        reply.ok();
+    }
+
+    fn releasedir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        _flags: i32,
+        reply: ReplyEmpty,
+    ) {
+        match self
+            .runtime
+            .block_on(self.vfs.release_dir(Ino(ino), fh).in_current_span())
+        {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        }
     }
 
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = _ino, name = field::Empty))]
