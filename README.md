@@ -3,12 +3,11 @@
 Kiseki is my learning rust project, a simple 'distributed' fuse file system that is port
 of [JuiceFS](https://github.com/juicedata/juicefs).
 
-At present, it's just a learning project and not ready for production.
+**It's just a rust learning project and not ready for production.**
 
-The metadata is stored in Rocksdb, and the object storage is stored in a local-hosted Minio.
+If you don't know juicefs very much, you can check
+the [juicefs's architecture](https://juicefs.com/docs/en/overview/architecture.html).
 
-In the future, it will be replaced by a more sophisticated and distributed database and object storage,
-just like JuiceFS does.
 
 # Quick Start
 
