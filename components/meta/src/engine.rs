@@ -947,7 +947,6 @@ impl MetaEngine {
 
 // Link
 impl MetaEngine {
-    /// [MetaEngine::link] creates an entry for the inode.
     pub async fn link(
         &self,
         ctx: Arc<FuseContext>,
@@ -965,9 +964,6 @@ impl MetaEngine {
         Ok(new_attr)
     }
 
-    /// [MetaEngine::unlink] removes a file entry from a directory.
-    /// The file will be deleted if it's not linked by any entries and not open
-    /// by any sessions.
     pub async fn unlink(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
         let open_files = self.open_files.clone();
         let unlink_result = self
@@ -992,6 +988,30 @@ impl MetaEngine {
                 .await;
         }
         Ok(())
+    }
+
+    // creates a symlink in a directory with given name.
+    pub async fn symlink(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        link_name: &str,
+        target: &Path,
+    ) -> Result<(Ino, InodeAttr)> {
+        // mode of symlink is ignored in POSIX.
+        let (inode, attr) = self
+            .mknod(
+                ctx,
+                parent,
+                link_name,
+                FileType::Symlink,
+                0o777,
+                0,
+                0,
+                target.to_string_lossy().to_string(),
+            )
+            .await?;
+        Ok((inode, attr))
     }
 }
 

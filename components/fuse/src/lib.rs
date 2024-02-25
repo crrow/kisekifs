@@ -15,6 +15,7 @@
 use std::{
     cmp::max,
     ffi::{OsStr, OsString},
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -331,6 +332,27 @@ impl Filesystem for KisekiFuse {
         match self.runtime.block_on(
             self.vfs
                 .rmdir(ctx, Ino(parent), name.to_str().unwrap())
+                .in_current_span(),
+        ) {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        };
+    }
+
+
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
+    fn symlink(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        link_name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self.runtime.block_on(
+            self.vfs
+                .symlink(ctx, Ino(parent), link_name.to_str().unwrap(), target)
                 .in_current_span(),
         ) {
             Ok(_) => reply.ok(),
