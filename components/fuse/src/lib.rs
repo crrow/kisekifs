@@ -255,6 +255,18 @@ impl Filesystem for KisekiFuse {
         }
     }
 
+    /// Read symbolic link.
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
+        let ctx = Arc::new(FuseContext::from(_req));
+        match self
+            .runtime
+            .block_on(self.vfs.readlink(ctx, Ino(ino)).in_current_span())
+        {
+            Ok(target) => reply.data(target.as_ref()),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
     /// In UNIX-like operating systems, when a new file or directory is created,
     /// its permissions are typically set based on the process's umask value.
     ///
@@ -339,8 +351,7 @@ impl Filesystem for KisekiFuse {
         };
     }
 
-
-    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
+    #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? link_name))]
     fn symlink(
         &mut self,
         _req: &Request<'_>,
@@ -352,10 +363,10 @@ impl Filesystem for KisekiFuse {
         let ctx = Arc::new(FuseContext::from(_req));
         match self.runtime.block_on(
             self.vfs
-                .symlink(ctx, Ino(parent), link_name.to_str().unwrap(), target)
+                .symlink(ctx.clone(), Ino(parent), link_name.to_str().unwrap(), target)
                 .in_current_span(),
         ) {
-            Ok(_) => reply.ok(),
+            Ok(e) => self.reply_entry(&ctx, reply, e),
             Err(e) => reply.error(e.to_errno()),
         };
     }

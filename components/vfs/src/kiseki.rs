@@ -15,7 +15,7 @@
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -1018,6 +1018,24 @@ impl KisekiVFS {
         let (inode, attr) = self.meta.symlink(ctx, parent, link_name, target).await?;
         Ok(FullEntry::new(inode, link_name, attr))
     }
+
+    /// [KisekiVFS::readlink] reads value of a symbolic link.
+    ///
+    /// # Arguments
+    /// * `ctx`: [FuseContext] - the fuse context, including some additional
+    ///   information like uid, gid, etc.
+    /// * `inode`: [Ino] - inode number of the symbolic link for which you want
+    ///   to read the target.
+    ///
+    /// # Returns
+    /// * `TargetPath`: [Bytes] - the target of the symbolic link.
+    ///
+    /// # References
+    /// * [readlink(2)](https://man7.org/linux/man-pages/man2/readlink.2.html)
+    pub async fn readlink(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<Bytes> {
+        let target = self.meta.readlink(ctx, inode).await?;
+        Ok(target)
+    }
 }
 
 // Rename
@@ -1295,6 +1313,9 @@ mod tests {
         let symlink = vfs
             .symlink(ctx.clone(), ROOT_INO, "f2_sym", Path::new("f2"))
             .await?;
+        assert_eq!(symlink.name, "f2_sym");
+        let target = vfs.readlink(ctx.clone(), symlink.inode).await?;
+        assert_eq!(target.as_ref(), b"f2");
 
         Ok(())
     }

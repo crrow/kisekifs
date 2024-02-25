@@ -1,5 +1,6 @@
 use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
     attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat, stat::DirStat,
@@ -150,6 +151,8 @@ pub trait Backend: Send + Sync {
         flags: RenameFlags,
         open_files_ref: OpenFilesRef,
     ) -> Result<RenameResult>;
+
+    fn do_readlink(&self, inode: Ino) -> Result<Bytes>;
 }
 
 pub struct UnlinkResult {
