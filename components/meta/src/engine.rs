@@ -1,9 +1,23 @@
+// JuiceFS, Copyright 2020 Juicedata, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::{
     cmp::{max, min},
     collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
     ops::Add,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -12,6 +26,7 @@ use std::{
 };
 
 use bitflags::{bitflags, Flags};
+use bytes::Bytes;
 use crossbeam::{atomic::AtomicCell, channel::at};
 use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
@@ -58,6 +73,7 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
         root: ROOT_INO,
         session_id: 0,
         open_files,
+        symlinks: Default::default(),
         removed_files: Default::default(),
         // Limit the number of incoming requests being handled at the same time
         delete_semaphore: Arc::new(Semaphore::const_new(100)),
@@ -123,12 +139,15 @@ pub struct MetaEngine {
     // TODO: review me. JuiceFS use it for enabling chroot.
     root:   Ino,
 
+    // TODO: implement me
     session_id: u64,
 
     // track the open files, since we cannot remove the associated
     // info of the file when it is being opened.
     open_files:       OpenFilesRef,
-    // track those inodes that has been being removed totally since
+    // a cache for symlink content
+    symlinks:         RwLock<HashMap<Ino, Bytes>>,
+    // track those inodes that didn't be removed totally since
     // someone has opened it.
     //
     // check this set when closing the inode, when we actually close
@@ -947,7 +966,6 @@ impl MetaEngine {
 
 // Link
 impl MetaEngine {
-    /// [MetaEngine::link] creates an entry for the inode.
     pub async fn link(
         &self,
         ctx: Arc<FuseContext>,
@@ -965,9 +983,6 @@ impl MetaEngine {
         Ok(new_attr)
     }
 
-    /// [MetaEngine::unlink] removes a file entry from a directory.
-    /// The file will be deleted if it's not linked by any entries and not open
-    /// by any sessions.
     pub async fn unlink(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
         let open_files = self.open_files.clone();
         let unlink_result = self
@@ -992,6 +1007,42 @@ impl MetaEngine {
                 .await;
         }
         Ok(())
+    }
+
+    // creates a symlink in a directory with given name.
+    pub async fn symlink(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        link_name: &str,
+        target: &Path,
+    ) -> Result<(Ino, InodeAttr)> {
+        // mode of symlink is ignored in POSIX.
+        let (inode, attr) = self
+            .mknod(
+                ctx,
+                parent,
+                link_name,
+                FileType::Symlink,
+                0o777,
+                0,
+                0,
+                target.to_string_lossy().to_string(),
+            )
+            .await?;
+        Ok((inode, attr))
+    }
+
+    pub async fn readlink(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<Bytes> {
+        let read_guard = self.symlinks.read().await;
+        if let Some(target) = read_guard.get(&inode) {
+            return Ok(target.clone());
+        }
+        drop(read_guard);
+        let t = self.backend.do_readlink(inode)?;
+        let mut write_guard = self.symlinks.write().await;
+        write_guard.insert(inode, t.clone());
+        Ok(t)
     }
 }
 

@@ -15,6 +15,7 @@
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -26,7 +27,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{
-    DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X,
+    DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MAX_SYMLINK_LEN, MODE_MASK_R, MODE_MASK_W,
+    MODE_MASK_X,
 };
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_storage::slice_buffer::SliceBuffer;
@@ -929,6 +931,22 @@ impl KisekiVFS {
         Ok(e)
     }
 
+    /// [KisekiVFS::unlink] deletes a name and possibly the file it refers to.
+    ///
+    /// Deletes a name from the filesystem. <br>
+    ///
+    /// If that name was the last link to a file and no processes have the<br>
+    /// file open, the file is deleted and the space it was using is<br>
+    /// made available for reuse.
+    ///
+    /// # Arguments
+    /// * `ctx`: [FuseContext] - the fuse context, including some additional
+    ///   information like uid, gid, etc.
+    ///
+    /// # Examples
+    ///
+    /// # References
+    /// * [unlink(2)](https://man7.org/linux/man-pages/man2/unlink.2.html)
     pub async fn unlink(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
         ensure!(
             name.len() < MAX_NAME_LENGTH,
@@ -945,6 +963,78 @@ impl KisekiVFS {
 
         self.meta.unlink(ctx, parent, name).await?;
         Ok(())
+    }
+
+    /// [KisekiVFS::symlink] makes a new name for a file.
+    ///
+    /// Symbolic links are interpreted at run time as if the contents of
+    /// the link had been substituted into the path being followed to
+    /// find a file or directory.
+    ///
+    /// A symbolic link (also known as a soft link) may point to an existing
+    /// file or to a nonexistent one; the latter case is known as a dangling
+    /// link.
+    ///
+    /// # Arguments
+    /// * `ctx`: [FuseContext] - the fuse context, including some additional
+    ///   information like uid, gid, etc.
+    /// * `parent`: [Ino] - the inode number of the parent directory where the
+    ///   symbolic link will be created.
+    /// * `link_name`: [&str] - the name of the symbolic link.
+    /// * `target`: [&Path] - the path to the file or directory that the
+    ///   symbolic link
+    ///
+    /// # Returns
+    /// * [FullEntry] - the inode number and the attribute of the symbolic link.
+    ///
+    /// # Examples
+    /// For example, let's say you have a file named **foo.txt** in the current
+    /// directory, and you want to create a symbolic link named **foo_link**
+    /// that points to **foo.txt**. You would use the following command:
+    /// ```shell
+    /// ln -s foo.txt foo_link
+    /// ```
+    ///
+    /// # References
+    /// * [symlink(2)](https://man7.org/linux/man-pages/man2/symlink.2.html)
+    pub async fn symlink(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        link_name: &str,
+        target: &Path,
+    ) -> Result<FullEntry> {
+        ensure!(
+            link_name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+        ensure!(
+            target.to_string_lossy().len() < MAX_SYMLINK_LEN,
+            LibcSnafu { errno: EINVAL }
+        );
+
+        let (inode, attr) = self.meta.symlink(ctx, parent, link_name, target).await?;
+        Ok(FullEntry::new(inode, link_name, attr))
+    }
+
+    /// [KisekiVFS::readlink] reads value of a symbolic link.
+    ///
+    /// # Arguments
+    /// * `ctx`: [FuseContext] - the fuse context, including some additional
+    ///   information like uid, gid, etc.
+    /// * `inode`: [Ino] - inode number of the symbolic link for which you want
+    ///   to read the target.
+    ///
+    /// # Returns
+    /// * `TargetPath`: [Bytes] - the target of the symbolic link.
+    ///
+    /// # References
+    /// * [readlink(2)](https://man7.org/linux/man-pages/man2/readlink.2.html)
+    pub async fn readlink(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<Bytes> {
+        let target = self.meta.readlink(ctx, inode).await?;
+        Ok(target)
     }
 }
 
@@ -1218,6 +1308,14 @@ mod tests {
         assert_eq!(f3.inode, f2_entry.inode);
         vfs.flush(ctx.clone(), f3.inode, f3.fh, 0).await?;
         vfs.release(ctx.clone(), f3.inode, f3.fh).await?;
+
+        // symlink f2_sym -> f2
+        let symlink = vfs
+            .symlink(ctx.clone(), ROOT_INO, "f2_sym", Path::new("f2"))
+            .await?;
+        assert_eq!(symlink.name, "f2_sym");
+        let target = vfs.readlink(ctx.clone(), symlink.inode).await?;
+        assert_eq!(target.as_ref(), b"f2");
 
         Ok(())
     }

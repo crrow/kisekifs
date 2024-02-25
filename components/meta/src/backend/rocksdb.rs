@@ -8,6 +8,7 @@ use std::{
 };
 
 use bitflags::Flags;
+use bytes::Bytes;
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
     attr::InodeAttr,
@@ -80,6 +81,18 @@ impl Debug for RocksdbBackend {
     }
 }
 
+fn do_get_symlink<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<Bytes> {
+    let symlink_key = key::symlink(inode);
+    let buf = db
+        .get_pinned_opt(&symlink_key, &rocksdb::ReadOptions::default())
+        .context(RocksdbSnafu)?
+        .context(model_err::NotFoundSnafu {
+            kind: ModelKind::Symlink,
+            key:  String::from_utf8_lossy(&symlink_key).to_string(),
+        })
+        .context(ModelSnafu)?;
+    Ok(Bytes::from(buf.to_vec()))
+}
 fn do_get_hard_link_count<Layer: DBAccess>(db: &Layer, inode: Ino, parent: Ino) -> Result<u64> {
     let key = key::parent(inode, parent);
 
@@ -1326,6 +1339,11 @@ impl Backend for RocksdbBackend {
         self.db.write(write_batch).context(RocksdbSnafu)?;
         txn.commit().context(RocksdbSnafu)?;
         Ok(rename_result)
+    }
+
+    fn do_readlink(&self, inode: Ino) -> Result<Bytes> {
+        let symlink = do_get_symlink(&self.db, inode)?;
+        Ok(Bytes::from(symlink))
     }
 }
 
