@@ -338,6 +338,41 @@ impl Filesystem for KisekiFuse {
         };
     }
 
+    #[instrument(level = "info",
+    skip_all,
+    fields(req = req.unique(),
+    old_parent = parent,
+    old_name = ?name,
+    new_parent = newparent,
+    new_name = ?newname))]
+    fn rename(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        let ctx = Arc::new(FuseContext::from(req));
+        match self.runtime.block_on(
+            self.vfs
+                .rename(
+                    ctx,
+                    Ino(parent),
+                    name.to_str().unwrap(),
+                    Ino(newparent),
+                    newname.to_str().unwrap(),
+                    flags,
+                )
+                .in_current_span(),
+        ) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.to_errno()),
+        }
+    }
+
     #[instrument(level = "warn", skip_all, fields(req = _req.unique(), ino = ino, new_parent = new_parent, new_name = ? new_name))]
     fn link(
         &mut self,

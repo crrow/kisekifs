@@ -405,13 +405,6 @@ impl KisekiVFS {
             inode, flags, ctx.pid
         );
 
-        if inode.is_special() {
-            // TODO: at present, we don't implement the same logic as the juicefs.
-            return LibcSnafu { errno: EACCES }.fail()?;
-            // if inode != CONTROL_INODE && flags & libc::O_ACCMODE !=
-            // libc::O_RDONLY { }
-        }
-
         let mut attr = self
             .meta
             .open_inode(ctx, inode, flags)
@@ -422,12 +415,10 @@ impl KisekiVFS {
             .handle_table
             .new_file_handle(inode, attr.length, flags)
             .await?;
-        // TODO: review me
-        let entry = FullEntry::new(inode, "", attr);
 
         let opened_flags = if inode.is_special() {
             fuser::consts::FOPEN_DIRECT_IO
-        } else if entry.attr.keep_cache {
+        } else if attr.keep_cache {
             fuser::consts::FOPEN_KEEP_CACHE
         } else {
             0
@@ -436,7 +427,8 @@ impl KisekiVFS {
         Ok(Opened {
             fh: opened_fh,
             flags: opened_flags,
-            entry,
+            inode,
+            attr,
         })
     }
 
@@ -956,12 +948,45 @@ impl KisekiVFS {
     }
 }
 
+// Rename
+impl KisekiVFS {
+    pub async fn rename(
+        &self,
+        ctx: Arc<FuseContext>,
+        parent: Ino,
+        name: &str,
+        new_parent: Ino,
+        new_name: &str,
+        flags: u32,
+    ) -> Result<()> {
+        ensure!(
+            name.len() > 0 && new_name.len() > 0,
+            LibcSnafu {
+                errno: libc::ENOENT,
+            }
+        );
+        ensure!(
+            name.len() < MAX_NAME_LENGTH && new_name.len() < MAX_NAME_LENGTH,
+            LibcSnafu {
+                errno: libc::ENAMETOOLONG,
+            }
+        );
+
+        self.meta
+            .rename(ctx, parent, name, new_parent, new_name, flags)
+            .await
+            .context(MetaSnafu)?;
+        Ok(())
+    }
+}
+
 /// Reply to a `open` or `opendir` call
 #[derive(Debug)]
 pub struct Opened {
     pub fh:    u64,
     pub flags: u32,
-    pub entry: FullEntry,
+    pub inode: Ino,
+    pub attr:  InodeAttr,
 }
 
 // TODO: review me, use a better way.
@@ -1176,7 +1201,24 @@ mod tests {
             panic!("lookup f2 failed");
         }
 
+        // rename root/f2 -> root/f3
+        vfs.rename(ctx.clone(), ROOT_INO, &f2_entry.name, ROOT_INO, "f3", 0)
+            .await?;
+        // we should not be able to find the root/f2
+        assert_eq!(
+            vfs.lookup(ctx.clone(), ROOT_INO, &f2_entry.name)
+                .await
+                .unwrap_err()
+                .to_errno(),
+            libc::ENOENT
+        );
+
+        // open f3
+        let f3 = vfs.open(&ctx, f2_entry.inode, libc::O_RDONLY).await?;
+        assert_eq!(f3.inode, f2_entry.inode);
+        vfs.flush(ctx.clone(), f3.inode, f3.fh, 0).await?;
+        vfs.release(ctx.clone(), f3.inode, f3.fh).await?;
+
         Ok(())
     }
-
 }

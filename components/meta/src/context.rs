@@ -61,10 +61,6 @@ impl FuseContext {
                 errno: libc::EACCES,
             }
         );
-        let r =mode & perm_mask;
-        if r != perm_mask {
-            panic!("what fuck")
-        }
         return Ok(());
     }
 

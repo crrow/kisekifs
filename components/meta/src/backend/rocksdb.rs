@@ -7,6 +7,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use bitflags::Flags;
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
     attr::InodeAttr,
@@ -17,14 +18,16 @@ use kiseki_types::{
     stat::DirStat,
     FileType,
 };
+use kiseki_utils::align::align4k;
 use rocksdb::{DBAccess, DBPinnableSlice, MultiThreaded, WriteBatchWithTransaction};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing::{debug, error, info};
 
-use super::{key, key::Counter, Backend, UnlinkResult};
+use super::{key, key::Counter, Backend, RenameResult, UnlinkResult};
 use crate::{
     context::FuseContext,
+    engine::RenameFlags,
     err::{
         model_err, model_err::ModelKind, InvalidSettingSnafu, LibcSnafu, ModelSnafu, Result,
         RocksdbSnafu, UninitializedEngineSnafu,
@@ -1000,6 +1003,329 @@ impl Backend for RocksdbBackend {
         if let Err(e) = txn.commit() {
             error!("commit failed in do_delete_chunks: {:?}", e);
         }
+    }
+
+    async fn do_rename(
+        &self,
+        ctx: Arc<FuseContext>,
+        session_id: u64,
+        old_parent: Ino,
+        old_name: &str,
+        new_parent: Ino,
+        new_name: &str,
+        flags: RenameFlags,
+        open_files_ref: OpenFilesRef,
+    ) -> Result<RenameResult> {
+        let txn = self.db.transaction();
+        let old_entry = do_get_dentry(&txn, old_parent, old_name)?;
+        let mut rename_result = RenameResult {
+            need_delete: None,
+            freed_inode: 0,
+            freed_space: 0,
+        };
+        if old_parent == new_parent && old_name == new_name {
+            return Ok(rename_result);
+        }
+
+        let mut old_parent_attr = do_get_attr(&txn, old_parent)?;
+        {
+            // check access permission
+            ensure!(
+                old_parent_attr.is_dir(),
+                LibcSnafu {
+                    errno: libc::ENOTDIR,
+                }
+            );
+            ctx.check_access(
+                &old_parent_attr,
+                kiseki_common::MODE_MASK_W | kiseki_common::MODE_MASK_X,
+            )?;
+        }
+
+        let mut new_parent_attr = do_get_attr(&txn, new_parent)?;
+        {
+            ensure!(
+                new_parent_attr.is_dir(),
+                LibcSnafu {
+                    errno: libc::ENOTDIR,
+                }
+            );
+            ctx.check_access(
+                &new_parent_attr,
+                kiseki_common::MODE_MASK_W | kiseki_common::MODE_MASK_X,
+            )?;
+            ensure!(
+                old_entry.inode != new_parent && old_entry.inode != new_parent_attr.parent,
+                LibcSnafu { errno: libc::EPERM }
+            );
+        }
+
+        let mut old_inode_attr = do_get_attr(&txn, old_entry.inode)?;
+        {
+            ensure!(old_inode_attr.is_normal(), LibcSnafu { errno: libc::EPERM });
+            if old_parent != new_parent
+                && old_parent_attr.mode & 0o1000 != 0
+                && ctx.uid != 0
+                && ctx.uid != old_inode_attr.uid
+                && (ctx.uid != old_parent_attr.uid || old_inode_attr.is_dir())
+            {
+                return LibcSnafu {
+                    errno: libc::EACCES,
+                }
+                .fail();
+            }
+
+            if ctx.uid != 0
+                && (old_parent_attr.mode & 0o1000) != 0
+                && ctx.uid != old_parent_attr.uid
+                && ctx.uid != old_inode_attr.uid
+            {
+                return LibcSnafu {
+                    errno: libc::EACCES,
+                }
+                .fail();
+            }
+        }
+
+        let (
+            mut update_new_parent,
+            mut opened,
+            mut need_invalid_attr,
+            mut dst_dentry_opt,
+            mut dst_attr_opt,
+        ) = (false, false, false, None, None);
+        match do_get_dentry(&txn, new_parent, new_name) {
+            Ok(dst_entry) => {
+                // dst exists
+                ensure!(
+                    !flags.contains(RenameFlags::NOREPLACE),
+                    LibcSnafu {
+                        errno: libc::EEXIST,
+                    }
+                );
+
+                let mut dst_attr = do_get_attr(&txn, dst_entry.inode)?;
+                ensure!(dst_attr.is_normal(), LibcSnafu { errno: libc::EPERM });
+                dst_attr.ctime = SystemTime::now();
+
+                if matches!(flags, RenameFlags::EXCHANGE) {
+                    if old_parent != new_parent {
+                        if matches!(dst_entry.typ, FileType::Directory) {
+                            dst_attr.parent = old_parent;
+                            new_parent_attr.nlink -= 1;
+                            old_parent_attr.nlink += 1;
+                        } else if !dst_attr.parent.is_zero() {
+                            dst_attr.parent = old_parent;
+                        }
+                    }
+                } else {
+                    if matches!(dst_entry.typ, FileType::Directory) {
+                        ensure!(
+                            !do_check_exist_children(&txn, dst_entry.inode)?,
+                            LibcSnafu {
+                                errno: libc::ENOTEMPTY,
+                            }
+                        );
+                        new_parent_attr.nlink -= 1;
+                        update_new_parent = true;
+                    } else {
+                        dst_attr.nlink -= 1;
+                        if matches!(dst_entry.typ, FileType::RegularFile) && dst_attr.nlink == 0 {
+                            if let Some(of) = open_files_ref.load(&dst_entry.inode).await {
+                                opened = of.is_opened().await;
+                            }
+                            need_invalid_attr = true;
+                        }
+                    }
+                }
+
+                if ctx.uid != 0
+                    && (old_parent_attr.mode & 0o1000) == 0
+                    && ctx.uid != new_parent_attr.uid
+                    && ctx.uid != dst_attr.uid
+                {
+                    return LibcSnafu {
+                        errno: libc::EACCES,
+                    }
+                    .fail();
+                }
+
+                dst_dentry_opt = Some(dst_entry);
+                dst_attr_opt = Some(dst_attr);
+            }
+            Err(e) => {
+                if !e.is_not_found() {
+                    return Err(e);
+                }
+                ensure!(
+                    !matches!(flags, RenameFlags::EXCHANGE),
+                    LibcSnafu {
+                        errno: libc::ENOENT,
+                    }
+                );
+            }
+        }
+
+        if old_parent != new_parent {
+            old_inode_attr.parent = new_parent;
+            old_parent_attr.nlink -= 1;
+            new_parent_attr.nlink += 1;
+        }
+        let now = SystemTime::now();
+        let update_old_parent =
+            old_parent_attr.update_modification_time_if(now, self.skip_dir_mtime);
+        if update_new_parent {
+            new_parent_attr.update_modification_time_with(now);
+        } else {
+            update_new_parent =
+                new_parent_attr.update_modification_time_if(now, self.skip_dir_mtime);
+        }
+        old_inode_attr.ctime = now;
+
+        let mut write_batch = txn.get_writebatch();
+        match flags {
+            RenameFlags::EXCHANGE => {
+                // safety: we have checked before.
+                let dst_dentry = dst_dentry_opt.unwrap();
+                set_dentry_in_write_batch(
+                    &mut write_batch,
+                    old_parent,
+                    old_name,
+                    dst_dentry.inode,
+                    dst_dentry.typ,
+                )?;
+                let dst_attr = dst_attr_opt.unwrap();
+                set_attr_in_write_batch(&mut write_batch, dst_dentry.inode, &dst_attr)?;
+                if old_parent != new_parent && dst_attr.parent.is_zero() {
+                    let cnt = do_get_hard_link_count(&txn, dst_dentry.inode, old_parent)?;
+                    set_hard_link_count_in_write_batch(
+                        &mut write_batch,
+                        dst_dentry.inode,
+                        old_parent,
+                        cnt + 1,
+                    )?;
+                    let cnt = {
+                        let mut cnt = do_get_hard_link_count(&txn, dst_dentry.inode, new_parent)?;
+                        if cnt > 0 {
+                            cnt -= 1;
+                        }
+                        cnt
+                    };
+                    set_hard_link_count_in_write_batch(
+                        &mut write_batch,
+                        dst_dentry.inode,
+                        new_parent,
+                        cnt,
+                    )?;
+                }
+            }
+            _ => {
+                write_batch.delete(key::dentry(old_parent, old_name));
+                if let Some(dst_attr) = dst_attr_opt {
+                    let dst_entry = dst_dentry_opt.unwrap();
+                    if !matches!(dst_attr.kind, FileType::Directory) && dst_attr.nlink > 0 {
+                        set_attr_in_write_batch(&mut write_batch, dst_entry.inode, &dst_attr)?;
+                        if dst_attr.parent.is_zero() {
+                            let cnt = do_get_hard_link_count(&txn, dst_entry.inode, old_parent)?;
+                            if cnt > 0 {
+                                set_hard_link_count_in_write_batch(
+                                    &mut write_batch,
+                                    dst_entry.inode,
+                                    old_parent,
+                                    cnt - 1,
+                                )?;
+                            }
+                        }
+                    } else {
+                        if matches!(dst_attr.kind, FileType::RegularFile) {
+                            if opened {
+                                set_attr_in_write_batch(
+                                    &mut write_batch,
+                                    dst_entry.inode,
+                                    &dst_attr,
+                                )?;
+                                set_sustained_in_write_batch(
+                                    &mut write_batch,
+                                    session_id,
+                                    dst_entry.inode,
+                                    1,
+                                )?;
+                            } else {
+                                set_delete_chunk_after_in_write_batch(
+                                    &mut write_batch,
+                                    dst_entry.inode,
+                                )?;
+                                write_batch.delete(key::attr(dst_entry.inode));
+                                rename_result.freed_space += align4k(dst_attr.length) as u64;
+                                rename_result.freed_inode += 1;
+                            }
+                            rename_result.need_delete = Some((dst_entry.inode, opened));
+                        } else {
+                            if matches!(dst_attr.kind, FileType::Symlink) {
+                                write_batch.delete(key::symlink(dst_entry.inode));
+                            }
+                            write_batch.delete(key::attr(dst_entry.inode));
+                            rename_result.freed_space += 4096;
+                            rename_result.freed_inode += 1;
+                        }
+
+                        delete_prefix_in_txn_write_batch(
+                            &txn,
+                            &mut write_batch,
+                            &key::xattr_prefix(dst_entry.inode),
+                        );
+                        if dst_attr.parent.is_zero() {
+                            delete_prefix_in_txn_write_batch(
+                                &txn,
+                                &mut write_batch,
+                                &key::parent_prefix(dst_entry.inode),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if new_parent != old_parent {
+            if update_old_parent {
+                set_attr_in_write_batch(&mut write_batch, old_parent, &old_parent_attr)?;
+            }
+            if old_inode_attr.parent.is_zero() {
+                let cnt = do_get_hard_link_count(&txn, old_entry.inode, new_parent)?;
+                set_hard_link_count_in_write_batch(
+                    &mut write_batch,
+                    old_entry.inode,
+                    new_parent,
+                    cnt + 1,
+                )?;
+                let mut cnt = do_get_hard_link_count(&txn, old_entry.inode, old_parent)?;
+                if cnt > 0 {
+                    cnt -= 1;
+                }
+                set_hard_link_count_in_write_batch(
+                    &mut write_batch,
+                    old_entry.inode,
+                    old_parent,
+                    cnt,
+                )?;
+            }
+        }
+
+        set_attr_in_write_batch(&mut write_batch, old_entry.inode, &old_inode_attr)?;
+        set_dentry_in_write_batch(
+            &mut write_batch,
+            new_parent,
+            new_name,
+            old_entry.inode,
+            old_inode_attr.kind,
+        )?;
+        if update_new_parent {
+            set_attr_in_write_batch(&mut write_batch, new_parent, &new_parent_attr)?;
+        }
+
+        self.db.write(write_batch).context(RocksdbSnafu)?;
+        txn.commit().context(RocksdbSnafu)?;
+        Ok(rename_result)
     }
 }
 

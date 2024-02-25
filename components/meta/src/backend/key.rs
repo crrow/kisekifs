@@ -1,5 +1,4 @@
 use kiseki_types::{ino::Ino, slice::SliceID};
-use lazy_static::lazy_static;
 
 pub const CURRENT_FORMAT: &str = "current_format";
 pub const USED_SPACE: &str = "used_space";
@@ -80,7 +79,6 @@ pub fn parent_prefix(inode: Ino) -> Vec<u8> { format!("A{:0>8}P", inode.0).into_
 
 pub fn symlink(inode: Ino) -> Vec<u8> { format!("A{:0>8}S", inode.0).into_bytes() }
 
-
 // sustained is used when we cannot delete inode since it was being used at
 // right now.
 pub fn sustained(sid: u64, inode: Ino) -> Vec<u8> {
@@ -99,7 +97,6 @@ pub fn sustained(sid: u64, inode: Ino) -> Vec<u8> {
 //
 // Juice also put the length in the key, doesn't get the point.
 pub fn delete_chunk_after(inode: Ino) -> Vec<u8> { format!("D{:0>8}", inode.0).into_bytes() }
-
 
 pub fn chunk_slices(inode: Ino, chunk_idx: kiseki_common::ChunkIndex) -> Vec<u8> {
     format!("A{:0>8}C/{}", inode.0, chunk_idx).into_bytes()

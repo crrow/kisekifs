@@ -168,7 +168,7 @@ impl InodeAttr {
         }
     }
 
-    pub fn empty ()  -> Self{
+    pub fn empty() -> Self {
         Self {
             flags:      0,
             kind:       FileType::Directory,
@@ -185,7 +185,6 @@ impl InodeAttr {
             parent:     ROOT_INO,
             keep_cache: false,
         }
-
     }
 
     pub fn keep_cache(&mut self) -> &mut Self {
@@ -203,9 +202,18 @@ impl InodeAttr {
         self.ctime = SystemTime::now();
     }
 
+    pub fn update_modification_time_with(&mut self, time: SystemTime) {
+        self.mtime = time;
+        self.ctime = time;
+    }
+
     /// [update_modification_time_if] check if we need to update the
     /// modification time  according to the [skip_update_duration]
-    pub fn update_modification_time_if(&mut self, now: SystemTime, skip_update_duration: Duration) -> bool {
+    pub fn update_modification_time_if(
+        &mut self,
+        now: SystemTime,
+        skip_update_duration: Duration,
+    ) -> bool {
         if now.duration_since(self.mtime).unwrap() > skip_update_duration {
             self.mtime = now;
             self.ctime = now;
@@ -241,7 +249,7 @@ impl InodeAttr {
         }
         // If no previous conditions match,
         // returns other permissions by masking mode with 7.
-        (perm & 7 ) as u8
+        (perm & 7) as u8
     }
 
     pub fn to_fuse_attr<I: Into<u64>>(&self, ino: I) -> fuser::FileAttr {

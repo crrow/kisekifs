@@ -15,7 +15,7 @@ pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
 
-use crate::{err::UnsupportedMetaDSNSnafu, open_files::OpenFilesRef};
+use crate::{engine::RenameFlags, err::UnsupportedMetaDSNSnafu, open_files::OpenFilesRef};
 
 // TODO: optimize me
 pub fn open_backend(dsn: &str, skip_dir_mtime: Duration) -> Result<BackendRef> {
@@ -138,6 +138,18 @@ pub trait Backend: Send + Sync {
     /// do_delete_chunks try to delete all [free] slices of a file,
     /// free means that slice is not been borrowed.
     fn do_delete_chunks(&self, inode: Ino);
+
+    async fn do_rename(
+        &self,
+        ctx: Arc<FuseContext>,
+        session_id: u64,
+        old_parent: Ino,
+        old_name: &str,
+        new_parent: Ino,
+        new_name: &str,
+        flags: RenameFlags,
+        open_files_ref: OpenFilesRef,
+    ) -> Result<RenameResult>;
 }
 
 pub struct UnlinkResult {
@@ -151,4 +163,11 @@ pub struct UnlinkResult {
     pub freed_inode: u64,
     // whether the file is opened while we're trying to unlink
     pub is_opened:   bool,
+}
+
+pub struct RenameResult {
+    // may need to delete the replaced file
+    pub need_delete: Option<(Ino, bool)>,
+    pub freed_space: u64,
+    pub freed_inode: u64,
 }

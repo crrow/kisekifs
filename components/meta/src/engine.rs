@@ -11,7 +11,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use bitflags::bitflags;
+use bitflags::{bitflags, Flags};
 use crossbeam::{atomic::AtomicCell, channel::at};
 use dashmap::{DashMap, DashSet};
 use futures::AsyncReadExt;
@@ -1022,6 +1022,52 @@ impl MetaEngine {
     }
 }
 
+// Rename
+impl MetaEngine {
+    // move an entry from a source directory to another with given name.
+    // The targeted entry will be overwrited if it's a file or empty directory.
+    pub async fn rename(
+        &self,
+        ctx: Arc<FuseContext>,
+        old_parent: Ino,
+        old_name: &str,
+        new_parent: Ino,
+        new_name: &str,
+        flags: u32,
+    ) -> Result<()> {
+        let rename_flags = RenameFlags::from_bits(flags).expect("invalid rename flags");
+        ensure!(
+            matches!(
+                rename_flags,
+                RenameFlags::NOREPLACE | RenameFlags::EXCHANGE | RenameFlags::ZERO
+            ),
+            LibcSnafu {
+                errno: libc::ENOTSUP,
+            }
+        );
+
+        let open_files = self.open_files.clone();
+        let rename_result = self
+            .backend
+            .do_rename(
+                ctx,
+                self.session_id,
+                old_parent,
+                old_name,
+                new_parent,
+                new_name,
+                rename_flags,
+                open_files,
+            )
+            .await?;
+
+        if let Some((inode, opened)) = rename_result.need_delete {
+            self.delete_file(opened, inode).await;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallocateMode(pub u8);
 
@@ -1033,5 +1079,17 @@ bitflags! {
         const COLLAPSE_RANGE = 0x08;
         const ZERO_RANGE = 0x10;
         const INSERT_RANGE = 0x20;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenameFlags(pub u32);
+
+bitflags! {
+    impl RenameFlags: u32 {
+        const ZERO = 0;
+        const NOREPLACE = 1;
+        const EXCHANGE = 2;
+        const WHITEOUT = 4;
     }
 }
