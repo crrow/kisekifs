@@ -29,20 +29,20 @@ pub struct Format {
     pub page_size:  usize,
 
     /// [max_capacity] set limit on the capacity of the filesystem
-    pub max_capacity:   Option<usize>,
+    pub max_capacity: Option<usize>,
     /// [max_inodes] set limit on the number of inodes
-    pub max_inodes:     Option<usize>,
+    pub max_inodes:   Option<usize>,
 }
 
 impl Default for Format {
     fn default() -> Self {
         Format {
-            name:           String::from(KISEKI),
-            chunk_size:     CHUNK_SIZE, // 64MB
-            block_size:     BLOCK_SIZE, // 4MB
-            page_size:      PAGE_SIZE,  // 64KB
-            max_capacity:   None,
-            max_inodes:     None,
+            name:         String::from(KISEKI),
+            chunk_size:   CHUNK_SIZE, // 64MB
+            block_size:   BLOCK_SIZE, // 4MB
+            page_size:    PAGE_SIZE,  // 64KB
+            max_capacity: None,
+            max_inodes:   None,
         }
     }
 }

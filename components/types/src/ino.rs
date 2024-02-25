@@ -59,7 +59,6 @@ impl From<Ino> for u64 {
 }
 
 impl Ino {
-
     pub fn is_special(&self) -> bool { *self >= MIN_INTERNAL_INODE }
 
     pub fn is_normal(&self) -> bool { !self.is_special() }

@@ -118,12 +118,12 @@ impl DataManager {
             ReadableSize(write_len as u64),
             ReadableSize(current_len as u64),
         );
-        self.truncate_reader(ino, current_len as u64);
+        self.truncate_reader(ino, current_len as u64).await;
         Ok(write_len)
     }
 
-    /// [direct_flush] flush the content of the specified ino to the remote storage.
-    /// TODO: review me.
+    /// [direct_flush] flush the content of the specified ino to the remote
+    /// storage. TODO: review me.
     /// Problem: This function call the underlying flush logic without acquiring
     /// lock of [FileHandle].
     #[instrument(skip(self), fields(ino))]

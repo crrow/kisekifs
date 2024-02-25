@@ -312,9 +312,9 @@ impl FileHandle {
         })
     }
 
-    /// [write_lock] will block until it gets the exclusive lock for the [FileHandle].
-    /// When there is no [FileWriter], then this function will return None.
-    /// FIXME: add timeout mechanism
+    /// [write_lock] will block until it gets the exclusive lock for the
+    /// [FileHandle]. When there is no [FileWriter], then this function will
+    /// return None. FIXME: add timeout mechanism
     #[instrument(skip(self))]
     pub(crate) async fn write_lock(&self, ctx: Arc<FuseContext>) -> Option<FileHandleWriteGuard> {
         if self.writer.is_none() {
