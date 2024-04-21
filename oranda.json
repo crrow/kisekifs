@@ -10,7 +10,7 @@
     "favicon": "https://www.axo.dev/favicon.ico"
   },
   "components": {
-    "mdBook": {
+    "mdbook": {
       "path": "./docs"
     },
     "changelog": true,
