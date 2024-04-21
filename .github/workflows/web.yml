@@ -33,6 +33,8 @@ on:
   push:
     branches:
       - main
+      - topic/*
+
 
   # Whenever a workflow called "Release" completes, update the docs!
   #
