@@ -6,6 +6,8 @@ debug
 out/
 book/
 docs/node_modules/
+.vagrant/
+public/
 
 # OSX leaves these everywhere on SMB shares
 ._*
