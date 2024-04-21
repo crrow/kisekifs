@@ -1,9 +1,12 @@
+HOME_DIR := env_var('HOME')
+CARGO_REGISTRY_CACHE := HOME_DIR + "/.cargo/registry"
+PWD := invocation_directory()
+HTTP_PROXY := env_var("http_proxy")
+HTTPS_PROXY := env_var("https_proxy")
+
 # List available just recipes
 @help:
     just -l
-
-@fmt:
-    cargo +nightly fmt --all
 
 # Calculate code
 @cloc:
@@ -83,10 +86,11 @@ alias sh-um := help-umount
 
 # ==================================================== format
 
-@format:
+@fmt:
     cargo run --color=always --package kiseki-binary format
     taplo format
     taplo format --check
+    hawkeye format
 
 @prepare:
     mkdir -p /tmp/kiseki /tmp/kiseki.meta/
@@ -143,3 +147,19 @@ alias rr := random-read
     - rm -r /tmp/kiseki/fio
     mkdir -p /tmp/kiseki/fio
     fio --name=jfs-test --directory=/tmp/kiseki/fio --ioengine=libaio --rw=randread --bs=1m --size=1g --numjobs=4 --direct=1 --group_reporting
+
+build-base-image:
+    docker build -t kiseki-ubuntu-builder:v0.0.1 \
+        --build-arg http_proxy={{HTTP_PROXY}} \
+        --build-arg https_proxy={{HTTPS_PROXY}} \
+        -f docker/Dockerfile.ubuntu.builder . 
+
+build-by-docker:
+    docker run --network=host \
+        -v {{PWD}}:/kiseki -v {{CARGO_REGISTRY_CACHE}}:/root/.cargo/registry \
+        -w /kiseki kiseki-ubuntu-builder:v0.0.1 \
+        cargo build --release --package kiseki-binary
+
+build-image:
+    docker build -t kisekifs:v0.0.1 \
+        -f docker/Dockerfile.ubuntu .
