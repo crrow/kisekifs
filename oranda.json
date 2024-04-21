@@ -1,0 +1,32 @@
+{
+  "project": {
+    "readme_path": "README.md"
+  },
+  "build": {
+    "path_prefix": "kisekifs"
+  },
+  "styles": {
+    "theme": "axolight",
+    "favicon": "https://www.axo.dev/favicon.ico"
+  },
+  "components": {
+    "mdBook": {
+      "path": "./docs"
+    },
+    "changelog": true,
+    "artifacts": {
+      "package_managers": {
+        "preferred": {
+          "npm": "npm install @axodotdev/oranda --save-dev",
+          "cargo": "cargo install oranda --locked --profile=dist"
+        },
+        "additional": {
+          "npx": "npx @axodotdev/oranda",
+          "binstall": "cargo binstall oranda",
+          "nix-env": "nix-env -i oranda",
+          "nix flake": "nix profile install github:axodotdev/oranda"
+        }
+      }
+    }
+  }
+}
