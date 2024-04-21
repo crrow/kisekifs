@@ -60,25 +60,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
 
-      # If you use any mdbook plugins, here's the place to install them!
+      # Install mdbook plugins
+      - name: Install mdbook plugins
+        run: |
+          cargo install --locked mdbook-toc@0.11.2
+          cargo install --locked mdbook-linkcheck@0.7.7
 
       # Install and run oranda (and mdbook)
       # This will write all output to ./public/ (including copying mdbook's output to there)
       - name: Install and run oranda
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/oranda/releases/download/v0.6.1/oranda-installer.sh | sh
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/oranda/releases/latest/download/oranda-installer.sh | sh
+          cd kisekifs
           oranda build
-      
-      - name: Prepare HTML for link checking
-        # untitaker/hyperlink supports no site prefixes, move entire site into
-        # a subfolder
-        run: mkdir /tmp/public/ && cp -R public /tmp/public/oranda
 
-      - name: Check HTML for broken internal links
-        uses: untitaker/hyperlink@0.1.29
-        with:
-          args: /tmp/public/
-      
       # Deploy to our gh-pages branch (creating it if it doesn't exist)
       # the "public" dir that oranda made above will become the root dir
       # of this branch.
@@ -93,6 +88,6 @@ jobs:
         with:
           branch: gh-pages
           # Gotta tell the action where to find oranda's output
-          folder: public
+          folder: kisekifs/public
           token: ${{ secrets.GITHUB_TOKEN }}
           single-commit: true
