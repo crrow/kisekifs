@@ -2,9 +2,6 @@
 @help:
     just -l
 
-@fmt:
-    cargo +nightly fmt --all
-
 # Calculate code
 @cloc:
     cloc . --exclude-dir=vendor,docs,tests,examples,build,scripts,tools,target
@@ -83,10 +80,12 @@ alias sh-um := help-umount
 
 # ==================================================== format
 
+alias fmt := format
 @format:
     cargo run --color=always --package kiseki-binary format
     taplo format
     taplo format --check
+    hawkeye format
 
 @prepare:
     mkdir -p /tmp/kiseki /tmp/kiseki.meta/
