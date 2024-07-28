@@ -27,7 +27,7 @@ fuser = { version = "0.14.0", features = ["libfuse", "serializable"] }
 futures = "0.3.30"
 lazy_static = "1.4.0"
 libc = "0.2.152"
-opendal = { version = "0.45.0", features = ["services-sled", "services-s3"] }
+opendal = { version = "0.45.1", features = ["services-sled", "services-s3"] }
 rand = "0.8.5"
 rangemap = "1.4.0"
 rustix = "0.38.30"
