@@ -43,7 +43,7 @@ tempfile.workspace = true
 
 kiseki-utils = { path = "../../components/utils" }
 
-uuid = "1.7.0"
+uuid = "1.10.0"
 
 #[[bench]]
 #name = "bench_main"
