@@ -100,7 +100,7 @@ impl DiskPagePool {
 
     pub(crate) async fn acquire_page(self: &Arc<Self>) -> Page {
         let mut page_id = self.queue.pop();
-        while let None = page_id {
+        while page_id.is_none() {
             self.notify.notified().await;
             page_id = self.queue.pop();
         }
@@ -143,7 +143,7 @@ impl Page {
     where
         W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
-        let mut guard = self.pool.file.read().await;
+        let guard = self.pool.file.read().await;
         let mut reader = guard
             .range_reader(self.page_id as usize * self.pool.page_size + offset, length)
             .context(DiskPoolMmapSnafu)?;
@@ -186,7 +186,7 @@ impl Drop for Page {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Duration};
+    use std::fs;
 
     use bytes::Bytes;
     use kiseki_utils::logger::install_fmt_log;
@@ -230,7 +230,7 @@ mod tests {
         for _ in 0..pool.total_page_cnt() {
             let pool = pool.clone();
             let handle = tokio::spawn(async move {
-                let mut page = pool.acquire_page().await;
+                let page = pool.acquire_page().await;
                 // tokio::time::sleep(Duration::from_millis(1)).await;
                 let mut reader = StreamReader::new(tokio_stream::iter(vec![std::io::Result::Ok(
                     Bytes::from_static(b"hello"),

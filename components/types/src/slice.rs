@@ -197,10 +197,10 @@ impl Slice {
     }
 
     pub fn get_id(&self) -> SliceID {
-        (match self {
+        match self {
             Slice::Owned { id: slice_id, .. } => *slice_id,
             Slice::Borrowed { id: slice_id, .. } => *slice_id,
-        })
+        }
     }
 
     pub fn get_size(&self) -> usize {
@@ -309,7 +309,7 @@ impl FromStr for SliceKey {
             .strip_prefix("chunks/")
             .unwrap_or(s) // Remove the "chunks-" prefix
             .split('_')
-            .map(|part| u64::from_str(part)) // Parse hexadecimal parts
+            .map(u64::from_str) // Parse hexadecimal parts
             .collect::<Result<Vec<_>, _>>()
             .context(ParseSliceKeyFailedSnafu { str: s.to_string() })?;
         ensure!(

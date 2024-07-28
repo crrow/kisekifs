@@ -16,31 +16,24 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt::Debug,
-    marker::PhantomData,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
 };
 
-use dashmap::DashMap;
 use kiseki_common::FH;
 use kiseki_meta::context::FuseContext;
 use kiseki_types::{entry::Entry, ino::Ino};
-use kiseki_utils::readable_size::ReadableSize;
-use libc::clone;
-use snafu::ResultExt;
 use tokio::{
     sync::{Notify, RwLock},
     time::Instant,
 };
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, instrument, Instrument};
+use tracing::{debug, error, instrument};
 
 use crate::{
     data_manager::DataManagerRef,
-    err::{Error, JoinErrSnafu, LibcSnafu, Result},
+    err::{LibcSnafu, Result},
     reader::FileReader,
     writer::FileWriter,
 };
@@ -110,9 +103,9 @@ impl HandleTable {
 
             let mut out_write_guard = self.handles.write().await;
             // check again
-            if !out_write_guard.contains_key(&inode) {
-                out_write_guard.insert(inode, Default::default());
-            }
+            out_write_guard
+                .entry(inode)
+                .or_insert_with(|| Default::default());
             drop(out_write_guard);
 
             // acquire the read lock again.
@@ -130,10 +123,10 @@ impl HandleTable {
 
     pub(crate) async fn find_handle(&self, ino: Ino, fh: u64) -> Option<Handle> {
         let outer_read_guard = self.handles.read().await;
-        if let Some(inner_map) = outer_read_guard.get(&ino).and_then(|v| Some(v.clone())) {
+        if let Some(inner_map) = outer_read_guard.get(&ino).map(|v| v.clone()) {
             drop(outer_read_guard);
             let inner_read_guard = inner_map.read().await;
-            inner_read_guard.get(&fh).map(|h| h.clone())
+            inner_read_guard.get(&fh).cloned()
         } else {
             None
         }
@@ -141,12 +134,12 @@ impl HandleTable {
 
     pub(crate) async fn get_handles(&self, ino: Ino) -> Vec<Handle> {
         let outer_read_guard = self.handles.read().await;
-        match outer_read_guard.get(&ino).and_then(|v| Some(v.clone())) {
+        match outer_read_guard.get(&ino).map(|v| v.clone()) {
             None => Default::default(),
             Some(inner_map) => {
                 drop(outer_read_guard);
                 let inner_read_guard = inner_map.read().await;
-                inner_read_guard.values().map(|h| h.clone()).collect()
+                inner_read_guard.values().cloned().collect()
             }
         }
     }
@@ -154,7 +147,7 @@ impl HandleTable {
     // after writes it waits for data sync, so do it after everything
     pub(crate) async fn release_file_handle(&self, inode: Ino, fh: FH) {
         let outer_read_guard = self.handles.read().await;
-        if let Some(inner_map) = outer_read_guard.get(&inode).and_then(|v| Some(v.clone())) {
+        if let Some(inner_map) = outer_read_guard.get(&inode).map(|v| v.clone()) {
             drop(outer_read_guard);
 
             let mut inner_write_guard = inner_map.write().await;
@@ -210,7 +203,7 @@ impl Handle {
     pub(crate) async fn wait_all_operations_done(&self, ctx: Arc<FuseContext>) -> Result<()> {
         match self {
             Handle::File(h) => h.wait_all_operations_done(Some(ctx)).await,
-            Handle::Dir(_) => return Ok(()),
+            Handle::Dir(_) => Ok(()),
         }
     }
 }
@@ -319,9 +312,7 @@ impl FileHandle {
     /// return None. FIXME: add timeout mechanism
     #[instrument(skip(self))]
     pub(crate) async fn write_lock(&self, ctx: Arc<FuseContext>) -> Option<FileHandleWriteGuard> {
-        if self.writer.is_none() {
-            return None;
-        }
+        self.writer.as_ref()?;
         let cancel_token = ctx.cancellation_token.clone();
         // 1. increase the write wait count
         self.write_wait_cnt.fetch_add(1, Ordering::AcqRel);
@@ -441,7 +432,7 @@ impl FileHandle {
                 }
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     pub(crate) async fn close(&self) {

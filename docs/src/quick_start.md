@@ -34,7 +34,7 @@ git clone https://github.com/crrow/kisekifs && cd kisekifs
 
 ```shell
 # Set proxy: export HTTP_PROXY=http://192.168.5.2:7890,HTTPS_PROXY=http://192.168.5.2:7890
-sudo bash ./hack/ubuntu/prepare.sh
+sudo bash ./hack/ubuntu/dep.sh
 
 echo 'export PATH=$HOME/.cargo/bin/:$PATH' >> $HOME/.bashrc
 ```

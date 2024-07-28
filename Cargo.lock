@@ -1681,10 +1681,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiseki"
-version = "0.1.0"
-
-[[package]]
 name = "kiseki-binary"
 version = "0.1.0"
 dependencies = [

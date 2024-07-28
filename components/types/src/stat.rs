@@ -40,8 +40,8 @@ pub struct FSStat {
 impl Debug for FSStat {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FSStat")
-            .field("total_size", &ReadableSize(self.total_size.clone()))
-            .field("used_size", &ReadableSize(self.used_size.clone()))
+            .field("total_size", &ReadableSize(self.total_size))
+            .field("used_size", &ReadableSize(self.used_size))
             .field("file_count", &self.file_count)
             .finish()
     }

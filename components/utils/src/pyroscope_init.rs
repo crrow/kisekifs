@@ -35,11 +35,11 @@ pub fn init_pyroscope() -> Result<Option<Guard>, Whatever> {
     let agent = PyroscopeAgent::builder(url, String::from("kiseki"))
         .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
         .build()
-        .with_whatever_context(|e| "failed to setup pyroscope agent")?;
+        .with_whatever_context(|_e| "failed to setup pyroscope agent")?;
 
     let agent_running = agent
         .start()
-        .with_whatever_context(|e| "failed to start pyroscope agent")?;
+        .with_whatever_context(|_e| "failed to start pyroscope agent")?;
 
     Ok(Some(agent_running))
 }

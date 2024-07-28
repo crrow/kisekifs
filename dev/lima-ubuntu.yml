@@ -1,0 +1,26 @@
+# This template requires Lima v0.7.0 or later.
+arch: "x86_64"
+os: "Linux"
+images:
+  # Try to use release-yyyyMMdd image if available. Note that release-yyyyMMdd will be removed after several months.
+  - location: "https://cloud-images.ubuntu.com/releases/22.04/release-20240126/ubuntu-22.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+    digest: "sha256:9f8a0d84b81a1d481aafca2337cb9f0c1fdf697239ac488177cf29c97d706c25"
+  # Fallback to the latest release image.
+  # Hint: run `limactl prune` to invalidate the cache
+  - location: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+mounts:
+  - location: "/home/dh/code/personal/rust/kisekifs"
+    writable: true 
+  - location: "/tmp/lima"
+    writable: true
+  - location: "~/.config/nix"
+    writable: false
+memory: "32GiB"
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive

@@ -16,12 +16,10 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use fuser::FileType;
-
 use crate::{
     attr::InodeAttr,
     entry::FullEntry,
-    ino::{Ino, CONFIG_INODE, CONTROL_INODE, LOG_INODE, MAX_INTERNAL_INODE, STATS_INODE, *},
+    ino::{Ino, CONFIG_INODE, CONTROL_INODE, LOG_INODE, STATS_INODE},
 };
 
 pub const LOG_INODE_NAME: &str = ".accesslog";
@@ -34,7 +32,7 @@ pub struct InternalNodeTable {
 }
 
 impl InternalNodeTable {
-    pub fn new(entry_timeout: (Duration, Duration)) -> Self {
+    pub fn new(_entry_timeout: (Duration, Duration)) -> Self {
         let mut map = HashMap::new();
         let control_inode: InternalNode = InternalNode(FullEntry {
             inode: CONTROL_INODE,

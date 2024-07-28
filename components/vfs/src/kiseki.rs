@@ -15,13 +15,9 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
     fmt::{Debug, Display, Formatter},
-    path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    path::Path,
+    sync::{atomic::Ordering, Arc},
     time::{Duration, SystemTime},
 };
 
@@ -30,34 +26,25 @@ use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{
     DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MAX_SYMLINK_LEN, MODE_MASK_R, MODE_MASK_W,
-    MODE_MASK_X,
 };
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
-use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
     ino::{Ino, CONTROL_INODE, ROOT_INO},
     internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
-    slice::SliceID,
     ToErrno,
 };
-use kiseki_utils::{object_storage, object_storage::ObjectStorage};
 use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
-use scopeguard::defer;
-use snafu::{ensure, location, Location, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::{task::JoinHandle, time::Instant};
-use tracing::{debug, error, info, instrument, trace, Instrument};
+use tracing::{debug, info, instrument, trace, Instrument};
 
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
-    err::{
-        Error, Error::LibcError, JoinErrSnafu, LibcSnafu, MetaSnafu, ObjectStorageSnafu,
-        OpenDalSnafu, Result, StorageSnafu,
-    },
-    handle::{FileHandleWriteGuard, Handle, HandleTable, HandleTableRef},
-    writer::{FileWriter, FileWritersRef},
+    err::{LibcSnafu, MetaSnafu, ObjectStorageSnafu, Result},
+    handle::{HandleTable, HandleTableRef},
 };
 
 pub struct KisekiVFS {
@@ -232,7 +219,7 @@ impl KisekiVFS {
 }
 
 impl KisekiVFS {
-    pub async fn init(&self, ctx: &FuseContext) -> Result<()> {
+    pub async fn init(&self, _ctx: &FuseContext) -> Result<()> {
         debug!("vfs:init");
         // let _format = self.meta.get_format().await?;
         // if let Some(sub_dir) = &self.meta.config.sub_dir {
@@ -745,7 +732,7 @@ impl KisekiVFS {
             .context(LibcSnafu { errno: EBADF })?;
         let h = h.as_dir_handle().context(LibcSnafu { errno: EBADF })?;
 
-        let mut read_guard = h.inner.read().await;
+        let read_guard = h.inner.read().await;
         if read_guard.children.is_empty() || offset == 0 {
             drop(read_guard);
             let mut write_guard = h.inner.write().await;
@@ -757,20 +744,14 @@ impl KisekiVFS {
                 .await
                 .context(MetaSnafu)?;
             if (offset as usize) < write_guard.children.len() {
-                let result = write_guard.children[offset as usize..]
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let result = write_guard.children[offset as usize..].to_vec();
                 return Ok(result);
             } else {
                 return Ok(vec![]);
             }
         }
         if (offset as usize) < read_guard.children.len() {
-            let result = read_guard.children[offset as usize..]
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
+            let result = read_guard.children[offset as usize..].to_vec();
             return Ok(result);
         }
         Ok(Vec::new())
@@ -930,7 +911,7 @@ impl KisekiVFS {
             }
         );
         ensure!(
-            new_name.len() != 0,
+            !new_name.is_empty(),
             LibcSnafu {
                 errno: libc::ENOENT,
             }
@@ -965,7 +946,7 @@ impl KisekiVFS {
             }
         );
         ensure!(
-            name.len() != 0,
+            !name.is_empty(),
             LibcSnafu {
                 errno: libc::ENOENT,
             }
@@ -1060,7 +1041,7 @@ impl KisekiVFS {
         flags: u32,
     ) -> Result<()> {
         ensure!(
-            name.len() > 0 && new_name.len() > 0,
+            !name.is_empty() && !new_name.is_empty(),
             LibcSnafu {
                 errno: libc::ENOENT,
             }

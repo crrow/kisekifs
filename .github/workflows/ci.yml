@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - release/**
+    paths-ignore:
+      - '**.md'
+      - '.licenserc.yaml'
+      - '.commitlintrc.yaml'
+      - 'LICENSE'
+      - 'NOTICE'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '.licenserc.yaml'
+      - '.commitlintrc.yaml'
+      - 'LICENSE'
+      - 'NOTICE'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check License Header
+        uses: apache/skywalking-eyes/header@v0.6.0
+      
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --workspace -- -D warnings
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: Build
+        run: just build
+  
+  rust-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install tarpaulin
+        run: cargo binstall -y cargo-tarpaulin
+      - name: Rust unit tests with coverage report
+        run: cargo tarpaulin --engine llvm --no-dead-code --no-fail-fast --all-features --workspace -o xml --output-dir ./cov-reports
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cov-report-rust-tests-${{ runner.os }}
+          path: ./cov-reports
+          if-no-files-found: 'error'
+    

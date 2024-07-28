@@ -21,8 +21,13 @@ HTTPS_PROXY := env_var("https_proxy")
 
 # Lint and automatically fix what we can fix
 @lint:
-    cargo clippy --fix --allow-dirty --allow-staged
-    cargo fmt
+    cargo clippy --all-targets --workspace -- -D warnings
+
+@fmt:
+    cargo +nightly fmt
+    taplo format
+    taplo format --check
+    hawkeye format
 
 alias c := check
 @check:
@@ -86,11 +91,8 @@ alias sh-um := help-umount
 
 # ==================================================== format
 
-@fmt:
+@format:
     cargo run --color=always --package kiseki-binary format
-    taplo format
-    taplo format --check
-    hawkeye format
 
 @prepare:
     mkdir -p /tmp/kiseki /tmp/kiseki.meta/
@@ -163,3 +165,12 @@ build-by-docker:
 build-image:
     docker build -t kisekifs:v0.0.1 \
         -f docker/Dockerfile.ubuntu .
+
+create-lima:
+    limactl create --name=kiseki dev/lima-k8s.yml
+
+start-lima:
+    limactl start --name=kiseki
+
+stop-lima:
+    limactl stop kiseki

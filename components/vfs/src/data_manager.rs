@@ -14,11 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicUsize, Arc},
-    time::SystemTime,
-};
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 use kiseki_common::FH;
 use kiseki_meta::MetaEngineRef;
@@ -31,9 +27,7 @@ use kiseki_storage::{
 };
 use kiseki_types::ino::Ino;
 use kiseki_utils::object_storage::ObjectStorage;
-use snafu::OptionExt;
-use tokio::sync::{mpsc, RwLock};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::RwLock;
 use tracing::debug;
 
 use crate::{
