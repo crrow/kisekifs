@@ -19,7 +19,6 @@ use std::panic;
 use std::time::Duration;
 
 use backtrace::Backtrace;
-use lazy_static::lazy_static;
 
 pub fn set_panic_hook() {
     // Set a panic hook that records the panic as a `tracing` event at the

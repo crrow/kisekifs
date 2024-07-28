@@ -16,29 +16,18 @@
 
 use std::{
     cell::UnsafeCell,
-    collections::HashMap,
     fmt::{Display, Formatter},
     io::{Cursor, Write},
-    mem,
-    ops::{Deref, DerefMut},
-    ptr,
-    sync::{atomic::AtomicU8, Arc},
+    sync::Arc,
 };
 
-use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
-use dashmap::DashMap;
 use kiseki_utils::readable_size::ReadableSize;
-use lazy_static::lazy_static;
 use snafu::ResultExt;
-use tokio::{
-    io::AsyncReadExt,
-    sync::{Notify, RwLock},
-    time::Instant,
-};
+use tokio::{sync::Notify, time::Instant};
 use tracing::debug;
 
-use crate::err::{DiskPoolMmapSnafu, UnknownIOSnafu};
+use crate::err::UnknownIOSnafu;
 
 pub struct MemoryPagePool {
     page_size: usize,
@@ -61,7 +50,7 @@ impl Slot {
     fn get_inner_slice(&self, offset: usize, len: usize) -> &[u8] {
         unsafe {
             std::slice::from_raw_parts(
-                ((&*self.inner.get()).as_ptr() as usize + offset) as *const u8,
+                ((*self.inner.get()).as_ptr() as usize + offset) as *const u8,
                 len,
             )
         }
@@ -70,7 +59,7 @@ impl Slot {
     fn get_mut_inner_slice(&self, offset: usize, len: usize) -> &mut [u8] {
         unsafe {
             std::slice::from_raw_parts_mut(
-                ((&mut *self.inner.get()).as_mut_ptr() as usize + offset) as *mut u8,
+                ((*self.inner.get()).as_mut_ptr() as usize + offset) as *mut u8,
                 len,
             )
         }
@@ -78,8 +67,8 @@ impl Slot {
 
     fn clear(&self) {
         unsafe {
-            let mut slice = std::slice::from_raw_parts_mut(
-                ((&mut *self.inner.get()).as_mut_ptr() as usize) as *mut u8,
+            let slice = std::slice::from_raw_parts_mut(
+                ((*self.inner.get()).as_mut_ptr() as usize) as *mut u8,
                 self.page_size,
             );
             slice.fill(0);
@@ -292,7 +281,7 @@ mod tests {
         for _ in 0..pool.total_page_cnt() {
             let pool = pool.clone();
             let handle = tokio::spawn(async move {
-                let page2 = pool.acquire_page().await;
+                let _page2 = pool.acquire_page().await;
                 let page = pool.acquire_page().await;
                 tokio::time::sleep(Duration::from_millis(1)).await;
                 let mut cursor = Cursor::new(b"hello");

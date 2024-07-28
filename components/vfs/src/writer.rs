@@ -26,47 +26,37 @@ use std::{
     cmp::min,
     collections::{BTreeMap, HashMap},
     fmt::{Debug, Display, Formatter},
-    io::Cursor,
-    ops::Range,
     sync::{
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Weak,
     },
     time::Duration,
 };
 
 use crossbeam::atomic::AtomicCell;
-use dashmap::{
-    mapref::one::{Ref, RefMut},
-    DashMap,
-};
-use kiseki_common::{
-    cal_chunk_idx, cal_chunk_offset, ChunkIndex, FileOffset, BLOCK_SIZE, CHUNK_SIZE, FH,
-};
+use dashmap::DashMap;
+use kiseki_common::{cal_chunk_idx, cal_chunk_offset, ChunkIndex, BLOCK_SIZE, CHUNK_SIZE};
 use kiseki_meta::MetaEngineRef;
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     ino::Ino,
-    slice::{make_slice_object_key, SliceID, EMPTY_SLICE_ID},
+    slice::{SliceID, EMPTY_SLICE_ID},
 };
-use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
+use kiseki_utils::readable_size::ReadableSize;
 use libc::EBADF;
-use rangemap::RangeMap;
 use scopeguard::defer;
 use snafu::{OptionExt, ResultExt};
 use tokio::{
-    sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock},
-    task::{yield_now, JoinHandle},
-    time::{error::Elapsed, Instant},
+    sync::{mpsc, Notify, RwLock},
+    task::yield_now,
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn, Instrument};
+use tracing::{debug, error, instrument, Instrument};
 
 use crate::{
     data_manager::DataManager,
-    err::{JoinErrSnafu, LibcSnafu, Result},
-    reader::FileReader,
-    KisekiVFS,
+    err::{LibcSnafu, Result},
 };
 
 impl DataManager {
@@ -77,7 +67,7 @@ impl DataManager {
             .file_writers
             .entry(ino)
             .or_insert_with(|| {
-                let (tx, mut rx) = mpsc::channel(200);
+                let (tx, rx) = mpsc::channel(200);
                 let fw = FileWriter {
                     inode:                  ino,
                     length:                 AtomicUsize::new(len as usize),
@@ -181,11 +171,9 @@ impl WriterPattern {
                 // add weight on the seq side.
                 self.score.fetch_add(1, Ordering::AcqRel);
             }
-        } else {
-            if score > Self::MAX_RANDOM_SCORE {
-                // add weight on the random side.
-                self.score.fetch_add(-1, Ordering::AcqRel);
-            }
+        } else if score > Self::MAX_RANDOM_SCORE {
+            // add weight on the random side.
+            self.score.fetch_add(-1, Ordering::AcqRel);
         }
     }
 
@@ -290,7 +278,7 @@ impl FileWriter {
         for (sw, state, l) in slice_writers.iter() {
             let data = &data[l.buf_start_at..l.buf_start_at + l.need_write_len];
             let n = sw
-                .write_at(state.clone(), l.chunk_offset - sw.offset_of_chunk, data)
+                .write_at(*state, l.chunk_offset - sw.offset_of_chunk, data)
                 .await?;
             write_len += n;
             let sw = sw.clone();
@@ -443,7 +431,7 @@ impl FileWriterFlusher {
         debug!("Ino({}) flush task started", self.fw.inode);
         let cancel_token = self.fw.cancel_token.clone();
         let cloned_cancel_token = cancel_token.clone();
-        let ino = self.fw.inode.clone();
+        let ino = self.fw.inode;
         let meta_engine = self
             .fw
             .data_manager
@@ -463,9 +451,9 @@ impl FileWriterFlusher {
                         match req {
                             FlushReq::FlushBulk {sw, offset} => {
                                 debug!("{ino} flush bulk to {offset}");
-                                let fw = self.fw.clone();
+                                let _fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
-                                let me = meta_engine.clone();
+                                let _me = meta_engine.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
                                         r = sw.do_flush_bulk(offset) => {
@@ -478,14 +466,13 @@ impl FileWriterFlusher {
                                             // we should just commit the slice writer.
                                             panic!("flush full is timeout");
                                         }
-                                        _ = cancel_token.cancelled() => {
-                                            return;
+                                        _ = cancel_token.cancelled() => {;
                                         }
                                     }
                                 });
                             },
                             FlushReq::FlushFull(sw) => {
-                                let fw = self.fw.clone();
+                                let _fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
                                 let me = meta_engine.clone();
                                 tokio::spawn(async move {
@@ -501,14 +488,13 @@ impl FileWriterFlusher {
                                             panic!("flush full is timeout");
                                         }
                                         _ = cancel_token.cancelled() => {
-                                            debug!("{ino} flush full is cancelled");
-                                            return;
+                                            debug!("{ino} flush full is cancelled");;
                                         }
                                     }
                                 });
                             },
                             FlushReq::CommitIdle(sw) => {
-                                let fw = self.fw.clone();
+                                let _fw = self.fw.clone();
                                 let me = meta_engine.clone();
                                 // just commit the idle slice writer.
                                 tokio::spawn(async move {
@@ -616,10 +602,10 @@ impl ChunkWriter {
                 .map(|(_, sw)| sw.clone())
                 .collect::<Vec<_>>();
             drop(read_guard);
-            let current_len = sws.len();
+            let _current_len = sws.len();
             for sw in sws {
                 let sw = sw.clone();
-                let id = sw._internal_seq.clone();
+                let id = sw._internal_seq;
                 let state = SliceWriterState::from(sw.state.load(Ordering::Acquire));
                 if matches!(
                     state,
@@ -837,7 +823,7 @@ impl SliceWriter {
 
         // then the sw is done.
         // write the meta info of this slice.
-        let _ = meta_engine_ref
+        meta_engine_ref
             .write_slice(
                 inode,
                 self.chunk_index,
@@ -896,7 +882,7 @@ impl SliceWriter {
     // make_flush_req try to make flush req if we write enough data.
     async fn make_flush_req(self: Arc<Self>, seq: bool, finish: bool) -> Option<FlushReq> {
         let state = self.state.load(Ordering::Acquire);
-        return match SliceWriterState::from(state) {
+        match SliceWriterState::from(state) {
             SliceWriterState::Idle => {
                 if finish {
                     // we should try to commit this slice writer.
@@ -988,7 +974,7 @@ impl SliceWriter {
                     None
                 }
             }
-        };
+        }
     }
 
     // get the underlying write buffer's released length and total write length.

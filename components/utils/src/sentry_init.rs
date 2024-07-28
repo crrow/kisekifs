@@ -17,7 +17,7 @@
 pub use sentry::release_name;
 use sentry::{types::Dsn, ClientInitGuard, IntoDsn};
 use snafu::{ResultExt, Whatever};
-use tracing::{error, info};
+use tracing::error;
 
 use crate::env::{required_var, var, var_parsed};
 

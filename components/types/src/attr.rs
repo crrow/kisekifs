@@ -18,11 +18,10 @@ use std::time::{Duration, SystemTime};
 
 use bitflags::bitflags;
 use fuser::{FileAttr, FileType};
-use kiseki_common::BlockSize;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::ino::{Ino, ROOT_INO, ZERO_INO};
+use crate::ino::{Ino, ROOT_INO};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetAttrFlags(pub u32);

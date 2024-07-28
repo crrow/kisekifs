@@ -43,21 +43,14 @@ tokio-util = { version = "0.7.10", features = ["rt", "io"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
-[package]
-name = "kiseki"
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 authors = ["Ryan Tan"]
 license = "Apache-2.0"
 description = "A fuse filesystem"
 exclude = ["benches"]
-autobenches = false
 
 [profile.release]
 debug = true
 panic = 'abort'
-
-[lib]
-bench = false
-
-[dependencies]

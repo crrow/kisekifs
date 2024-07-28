@@ -23,26 +23,21 @@ use std::{
     },
 };
 
-use bytes::{Buf, Bytes};
 use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
-use kiseki_types::slice::{make_slice_object_key, SliceID, SliceKey, EMPTY_SLICE_ID};
+use kiseki_types::slice::SliceID;
 use kiseki_utils::{
-    object_storage::{LocalStorage, ObjectStorage, ObjectStoragePath},
+    object_storage::{ObjectStorage, ObjectStoragePath},
     readable_size::ReadableSize,
 };
 use snafu::ResultExt;
-use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
-    task::JoinHandle,
-    time::Instant,
-};
-use tracing::{debug, instrument, Instrument};
+use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
+use tracing::{debug, instrument};
 
 use crate::{
     cache,
     err::{
-        Error::ObjectStorageError, InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu,
-        ObjectStorageSnafu, OpenDalSnafu, Result, UnknownIOSnafu,
+        InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, ObjectStorageSnafu, Result,
+        UnknownIOSnafu,
     },
     pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
 };
@@ -146,6 +141,10 @@ pub struct SliceBuffer {
     block_slots:    Box<[Block]>,
     /// how many page do we have in the slice buffer.
     total_page_cnt: usize,
+}
+
+impl Default for SliceBuffer {
+    fn default() -> Self { Self::new() }
 }
 
 impl SliceBuffer {
@@ -267,7 +266,7 @@ impl SliceBuffer {
             let new_offset = offset + total_write_len;
             let block_index = new_offset / BLOCK_SIZE;
             let block_offset = new_offset % BLOCK_SIZE;
-            let mut block = unsafe { self.block_slots.get_unchecked_mut(block_index) };
+            let block = unsafe { self.block_slots.get_unchecked_mut(block_index) };
 
             if matches!(block, Block::Empty) {
                 *block = Block::new_data_block();
@@ -576,11 +575,13 @@ pub struct SliceBufferStatus {
 ///
 /// Once a block has been flushed, then it become Empty, then we
 /// can write new data to it.
+#[derive(Default)]
 enum Block {
     // The block is empty, doesn't hold any memory,
     // 1. we may just flush it
     // 2. just haven't written data yet.
     // 3. it is a hole.(we don't upload it, reader should fill the gap)
+    #[default]
     Empty,
     // The actual data block we have written.
     // Block is composed by one or more pages.
@@ -594,10 +595,6 @@ struct DataBlock {
     // the written len of the block
     length: usize,
     pages:  Box<[Option<Page>]>,
-}
-
-impl Default for Block {
-    fn default() -> Self { Block::Empty }
 }
 
 impl Block {
@@ -622,7 +619,7 @@ impl Block {
         debug!("try to get a page from block.");
         if let Block::Data(db) = self {
             let mut new_one = false;
-            if matches!(db.pages[page_idx], None) {
+            if db.pages[page_idx].is_none() {
                 let page = GLOBAL_HYBRID_PAGE_POOL.acquire_page().await;
                 db.pages[page_idx] = Some(page);
                 new_one = true;
@@ -662,7 +659,7 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
-    use futures::{StreamExt, TryStreamExt};
+    use futures::StreamExt;
     use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
     use tracing::info;
 
@@ -673,12 +670,12 @@ mod tests {
         let mut slice_buffer = SliceBuffer::new();
         let data = b"hello".as_slice();
 
-        let write_len = slice_buffer.write_at(0, &data).await.unwrap();
+        let write_len = slice_buffer.write_at(0, data).await.unwrap();
         assert_eq!(write_len, data.len());
         assert_eq!(slice_buffer.length, data.len());
         println!("status {:?}", slice_buffer.status());
 
-        let write_len = slice_buffer.write_at(PAGE_SIZE - 3, &data).await.unwrap();
+        let write_len = slice_buffer.write_at(PAGE_SIZE - 3, data).await.unwrap();
         assert_eq!(write_len, data.len());
         assert_eq!(slice_buffer.length, PAGE_SIZE + data.len() - 3);
         println!("status {:?}", slice_buffer.status());
@@ -705,7 +702,7 @@ mod tests {
         let mut slice_buffer = SliceBuffer::new();
         let data = b"hello".as_slice();
 
-        let write_len = slice_buffer.write_at(0, &data).await.unwrap();
+        let write_len = slice_buffer.write_at(0, data).await.unwrap();
         assert_eq!(write_len, data.len());
         assert_eq!(slice_buffer.length, data.len());
 
@@ -714,7 +711,7 @@ mod tests {
         assert_eq!(read_len, 5);
         assert_eq!(dst, data);
 
-        let write_len = slice_buffer.write_at(PAGE_SIZE - 3, &data).await.unwrap();
+        let write_len = slice_buffer.write_at(PAGE_SIZE - 3, data).await.unwrap();
         assert_eq!(write_len, data.len());
 
         let mut dst = vec![0u8; 5];
@@ -739,7 +736,7 @@ mod tests {
         let mut slice_buffer = SliceBuffer::new();
         let data = b"hello".as_slice();
 
-        let write_len = slice_buffer.write_at(0, &data).await.unwrap();
+        let write_len = slice_buffer.write_at(0, data).await.unwrap();
         assert_eq!(write_len, data.len());
         assert_eq!(slice_buffer.length, data.len());
 
@@ -853,11 +850,11 @@ mod tests {
         let mut slice_buffer = SliceBuffer::new();
         let data = b"hello world".as_slice();
 
-        let write_len = slice_buffer.write_at(0, &data).await.unwrap();
+        let write_len = slice_buffer.write_at(0, data).await.unwrap();
         assert_eq!(write_len, data.len());
         assert_eq!(slice_buffer.length, data.len());
 
-        let write_len = slice_buffer.write_at(BLOCK_SIZE - 3, &data).await.unwrap();
+        let write_len = slice_buffer.write_at(BLOCK_SIZE - 3, data).await.unwrap();
         assert_eq!(write_len, data.len());
         assert_eq!(slice_buffer.length, BLOCK_SIZE - 3 + data.len());
 

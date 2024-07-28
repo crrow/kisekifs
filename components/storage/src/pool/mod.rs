@@ -18,17 +18,14 @@ pub mod disk_pool;
 pub mod memory_pool;
 
 use std::{
-    fmt::{Debug, Display, Formatter},
+    fmt::{Debug, Formatter},
     sync::Arc,
     thread,
-    time::Duration,
 };
 
 use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::readable_size::ReadableSize;
 use lazy_static::lazy_static;
-use log::info;
-use snafu::ResultExt;
 use tracing::debug;
 
 use crate::err::Result;
@@ -227,11 +224,10 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, thread};
+    use std::io::Cursor;
 
     use kiseki_utils::logger::install_fmt_log;
     use tokio::time::Instant;
-    use tokio_util::io::StreamReader;
     use tracing::debug;
 
     use super::*;

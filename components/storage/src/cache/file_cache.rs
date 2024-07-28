@@ -35,24 +35,23 @@
 //! 5. Recover: when the system restarts, we will clean all cache and flush old
 //!    staged data to the remote storage.
 
-use std::{cmp::min, io::BufRead, path::PathBuf, sync::Arc, time::Duration};
+use std::{cmp::min, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::{FutureExt, TryStreamExt};
-use kiseki_common::{BlockIndex, ChunkIndex, PAGE_SIZE};
+use kiseki_common::{BlockIndex, PAGE_SIZE};
 use kiseki_types::slice::{SliceID, SliceKey};
 use kiseki_utils::{
-    object_storage::{LocalStorage, ObjectReader, ObjectStorage, ObjectStoragePath},
+    object_storage::{LocalStorage, ObjectReader, ObjectStorage},
     readable_size::ReadableSize,
 };
-use snafu::{location, ResultExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio_stream::StreamExt;
+use snafu::ResultExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tracing::{debug, error, warn};
 
 use crate::{
-    err::{CacheSnafu, Error::CacheError, ObjectStorageSnafu, Result, UnknownIOSnafu},
+    err::{Error::CacheError, ObjectStorageSnafu, Result, UnknownIOSnafu},
     pool::Page,
 };
 
@@ -122,7 +121,6 @@ impl FileCache {
                     .await
                     {
                         error!("Failed to flush the block to the remote storage: {:?}", e);
-                        return;
                     }
                 })
             };
@@ -151,7 +149,7 @@ impl FileCache {
     }
 
     pub async fn get(self: &Arc<Self>, slice_key: &SliceKey) -> Result<Option<ObjectReader>> {
-        return match self.index.get(slice_key).await {
+        match self.index.get(slice_key).await {
             None => Ok(None),
             Some(_) => {
                 let path = slice_key.make_object_storage_path();
@@ -162,7 +160,7 @@ impl FileCache {
                     .context(ObjectStorageSnafu)?;
                 Ok(Some(reader))
             }
-        };
+        }
     }
 
     pub async fn get_range(
@@ -171,7 +169,7 @@ impl FileCache {
         offset: usize,
         length: usize,
     ) -> Result<Option<Bytes>> {
-        return match self.index.get(slice_key).await {
+        match self.index.get(slice_key).await {
             None => {
                 warn!("block not found in the stage cache: {:?}", slice_key);
                 Ok(None)
@@ -189,7 +187,7 @@ impl FileCache {
                     .context(ObjectStorageSnafu)?;
                 Ok(Some(bytes))
             }
-        };
+        }
     }
 
     pub async fn stage(
@@ -205,7 +203,7 @@ impl FileCache {
         let mut total_release_page_cnt = 0;
         let _ = self
             .index
-            .try_get_with(key.clone(), async {
+            .try_get_with(key, async {
                 let (_, mut writer) = self
                     .local_storage
                     .put_multipart(&key.make_object_storage_path())
@@ -325,7 +323,7 @@ mod tests {
         let memory_pool = pool::memory_pool::MemoryPagePool::new(PAGE_SIZE, pool_size);
 
         let mut pages: Box<[Option<Page>]> = (0..(BLOCK_SIZE / PAGE_SIZE)).map(|_| None).collect();
-        let mut mem_page = memory_pool.acquire_page().await;
+        let mem_page = memory_pool.acquire_page().await;
         let content = b"hello world".to_vec();
         let mut reader = std::io::Cursor::new(&content);
         mem_page

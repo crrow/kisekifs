@@ -1,5 +1,7 @@
 # Kiseki
 
+Go check the [doc](https://crrow.github.io/kisekifs/).
+
 Kiseki is my learning rust project, a simple 'distributed' fuse file system that is port
 of [JuiceFS](https://github.com/juicedata/juicefs).
 
@@ -56,4 +58,3 @@ and is not endorsed by or affiliated with the Juice company.
 # License
 
 Apache-2.0
-

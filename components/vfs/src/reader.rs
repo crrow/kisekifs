@@ -15,12 +15,9 @@
 // limitations under the License.
 
 use std::{
-    cell::UnsafeCell,
     cmp::{max, min},
-    collections::HashMap,
     fmt::Debug,
     io::Cursor,
-    ops::Deref,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Weak,
@@ -29,26 +26,23 @@ use std::{
 
 use dashmap::DashMap;
 use kiseki_common::{BlockIndex, BlockSize, ChunkIndex, BLOCK_SIZE, CHUNK_SIZE, FH};
-use kiseki_meta::MetaEngineRef;
 use kiseki_storage::{
     cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef},
-    err::{JoinErrSnafu, ObjectStorageSnafu, UnknownIOSnafu},
+    err::{JoinErrSnafu, UnknownIOSnafu},
 };
 use kiseki_types::{
     ino::Ino,
-    slice::{make_slice_object_key, OverlookedSlicesRef, Slice, SliceID, SliceKey},
+    slice::{OverlookedSlicesRef, Slice, SliceID, SliceKey},
 };
-use kiseki_utils::{object_storage::ObjectStorage, readable_size::ReadableSize};
+use kiseki_utils::readable_size::ReadableSize;
 use rangemap::RangeMap;
 use snafu::ResultExt;
-use tokio::{sync::RwLock, task::JoinHandle};
-use tracing::{debug, error, instrument, warn};
+use tokio::task::JoinHandle;
+use tracing::{debug, instrument, warn};
 
 use crate::{
-    data_manager::{DataManager, DataManagerRef},
-    err::{ObjectBlockNotFoundSnafu, Result, StorageSnafu},
-    handle::HandleTable,
-    KisekiVFS,
+    data_manager::DataManager,
+    err::{ObjectBlockNotFoundSnafu, Result},
 };
 
 impl DataManager {
@@ -66,9 +60,9 @@ impl DataManager {
 
             let mut out_write_guard = self.file_readers.write().await;
             // check again
-            if !out_write_guard.contains_key(&inode) {
-                out_write_guard.insert(inode, Default::default());
-            }
+            out_write_guard
+                .entry(inode)
+                .or_insert_with(|| Default::default());
             drop(out_write_guard);
 
             // acquire the read lock again.
@@ -95,7 +89,7 @@ impl DataManager {
         }
         // no one create the file reader for real, we have to create it.
         let fr = Arc::new(FileReader {
-            data_engine: Arc::downgrade(&self),
+            data_engine: Arc::downgrade(self),
             ino: inode,
             fh,
             length: AtomicUsize::new(length),
@@ -105,7 +99,7 @@ impl DataManager {
             closing: Default::default(),
         });
         inner_write_guard.insert(fh, fr.clone());
-        return fr;
+        fr
     }
 
     /// [truncate_reader] is called when we modify the file length.
@@ -123,7 +117,7 @@ impl DataManager {
             drop(out_read_guard);
 
             // acquire the inner lock.
-            let mut inner_read_guard = inner_map.read().await;
+            let inner_read_guard = inner_map.read().await;
             for (_, fr) in inner_read_guard.iter() {
                 // TODO: review me, should we use compare and swap?
                 fr.length.store(length as usize, Ordering::Release);
@@ -233,7 +227,7 @@ impl FileReader {
             }
             for (r, s) in range_map.overlapping(&current_read_range) {
                 let new_r =
-                    (max(r.start, current_read_range.start)..min(r.end, current_read_range.end));
+                    max(r.start, current_read_range.start)..min(r.end, current_read_range.end);
                 debug!(
                     "find overlapping slice in chunk: {:?}, range: {:?}, new_range: {:?}, slice: \
                      {:?}",
@@ -277,7 +271,7 @@ impl FileReader {
                         );
                         let sid = s.get_id();
 
-                        let read_len = read_slice_from_cache(
+                        let _read_len = read_slice_from_cache(
                             sid,
                             engine.file_cache.clone(),
                             engine.mem_cache.clone(),
@@ -319,7 +313,7 @@ impl FileReader {
             .upgrade()
             .expect("engine should not be dropped");
 
-        let mut outer_guard = engine.file_readers.read().await;
+        let outer_guard = engine.file_readers.read().await;
         if let Some(inner_map) = outer_guard.get(&self.ino) {
             let inner_map = inner_map.clone();
             drop(outer_guard);
@@ -390,7 +384,7 @@ async fn read_slice_from_cache(
         let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
             let key = SliceKey::new(slice_id, block_idx, obj_block_size);
             // 1. first of all, try to get block from file-cache
-            if let Some(mut block_reader) = file_cache_clone
+            if let Some(block_reader) = file_cache_clone
                 .get_range(&key, block_offset, current_block_to_read_len)
                 .await?
             {
@@ -403,7 +397,7 @@ async fn read_slice_from_cache(
             }
 
             // 2. try to get block from mem-cache
-            if let Some(mut block) = mem_cache_clone.get(&key).await? {
+            if let Some(block) = mem_cache_clone.get(&key).await? {
                 // copy to the writer
                 let reader = block.slice(block_offset..block_offset + current_block_to_read_len);
                 let mut slice = reader.as_ref();
@@ -414,7 +408,7 @@ async fn read_slice_from_cache(
             }
 
             // 3. report not found error
-            return ObjectBlockNotFoundSnafu { key }.fail()?;
+            ObjectBlockNotFoundSnafu { key }.fail()?
         });
         hanldes.push(handle);
     }
