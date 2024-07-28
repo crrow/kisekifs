@@ -26,6 +26,7 @@ use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{
     DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MAX_SYMLINK_LEN, MODE_MASK_R, MODE_MASK_W,
+    MODE_MASK_X,
 };
 use kiseki_meta::{context::FuseContext, MetaEngineRef};
 use kiseki_types::{
