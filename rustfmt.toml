@@ -1,6 +1,6 @@
 version = "Two"
 unstable_features = true
-edition = "2021"
+edition = "2024"
 
 indent_style = "Block"
 newline_style = "Unix"

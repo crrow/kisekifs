@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
+use std::{ffi::CString, path::PathBuf, process::Command};
 
 use clap::Args;
 use snafu::{ResultExt, Whatever};
@@ -38,8 +38,50 @@ pub struct UmountArgs {
 impl UmountArgs {
     pub fn run(&self) -> Result<(), Whatever> {
         let path = &self.mount_point;
-        rustix::mount::unmount(path, rustix::mount::UnmountFlags::FORCE)
-            .with_whatever_context(|_| format!("could not umount { }", path.display()))?;
+        self.fuser_unmount(path)
+            .with_whatever_context(|_| format!("could not umount {}", path.display()))?;
         Ok(())
+    }
+
+    /// Unmount using fuser-compatible approach
+    /// This follows the same logic as fuser's internal unmount implementation
+    fn fuser_unmount(&self, mountpoint: &PathBuf) -> std::io::Result<()> {
+        // Convert path to CString for libc calls
+        let mountpoint_cstr =
+            CString::new(mountpoint.canonicalize()?.as_os_str().as_encoded_bytes())?;
+
+        // If direct unmount failed with permission error, try fusermount as fallback
+        self.fusermount_unmount(&mountpoint_cstr)
+    }
+
+    /// Fallback unmount using fusermount command (same as fuser's approach)
+    fn fusermount_unmount(&self, mountpoint: &CString) -> std::io::Result<()> {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let mountpoint_osstr = OsStr::from_bytes(mountpoint.as_bytes());
+
+        // Try fusermount3 first (FUSE 3.x), then fusermount (FUSE 2.x)
+        let fusermount_commands = ["fusermount3", "fusermount"];
+
+        for cmd in &fusermount_commands {
+            let mut command = Command::new(cmd);
+            command.arg("-u").arg(mountpoint_osstr);
+
+            if self.force {
+                command.arg("-z"); // lazy unmount option
+            }
+
+            match command.status() {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(_) => continue, // Try next fusermount command
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to unmount: fusermount command not found or failed",
+        ))
     }
 }

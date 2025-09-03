@@ -1,8 +1,17 @@
+# Load environment variables from .env.local if it exists
+set dotenv-load
+set dotenv-filename := ".env.local"
+
+RUST_TOOLCHAIN := `grep 'channel = ' rust-toolchain.toml | cut -d '"' -f 2`
+TARGET_PLATFORM := "linux/arm64"
+DISTRI_PLATFORM := "ubuntu"
 HOME_DIR := env_var('HOME')
 CARGO_REGISTRY_CACHE := HOME_DIR + "/.cargo/registry"
 PWD := invocation_directory()
-HTTP_PROXY := env_var("http_proxy")
-HTTPS_PROXY := env_var("https_proxy")
+
+@env:
+    echo "RUST_TOOLCHAIN: {{RUST_TOOLCHAIN}}"
+    echo "TARGET_PLATFORM: {{TARGET_PLATFORM}}"
 
 # List available just recipes
 @help:
@@ -18,24 +27,35 @@ HTTPS_PROXY := env_var("https_proxy")
     cargo install cargo-release
     cargo install git-cliff
     cargo install cargo-criterion
+    cargo install cargo-outdated
+    cargo install cargo-edit
 
 # Lint and automatically fix what we can fix
 @lint:
-    cargo clippy --all-targets --workspace -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --no-deps -- -D warnings
+    cargo doc --workspace --all-features --no-deps --document-private-items
+    cd api && buf lint
+    cd examples/goclient && golangci-lint run
 
-@fmt:
-    cargo +nightly fmt
+@fmt: fmt-go
+    cargo +nightly fmt --all
     taplo format
     taplo format --check
     hawkeye format
+    cd api && buf format -w
+
+[working-directory: 'examples/goclient']
+@fmt-go:
+    go mod tidy
+    go fmt ./...
 
 alias c := check
 @check:
-    cargo check --all --all-features --all-targets
+    cargo check --all --all-features
 
 alias t := test
 @test:
-    cargo test --verbose  -- --nocapture --show-output
+    cargo nextest run --all-features
 
 alias b := bench
 @bench:
@@ -152,8 +172,6 @@ alias rr := random-read
 
 build-base-image:
     docker build -t kiseki-ubuntu-builder:v0.0.1 \
-        --build-arg http_proxy={{HTTP_PROXY}} \
-        --build-arg https_proxy={{HTTPS_PROXY}} \
         -f docker/Dockerfile.ubuntu.builder . 
 
 build-by-docker:

@@ -334,7 +334,7 @@ fn get_mode_t_from_filetype(kind: &FileType) -> libc::mode_t {
 
 fn make_smode(kind: &FileType, perm: u32) -> u16 {
     let mode = get_mode_t_from_filetype(kind);
-    let r = mode | perm;
+    let r = mode | (perm as u16);
     r as u16
 }
 
