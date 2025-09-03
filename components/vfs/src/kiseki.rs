@@ -17,7 +17,7 @@
 use std::{
     fmt::{Debug, Display, Formatter},
     path::Path,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
     time::{Duration, SystemTime},
 };
 
@@ -28,18 +28,18 @@ use kiseki_common::{
     DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MAX_SYMLINK_LEN, MODE_MASK_R, MODE_MASK_W,
     MODE_MASK_X,
 };
-use kiseki_meta::{context::FuseContext, MetaEngineRef};
+use kiseki_meta::{MetaEngineRef, context::FuseContext};
 use kiseki_types::{
+    ToErrno,
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
-    ino::{Ino, CONTROL_INODE, ROOT_INO},
-    internal_nodes::{InternalNodeTable, CONFIG_INODE_NAME, CONTROL_INODE_NAME},
-    ToErrno,
+    ino::{CONTROL_INODE, Ino, ROOT_INO},
+    internal_nodes::{CONFIG_INODE_NAME, CONTROL_INODE_NAME, InternalNodeTable},
 };
-use libc::{mode_t, EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
-use snafu::{ensure, OptionExt, ResultExt};
+use libc::{EACCES, EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM, mode_t};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::{task::JoinHandle, time::Instant};
-use tracing::{debug, info, instrument, trace, Instrument};
+use tracing::{Instrument, debug, info, instrument, trace};
 
 use crate::{
     config::Config,
@@ -578,7 +578,7 @@ impl KisekiVFS {
                     ino,
                     lock_owner,
                     false,
-                    libc::F_UNLCK,
+                    libc::F_UNLCK.into(),
                     0,
                     0x7FFFFFFFFFFFFFFF,
                 )
@@ -662,7 +662,7 @@ impl KisekiVFS {
                 let (locks, fowner, powner) = fh.get_posix_lock_info();
                 if locks & 1 != 0 {
                     self.meta
-                        .flock(ctx.clone(), inode, fowner, libc::F_UNLCK)
+                        .flock(ctx.clone(), inode, fowner, libc::F_UNLCK.into())
                         .await?;
                 }
                 if locks & 2 != 0 && powner != 0 {
@@ -672,7 +672,7 @@ impl KisekiVFS {
                             inode,
                             powner,
                             false,
-                            libc::F_UNLCK,
+                            libc::F_UNLCK.into(),
                             0,
                             0x7FFFFFFFFFFFFFFF,
                         )
@@ -838,7 +838,7 @@ impl KisekiVFS {
             }
             .fail()?;
         }
-        let file_type = get_file_type(mode)?;
+        let file_type = get_file_type(mode as mode_t)?;
 
         let (ino, attr) = self
             .meta
@@ -1227,7 +1227,7 @@ mod tests {
                 ctx.clone(),
                 dir1.inode,
                 "f1".to_string(),
-                0o644 | libc::S_IFREG,
+                (0o644 | libc::S_IFREG) as u32,
                 0,
                 0,
             )

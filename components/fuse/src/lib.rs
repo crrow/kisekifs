@@ -29,20 +29,20 @@ use fuser::{
     TimeOrNow,
 };
 use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
-use kiseki_meta::context::{FuseContext, EMPTY_CONTEXT};
+use kiseki_meta::context::{EMPTY_CONTEXT, FuseContext};
 use kiseki_types::{
+    ToErrno,
     attr::InodeAttr,
     entry::{Entry, FullEntry},
     ino::Ino,
     stat::FSStat,
-    ToErrno,
 };
 use kiseki_utils::readable_size::ReadableSize;
 use kiseki_vfs::KisekiVFS;
-use libc::{__u64, c_int};
+use libc::c_int;
 use snafu::{ResultExt, Snafu, Whatever};
 use tokio::runtime;
-use tracing::{debug, error, field, info, instrument, Instrument};
+use tracing::{Instrument, debug, error, field, info, instrument};
 
 use crate::err::Error;
 
@@ -202,7 +202,7 @@ impl Filesystem for KisekiFuse {
     }
 
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, name = field::Empty))]
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
         match self
             .runtime
             .block_on(self.vfs.get_attr(Ino::from(ino)).in_current_span())
