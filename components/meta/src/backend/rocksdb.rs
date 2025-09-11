@@ -49,6 +49,70 @@ use crate::{
     open_files::OpenFilesRef,
 };
 
+/// Constants for file permissions and operation modes
+mod constants {
+    pub const SETUID_BIT: u32 = 0o1000;
+    pub const SETGID_BIT: u32 = 0o2000;
+    pub const MODE_MASK_SETGID_EXEC: u32 = 0o2010;
+    pub const DEFAULT_FILE_SIZE: u64 = 4096;
+}
+
+/// Macro for deserializing values from RocksDB with unified error handling
+macro_rules! deserialize_db {
+    ($db:expr, $key:expr, $typ:ty, $kind:expr) => {{
+        let buf = $db
+            .get_pinned_opt(&$key, &rocksdb::ReadOptions::default())
+            .context(RocksdbSnafu)?
+            .context(model_err::NotFoundSnafu {
+                kind: $kind,
+                key:  String::from_utf8_lossy(&$key).to_string(),
+            })
+            .context(ModelSnafu)?;
+
+        bincode::deserialize::<$typ>(&buf)
+            .context(model_err::CorruptionSnafu {
+                kind: $kind,
+                key:  String::from_utf8_lossy(&$key).to_string(),
+            })
+            .context(ModelSnafu)?
+    }};
+}
+
+/// Macro for serializing values to write batch with unified error handling
+macro_rules! serialize_batch {
+    ($batch:expr, $key:expr, $value:expr, $kind:expr) => {{
+        let buf = bincode::serialize(&$value)
+            .context(model_err::CorruptionSnafu {
+                kind: $kind,
+                key:  String::from_utf8_lossy(&$key).to_string(),
+            })
+            .context(ModelSnafu)?;
+        $batch.put(&$key, buf);
+    }};
+}
+
+/// Macro for database operations with automatic error context
+macro_rules! db_try {
+    ($op:expr) => {
+        $op.context(RocksdbSnafu)?
+    };
+}
+
+/// Macro for model operations with automatic error context  
+macro_rules! model_try {
+    ($op:expr) => {
+        $op.context(ModelSnafu)?
+    };
+}
+
+/// Macro for unified batch operations
+macro_rules! batch_put {
+    ($batch:expr, $key:expr, $value:expr, $kind:expr) => {{
+        serialize_batch!($batch, $key, $value, $kind);
+        Ok(())
+    }};
+}
+
 #[derive(Debug, Default)]
 pub struct Builder {
     path:           PathBuf,
@@ -107,18 +171,15 @@ fn do_get_symlink<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<Bytes> {
 }
 fn do_get_hard_link_count<Layer: DBAccess>(db: &Layer, inode: Ino, parent: Ino) -> Result<u64> {
     let key = key::parent(inode, parent);
-
-    let buf = db
-        .get_pinned_opt(&key, &rocksdb::ReadOptions::default())
-        .context(RocksdbSnafu)?;
+    let buf = db_try!(db.get_pinned_opt(&key, &rocksdb::ReadOptions::default()));
     match buf {
         Some(buf) => {
-            let count: u64 = bincode::deserialize(&buf)
-                .context(model_err::CorruptionSnafu {
+            let count: u64 = model_try!(bincode::deserialize(&buf).context(
+                model_err::CorruptionSnafu {
                     kind: ModelKind::HardLinkCount,
                     key:  String::from_utf8_lossy(&key).to_string(),
-                })
-                .context(ModelSnafu)?;
+                }
+            ));
             Ok(count)
         }
         None => Ok(0),
@@ -127,42 +188,12 @@ fn do_get_hard_link_count<Layer: DBAccess>(db: &Layer, inode: Ino, parent: Ino) 
 
 fn do_get_dentry<Layer: DBAccess>(db: &Layer, parent: Ino, name: &str) -> Result<DEntry> {
     let entry_key = key::dentry(parent, name);
-    let entry_buf = db
-        .get_pinned_opt(&entry_key, &rocksdb::ReadOptions::default())
-        .context(RocksdbSnafu)?
-        .context(model_err::NotFoundSnafu {
-            kind: ModelKind::DEntry,
-            key:  String::from_utf8_lossy(&entry_key).to_string(),
-        })
-        .context(ModelSnafu)?;
-
-    let entry_info: DEntry = bincode::deserialize(&entry_buf)
-        .context(model_err::CorruptionSnafu {
-            kind: ModelKind::DEntry,
-            key:  String::from_utf8_lossy(&entry_key).to_string(),
-        })
-        .context(ModelSnafu)?;
-    Ok(entry_info)
+    Ok(deserialize_db!(db, entry_key, DEntry, ModelKind::DEntry))
 }
 
 fn do_get_attr<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<InodeAttr> {
     let attr_key = key::attr(inode);
-    let buf = db
-        .get_pinned_opt(&attr_key, &rocksdb::ReadOptions::default())
-        .context(RocksdbSnafu)?
-        .context(model_err::NotFoundSnafu {
-            kind: ModelKind::Attr,
-            key:  String::from_utf8_lossy(&attr_key).to_string(),
-        })
-        .context(ModelSnafu)?;
-
-    let attr: InodeAttr = bincode::deserialize(&buf)
-        .context(model_err::CorruptionSnafu {
-            kind: ModelKind::Attr,
-            key:  String::from_utf8_lossy(&attr_key).to_string(),
-        })
-        .context(ModelSnafu)?;
-    Ok(attr)
+    Ok(deserialize_db!(db, attr_key, InodeAttr, ModelKind::Attr))
 }
 
 fn do_check_exist_children<DB>(txn: &rocksdb::Transaction<DB>, parent: Ino) -> Result<bool> {
@@ -176,13 +207,13 @@ fn do_check_exist_children<DB>(txn: &rocksdb::Transaction<DB>, parent: Ino) -> R
 
 fn txn_put_attr<DB>(txn: &rocksdb::Transaction<DB>, inode: Ino, attr: &InodeAttr) -> Result<()> {
     let attr_key = key::attr(inode);
-    let buf = bincode::serialize(attr)
-        .context(model_err::CorruptionSnafu {
+    let buf = model_try!(
+        bincode::serialize(attr).context(model_err::CorruptionSnafu {
             kind: ModelKind::Attr,
             key:  String::from_utf8_lossy(&attr_key).to_string(),
         })
-        .context(ModelSnafu)?;
-    txn.put(&attr_key, &buf).context(RocksdbSnafu)?;
+    );
+    db_try!(txn.put(&attr_key, &buf));
     Ok(())
 }
 
@@ -194,17 +225,13 @@ fn set_dentry_in_write_batch<const TRANSACTION: bool>(
     typ: FileType,
 ) -> Result<()> {
     let entry_key = key::dentry(parent, name);
-    set_value_in_write_batch(
-        batch,
-        ModelKind::DEntry,
-        entry_key.as_slice(),
-        &DEntry {
-            parent,
-            name: name.to_string(),
-            inode,
-            typ,
-        },
-    )
+    let entry = DEntry {
+        parent,
+        name: name.to_string(),
+        inode,
+        typ,
+    };
+    batch_put!(batch, entry_key, entry, ModelKind::DEntry)
 }
 
 fn set_attr_in_write_batch<const TRANSACTION: bool>(
@@ -213,7 +240,7 @@ fn set_attr_in_write_batch<const TRANSACTION: bool>(
     attr: &InodeAttr,
 ) -> Result<()> {
     let attr_key = key::attr(inode);
-    set_value_in_write_batch(batch, ModelKind::Attr, attr_key.as_slice(), attr)
+    batch_put!(batch, attr_key, attr, ModelKind::Attr)
 }
 
 fn set_hard_link_count_in_write_batch<const TRANSACTION: bool>(
@@ -298,42 +325,35 @@ fn delete_prefix_in_txn_write_batch(
 impl Backend for RocksdbBackend {
     // TODO: merge the exists format
     fn set_format(&self, format: &Format) -> Result<()> {
-        let setting_buf = bincode::serialize(format)
-            .context(model_err::CorruptionSnafu {
+        let setting_buf = model_try!(bincode::serialize(format).context(
+            model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
                 key:  key::CURRENT_FORMAT.to_string(),
-            })
-            .context(ModelSnafu)?;
+            }
+        ));
 
-        self.db
-            .put(key::CURRENT_FORMAT, setting_buf)
-            .context(RocksdbSnafu)?;
+        db_try!(self.db.put(key::CURRENT_FORMAT, setting_buf));
         Ok(())
     }
 
     fn load_format(&self) -> Result<Format> {
-        let setting_buf = self
-            .db
-            .get_pinned(key::CURRENT_FORMAT)
-            .context(RocksdbSnafu)?
-            .context(UninitializedEngineSnafu)?;
-        let setting: Format = bincode::deserialize(&setting_buf)
-            .context(model_err::CorruptionSnafu {
+        let setting_buf =
+            db_try!(self.db.get_pinned(key::CURRENT_FORMAT)).context(UninitializedEngineSnafu)?;
+        let setting: Format = model_try!(bincode::deserialize(&setting_buf).context(
+            model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
                 key:  key::CURRENT_FORMAT.to_string(),
-            })
-            .context(ModelSnafu)?;
+            }
+        ));
         Ok(setting)
     }
 
     fn increase_count_by(&self, counter: Counter, step: usize) -> Result<u64> {
         let key: Vec<u8> = counter.into();
         let transaction = self.db.transaction();
-        let current = transaction
-            .get(&key)
-            .context(RocksdbSnafu)?
+        let current = db_try!(transaction.get(&key))
             .map(|v| {
-                bincode::deserialize(&v)
+                bincode::deserialize::<u64>(&v)
                     .context(model_err::CorruptionSnafu {
                         kind: ModelKind::Counter,
                         key:  String::from_utf8_lossy(&key).to_string(),
@@ -344,48 +364,33 @@ impl Backend for RocksdbBackend {
             .unwrap_or(0u64);
 
         let new = current + step as u64;
-        let new_buf = bincode::serialize(&new)
-            .context(model_err::CorruptionSnafu {
+        let new_buf = model_try!(
+            bincode::serialize(&new).context(model_err::CorruptionSnafu {
                 kind: ModelKind::Counter,
                 key:  String::from_utf8_lossy(&key).to_string(),
             })
-            .context(ModelSnafu)?;
-        transaction.put(&key, new_buf).context(RocksdbSnafu)?;
-        transaction.commit().context(RocksdbSnafu)?;
+        );
+        db_try!(transaction.put(&key, new_buf));
+        db_try!(transaction.commit());
         Ok(new)
     }
 
     fn load_count(&self, counter: Counter) -> Result<u64> {
         let key: Vec<u8> = counter.into();
-        let buf = self
-            .db
-            .get_pinned(&key)
-            .context(RocksdbSnafu)?
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::Counter,
-                key:  String::from_utf8_lossy(&key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        let count: u64 = bincode::deserialize(&buf)
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::Counter,
-                key:  String::from_utf8_lossy(&key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        Ok(count)
+        Ok(deserialize_db!(self.db, key, u64, ModelKind::Counter))
     }
 
     fn get_attr(&self, inode: Ino) -> Result<InodeAttr> { do_get_attr(&self.db, inode) }
 
     fn set_attr(&self, inode: Ino, attr: &InodeAttr) -> Result<()> {
         let attr_key = key::attr(inode);
-        let buf = bincode::serialize(attr)
-            .context(model_err::CorruptionSnafu {
+        let buf = model_try!(
+            bincode::serialize(attr).context(model_err::CorruptionSnafu {
                 kind: ModelKind::Attr,
                 key:  String::from_utf8_lossy(&attr_key).to_string(),
             })
-            .context(ModelSnafu)?;
-        self.db.put(&attr_key, &buf).context(RocksdbSnafu)?;
+        );
+        db_try!(self.db.put(&attr_key, &buf));
         Ok(())
     }
 
@@ -395,18 +400,19 @@ impl Backend for RocksdbBackend {
 
     fn set_dentry(&self, parent: Ino, name: &str, inode: Ino, typ: FileType) -> Result<()> {
         let entry_key = key::dentry(parent, name);
-        let entry_buf = bincode::serialize(&DEntry {
+        let entry = DEntry {
             parent,
             name: name.to_string(),
             inode,
             typ,
-        })
-        .context(model_err::CorruptionSnafu {
-            kind: ModelKind::DEntry,
-            key:  String::from_utf8_lossy(&entry_key).to_string(),
-        })
-        .context(ModelSnafu)?;
-        self.db.put(&entry_key, entry_buf).context(RocksdbSnafu)?;
+        };
+        let entry_buf = model_try!(bincode::serialize(&entry).context(
+            model_err::CorruptionSnafu {
+                kind: ModelKind::DEntry,
+                key:  String::from_utf8_lossy(&entry_key).to_string(),
+            }
+        ));
+        db_try!(self.db.put(&entry_key, entry_buf));
         Ok(())
     }
 
@@ -425,12 +431,11 @@ impl Backend for RocksdbBackend {
                 let (k, v) = (iter.key(), iter.value());
                 // Check the key and value
                 if let (Some(k), Some(v)) = (k, v) {
-                    let dentry: DEntry = bincode::deserialize(v)
-                        .context(model_err::CorruptionSnafu {
+                    let dentry: DEntry =
+                        model_try!(bincode::deserialize(v).context(model_err::CorruptionSnafu {
                             kind: ModelKind::DEntry,
                             key:  String::from_utf8_lossy(k).to_string(),
-                        })
-                        .context(ModelSnafu)?;
+                        }));
                     res.push(dentry);
                     iter.next();
                     continue;
@@ -444,18 +449,13 @@ impl Backend for RocksdbBackend {
 
     fn set_symlink(&self, inode: Ino, path: String) -> Result<()> {
         let symlink_key = key::symlink(inode);
-        self.db
-            .put(&symlink_key, path.into_bytes())
-            .context(RocksdbSnafu)?;
+        db_try!(self.db.put(&symlink_key, path.into_bytes()));
         Ok(())
     }
 
     fn get_symlink(&self, inode: Ino) -> Result<String> {
         let symlink_key = key::symlink(inode);
-        let path_buf = self
-            .db
-            .get_pinned(&symlink_key)
-            .context(RocksdbSnafu)?
+        let path_buf = db_try!(self.db.get_pinned(&symlink_key))
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::Symlink,
                 key:  String::from_utf8_lossy(&symlink_key).to_string(),
@@ -466,13 +466,13 @@ impl Backend for RocksdbBackend {
 
     fn set_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex, slices: Slices) -> Result<()> {
         let key = key::chunk_slices(inode, chunk_index);
-        let buf = bincode::serialize(&slices)
-            .context(model_err::CorruptionSnafu {
+        let buf = model_try!(
+            bincode::serialize(&slices).context(model_err::CorruptionSnafu {
                 kind: ModelKind::ChunkSlices,
                 key:  String::from_utf8_lossy(&key).to_string(),
             })
-            .context(ModelSnafu)?;
-        self.db.put(&key, &buf).context(RocksdbSnafu)?;
+        );
+        db_try!(self.db.put(&key, &buf));
         Ok(())
     }
 
@@ -483,23 +483,20 @@ impl Backend for RocksdbBackend {
         buf: Vec<u8>,
     ) -> Result<()> {
         let key = key::chunk_slices(inode, chunk_index);
-        self.db.put(&key, &buf).context(RocksdbSnafu)?;
+        db_try!(self.db.put(&key, &buf));
         assert!(!buf.is_empty(), "slices is empty");
         Ok(())
     }
 
     fn get_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Option<Vec<u8>>> {
         let key = key::chunk_slices(inode, chunk_index);
-        let buf = self.db.get(&key).context(RocksdbSnafu)?;
+        let buf = db_try!(self.db.get(&key));
         Ok(buf)
     }
 
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices> {
         let key = key::chunk_slices(inode, chunk_index);
-        let buf = self
-            .db
-            .get_pinned(&key)
-            .context(RocksdbSnafu)?
+        let buf = db_try!(self.db.get_pinned(&key))
             .context(model_err::NotFoundSnafu {
                 kind: ModelKind::ChunkSlices,
                 key:  String::from_utf8_lossy(&key).to_string(),
@@ -518,34 +515,19 @@ impl Backend for RocksdbBackend {
 
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()> {
         let key = key::dir_stat(inode);
-        let buf = bincode::serialize(&dir_stat)
-            .context(model_err::CorruptionSnafu {
+        let buf = model_try!(
+            bincode::serialize(&dir_stat).context(model_err::CorruptionSnafu {
                 kind: ModelKind::DirStat,
                 key:  String::from_utf8_lossy(&key).to_string(),
             })
-            .context(ModelSnafu)?;
-        self.db.put(&key, &buf).context(RocksdbSnafu)?;
+        );
+        db_try!(self.db.put(&key, &buf));
         Ok(())
     }
 
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat> {
         let key = key::dir_stat(inode);
-        let buf = self
-            .db
-            .get_pinned(&key)
-            .context(RocksdbSnafu)?
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::DirStat,
-                key:  String::from_utf8_lossy(&key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        let dir_stat = bincode::deserialize::<DirStat>(&buf)
-            .context(model_err::CorruptionSnafu {
-                kind: ModelKind::DirStat,
-                key:  String::from_utf8_lossy(&key).to_string(),
-            })
-            .context(ModelSnafu)?;
-        Ok(dir_stat)
+        Ok(deserialize_db!(self.db, key, DirStat, ModelKind::DirStat))
     }
 
     fn do_mknod(
@@ -624,28 +606,26 @@ impl Backend for RocksdbBackend {
         // TODO: review the logic here
         #[cfg(target_os = "linux")]
         {
-            // if the parent directory has the set group ID (SGID) bit (02000) set in its
-            // mode (pattr.Mode). If so, it sets the group ID (attr.Gid) of the new node to
-            // the group ID of the parent directory (pattr.Gid).
-            if parent_attr.mode & 0o2000 != 0 {
+            // if the parent directory has the set group ID (SGID) bit set in its
+            // mode. If so, it sets the group ID of the new node to
+            // the group ID of the parent directory.
+            if parent_attr.mode & constants::SETGID_BIT != 0 {
                 new_inode_attr.set_gid(parent_attr.gid);
-                // If the type of the node being created is a directory (_type ==
-                // TypeDirectory), it sets the SGID bit (02000) in the mode (attr.Mode) of the
-                // new node. This ensures that newly created directories inherit the group ID of
-                // their parent directory.
+                // If the type of the node being created is a directory, it sets the SGID bit
+                // in the mode of the new node. This ensures that newly created directories
+                // inherit the group ID of their parent directory.
                 if typ == FileType::Directory {
-                    new_inode_attr.mode |= 0o2000;
-                } else if new_inode_attr.mode & 0o2010 == 0o2010
+                    new_inode_attr.mode |= constants::SETGID_BIT;
+                } else if new_inode_attr.mode & constants::MODE_MASK_SETGID_EXEC
+                    == constants::MODE_MASK_SETGID_EXEC
                     && ctx.uid != 0
                     && !ctx.gid_list.contains(&parent_attr.gid)
                 {
-                    // If the mode of the new node has both the set group ID bit (02000) and the set
-                    // group execute bit (010) (attr.Mode&02010 == 02010), and if the user ID
-                    // (ctx.Uid()) is not 0 (i.e., the user is not root), it further checks if the
-                    // user belongs to the group of the parent directory (pattr.Gid). If not, it
-                    // removes the SGID bit from the mode of the new node (attr.Mode &=
-                    // ^uint16(02000)).
-                    new_inode_attr.mode &= !0o2010;
+                    // If the mode of the new node has both the set group ID bit and the set
+                    // group execute bit, and if the user ID is not 0 (i.e., the user is not root),
+                    // it further checks if the user belongs to the group of the parent directory.
+                    // If not, it removes the SGID bit from the mode of the new node.
+                    new_inode_attr.mode &= !constants::MODE_MASK_SETGID_EXEC;
                 }
             }
         }
@@ -664,8 +644,8 @@ impl Backend for RocksdbBackend {
             let symlink_key = key::symlink(new_inode);
             batch.put(&symlink_key, path.into_bytes());
         }
-        self.db.write(batch).context(RocksdbSnafu)?;
-        txn.commit().context(RocksdbSnafu)?;
+        db_try!(self.db.write(batch));
+        db_try!(txn.commit());
         Ok((new_inode, new_inode_attr))
     }
 
@@ -719,15 +699,12 @@ impl Backend for RocksdbBackend {
                 errno: libc::ENOTEMPTY,
             }
         );
-        // The octal number 01000 specifically represents the setuid bit in POSIX
-        // permissions. In a file's mode, the setuid bit is represented by the fourth
-        // bit from the left. When set, it indicates that the file should be executed
-        // with the privileges of its owner, rather than the privileges of the user who
-        // executed it. This is commonly used for executable files that need special
-        // permissions to perform certain tasks, such as changing passwords or accessing
-        // sensitive resources.
+        // The SETUID bit in POSIX permissions. When set, it indicates that the file
+        // should be executed with the privileges of its owner, rather than the
+        // privileges of the user who executed it. This is commonly used for
+        // executable files that need special permissions to perform certain tasks.
         if ctx.uid != 0
-            && parent_attr.mode & 0o1000 != 0
+            && parent_attr.mode & constants::SETUID_BIT != 0
             && ctx.uid != parent_attr.uid
             && ctx.uid != child_attr.uid
         {
@@ -759,19 +736,17 @@ impl Backend for RocksdbBackend {
         if need_update_parent_attr {
             let parent_attr_key = key::attr(parent);
             // update parent attr
-            batch.put(
-                &parent_attr_key,
-                bincode::serialize(&parent_attr)
-                    .context(model_err::CorruptionSnafu {
-                        kind: ModelKind::Attr,
-                        key:  String::from_utf8_lossy(&parent_attr_key).to_string(),
-                    })
-                    .context(ModelSnafu)?,
-            );
+            let serialized = model_try!(bincode::serialize(&parent_attr).context(
+                model_err::CorruptionSnafu {
+                    kind: ModelKind::Attr,
+                    key:  String::from_utf8_lossy(&parent_attr_key).to_string(),
+                }
+            ));
+            batch.put(&parent_attr_key, serialized);
         }
-        self.db.write(batch).context(RocksdbSnafu)?;
+        db_try!(self.db.write(batch));
         // TODO: do we need to call commit after we call write batch with transaction?
-        // txn.commit().context(RocksdbSnafu)?;
+        // db_try!(txn.commit());
         Ok((entry_info, child_attr))
     }
 
@@ -804,7 +779,7 @@ impl Backend for RocksdbBackend {
         // info.
 
         txn_put_attr(&txn, inode, &old_attr)?;
-        txn.commit().context(RocksdbSnafu)?;
+        db_try!(txn.commit());
         Ok(old_attr.clone())
     }
 
@@ -866,8 +841,8 @@ impl Backend for RocksdbBackend {
         }
         let cnt = do_get_hard_link_count(&txn, inode, new_parent)?;
         set_hard_link_count_in_write_batch(&mut batch, inode, new_parent, cnt + 1)?;
-        self.db.write(batch).context(RocksdbSnafu)?;
-        txn.commit().unwrap();
+        db_try!(self.db.write(batch));
+        db_try!(txn.commit());
         Ok(child_attr)
     }
 
@@ -967,7 +942,7 @@ impl Backend for RocksdbBackend {
                 }
                 batch.delete(key::attr(entry.inode));
                 free_inode_cnt += 1;
-                free_space_size += 4096;
+                free_space_size += constants::DEFAULT_FILE_SIZE;
             }
             // delete xattr
             delete_prefix_in_txn_write_batch(&txn, &mut batch, &key::xattr_prefix(entry.inode));
@@ -980,7 +955,7 @@ impl Backend for RocksdbBackend {
                 );
             }
         }
-        self.db.write(batch).context(RocksdbSnafu)?;
+        db_try!(self.db.write(batch));
         let mut r = UnlinkResult {
             inode:       entry.inode,
             removed:     None,
@@ -991,7 +966,7 @@ impl Backend for RocksdbBackend {
         if attr_place_holder.nlink == 0 && attr_place_holder.is_file() {
             r.removed = Some(attr_place_holder);
         }
-        txn.commit().unwrap();
+        db_try!(txn.commit());
         Ok(r)
     }
 
@@ -1344,7 +1319,7 @@ impl Backend for RocksdbBackend {
         }
 
         self.db.write(write_batch).context(RocksdbSnafu)?;
-        txn.commit().context(RocksdbSnafu)?;
+        db_try!(txn.commit());
         Ok(rename_result)
     }
 
