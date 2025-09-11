@@ -51,6 +51,7 @@ use crate::{
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
     id_table::IdTable,
+    metrics,
     open_files::{InvalidReq, OpenFiles, OpenFilesRef},
 };
 
@@ -229,7 +230,9 @@ impl MetaEngine {
         check_perm: bool,
     ) -> Result<(Ino, InodeAttr)> {
         trace!(parent=?parent, ?name, "lookup");
+        let _timer = crate::metrics_start_timer!(lookup_duration_ms);
         let parent = self.check_root(parent);
+
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
             ctx.check_access(&parent_attr, MODE_MASK_X)?;
@@ -252,11 +255,13 @@ impl MetaEngine {
                     }
                 );
                 let attr = self.get_attr(parent_attr.parent).await?;
+                crate::metrics_counter!(lookups_total);
                 return Ok((parent_attr.parent, attr));
             }
         }
         if name == DOT {
             let attr = self.get_attr(parent).await?;
+            crate::metrics_counter!(lookups_total);
             return Ok((parent, attr));
         }
         let (inode, attr) = self.do_lookup(parent, name)?;
@@ -265,6 +270,7 @@ impl MetaEngine {
             self.add_dir2parent_mapping(inode, parent).await;
         }
 
+        crate::metrics_counter!(lookups_total);
         Ok((inode, attr))
     }
 
@@ -281,9 +287,11 @@ impl MetaEngine {
         if !self.config.open_cache.is_zero()
             && let Some(attr) = self.open_files.load_attr(inode, false).await
         {
+            crate::metrics_cache!(HIT);
             return Ok(attr);
         }
 
+        crate::metrics_cache!(MISS);
         // TODO: add timeout here
         let mut attr = self.backend.get_attr(inode)?;
 
@@ -405,6 +413,8 @@ impl MetaEngine {
             .await
         {
             Ok(r) => {
+                crate::metrics_business_op!(MKDIR, crate::metrics::labels::TYPE_DIRECTORY);
+                crate::metrics_fs_file_count_change!(1);
                 self.add_dir2parent_mapping(r.0, parent).await;
                 Ok(r)
             }
@@ -418,6 +428,11 @@ impl MetaEngine {
         let (dentry, _) = self
             .backend
             .do_rmdir(ctx, parent, name, self.config.skip_dir_mtime)?;
+
+        crate::metrics_business_op!(RMDIR, crate::metrics::labels::TYPE_DIRECTORY);
+        crate::metrics_fs_file_count_change!(-1);
+        crate::metrics_fs_size_change!(-4096);
+
         self.fs_stat_file_count.fetch_sub(1, Ordering::AcqRel);
         self.fs_stat_used_size.fetch_sub(4096, Ordering::AcqRel);
         self.del_dir2parents_mapping(dentry.inode).await;
@@ -473,6 +488,18 @@ impl MetaEngine {
             .backend
             .do_mknod(ctx, new_inode, attr, parent, name, typ, path)?;
 
+        // Record business metrics for node creation
+        let inode_type = match typ {
+            FileType::RegularFile => crate::metrics::labels::TYPE_REGULAR_FILE,
+            FileType::Directory => crate::metrics::labels::TYPE_DIRECTORY,
+            FileType::Symlink => crate::metrics::labels::TYPE_SYMLINK,
+            _ => crate::metrics::labels::TYPE_OTHER,
+        };
+        crate::metrics_counter_with_labels!(inodes_created_total, 
+            crate::metrics::labels::TYPE => inode_type);
+        crate::metrics_fs_file_count_change!(1);
+        crate::metrics_fs_size_change!(4096);
+
         self.fs_stat_file_count.fetch_add(1, Ordering::AcqRel);
         self.fs_stat_used_size.fetch_add(4096, Ordering::Acquire);
 
@@ -505,7 +532,10 @@ impl MetaEngine {
             )
             .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                crate::metrics_business_op!(CREATE, crate::metrics::labels::TYPE_REGULAR_FILE);
+                r
+            }
             Err(e) if matches!(e, LibcError{errno, ..} if errno == libc::EEXIST) => {
                 warn!("create failed: {:?}", e);
                 self.do_lookup(parent, name)?
@@ -969,6 +999,7 @@ impl MetaEngine {
 
         let new_attr = self.backend.do_link(ctx, inode, new_parent, new_name)?;
 
+        crate::metrics_business_op!(HARDLINK, crate::metrics::labels::OP_HARDLINK_CREATE);
         self.open_files.invalid(inode, InvalidReq::OnlyAttr).await;
 
         Ok(new_attr)
@@ -980,6 +1011,17 @@ impl MetaEngine {
             .backend
             .do_unlink(ctx, parent, name.to_string(), self.session_id, open_files)
             .await?;
+
+        // Record business metrics for unlink
+        crate::metrics_counter_with_labels!(file_ops_total, 
+            crate::metrics::labels::OPERATION => crate::metrics::labels::OP_UNLINK);
+        if unlink_result.freed_inode > 0 {
+            crate::metrics_counter_with_labels!(inodes_deleted_total, 
+                crate::metrics::labels::TYPE => crate::metrics::labels::TYPE_REGULAR_FILE);
+        }
+        crate::metrics_fs_size_change!(-(unlink_result.freed_space as i64));
+        crate::metrics_fs_file_count_change!(-(unlink_result.freed_inode as i64));
+
         self.fs_stat_used_size
             .fetch_sub(unlink_result.freed_space, Ordering::AcqRel);
         self.fs_stat_file_count
@@ -1015,6 +1057,8 @@ impl MetaEngine {
                 target.to_string_lossy().to_string(),
             )
             .await?;
+
+        crate::metrics_business_op!(SYMLINK_CREATE);
         Ok((inode, attr))
     }
 
@@ -1096,6 +1140,11 @@ impl MetaEngine {
                 open_files,
             )
             .await?;
+
+        // Record business metrics for rename - we'll determine the type from backend
+        // For now, record as generic operation
+        crate::metrics_histogram_with_labels!(fs_operation_duration_ms, 0.0, 
+            crate::metrics::labels::OPERATION => crate::metrics::labels::OP_RENAME);
 
         if let Some((inode, opened)) = rename_result.need_delete {
             self.delete_file(opened, inode).await;

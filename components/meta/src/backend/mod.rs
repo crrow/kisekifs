@@ -31,6 +31,8 @@ use crate::{backend::key::Counter, context::FuseContext, err::Result};
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
+#[cfg(feature = "meta-rocksdb")]
+mod rocksdb_metrics;
 
 use crate::{engine::RenameFlags, err::UnsupportedMetaDSNSnafu, open_files::OpenFilesRef};
 
