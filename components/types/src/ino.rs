@@ -32,6 +32,7 @@ pub const STATS_INODE: Ino = Ino(0x7FFFFFFF00000003);
 pub const CONFIG_INODE: Ino = Ino(0x7FFFFFFF00000004);
 pub const MAX_INTERNAL_INODE: Ino = Ino(0x7FFFFFFF10000000);
 
+#[allow(dead_code)]
 const INO_SIZE: usize = std::mem::size_of::<Ino>();
 
 #[derive(

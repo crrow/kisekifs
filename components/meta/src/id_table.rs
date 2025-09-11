@@ -17,7 +17,7 @@
 use tokio::sync::RwLock;
 
 use crate::{
-    backend::{key::Counter, BackendRef},
+    backend::{BackendRef, key::Counter},
     err::Result,
 };
 
@@ -44,7 +44,7 @@ impl IdTable {
         let mut next_max_pair = self.next_max_pair.write().await;
         if next_max_pair.0 >= next_max_pair.1 {
             let step = self.counter.get_step();
-            let new_max = self.backend.increase_count_by(self.counter.clone(), step)?;
+            let new_max = self.backend.increase_count_by(self.counter, step)?;
             next_max_pair.0 = new_max - step as u64;
             next_max_pair.1 = new_max;
         }

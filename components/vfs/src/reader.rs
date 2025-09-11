@@ -19,13 +19,13 @@ use std::{
     fmt::Debug,
     io::Cursor,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
 use dashmap::DashMap;
-use kiseki_common::{BlockIndex, BlockSize, ChunkIndex, BLOCK_SIZE, CHUNK_SIZE, FH};
+use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, ChunkIndex, FH};
 use kiseki_storage::{
     cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef},
     err::{JoinErrSnafu, UnknownIOSnafu},
@@ -62,7 +62,7 @@ impl DataManager {
             // check again
             out_write_guard
                 .entry(inode)
-                .or_insert_with(|| Default::default());
+                .or_insert_with(Default::default);
             drop(out_write_guard);
 
             // acquire the read lock again.
@@ -435,7 +435,7 @@ fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: Block
 
 #[cfg(test)]
 mod tests {
-    use kiseki_meta::{context::FuseContext, MetaConfig};
+    use kiseki_meta::{MetaConfig, context::FuseContext};
     use kiseki_types::{ino::ROOT_INO, setting::Format};
     use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
 

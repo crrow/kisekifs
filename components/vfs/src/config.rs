@@ -82,5 +82,5 @@ fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(divisor > 0);
     let cores = kiseki_utils::num_cpus();
     debug_assert!(cores > 0);
-    (cores + divisor - 1) / divisor
+    cores.div_ceil(divisor)
 }

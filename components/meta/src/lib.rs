@@ -19,7 +19,7 @@ mod config;
 pub use config::MetaConfig;
 pub mod context;
 mod engine;
-pub use engine::{open, update_format, MetaEngineRef};
+pub use engine::{MetaEngineRef, open, update_format};
 mod err;
 pub use err::Error;
 mod id_table;

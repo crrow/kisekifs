@@ -12,19 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser};
+use clap::Args;
 use fuser::MountOption;
-use kiseki_common::{KISEKI, KISEKI_DEBUG_META_ADDR};
-use kiseki_fuse::{null, FuseConfig};
+use kiseki_common::KISEKI;
+use kiseki_fuse::{FuseConfig, null};
 use kiseki_meta::MetaConfig;
-use kiseki_utils::logger::{LoggingOptions, DEFAULT_LOG_DIR};
+use kiseki_utils::logger::LoggingOptions;
 use kiseki_vfs::{Config as VFSConfig, KisekiVFS};
-use snafu::{whatever, ResultExt, Whatever};
+use snafu::{ResultExt, Whatever, whatever};
 use tracing::info;
 
 use crate::build_info;
@@ -200,10 +197,10 @@ impl MountArgs {
         if self.no_log {
             return None;
         }
-        let mut opts = LoggingOptions {
+        let opts = LoggingOptions {
             dir:                  self.log_directory.clone(),
             level:                self.level.clone(),
-            enable_otlp_tracing:  self.enable_otlp_tracing.clone(),
+            enable_otlp_tracing:  self.enable_otlp_tracing,
             otlp_endpoint:        self.otlp_endpoint.clone(),
             tracing_sample_ratio: self.tracing_sample_ratio,
             append_stdout:        self.append_stdout,

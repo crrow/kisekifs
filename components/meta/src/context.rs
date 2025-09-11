@@ -16,7 +16,7 @@
 
 use std::time::Instant;
 
-use kiseki_types::{attr::InodeAttr, ino::Ino};
+use kiseki_types::attr::InodeAttr;
 use lazy_static::lazy_static;
 use snafu::ensure;
 use tokio_util::sync::CancellationToken;
@@ -77,7 +77,7 @@ impl FuseContext {
                 errno: libc::EACCES,
             }
         );
-        return Ok(());
+        Ok(())
     }
 
     pub fn is_cancelled(&self) -> bool { self.cancellation_token.is_cancelled() }

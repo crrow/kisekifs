@@ -19,7 +19,7 @@ use std::{collections::HashMap, time::Duration};
 use crate::{
     attr::InodeAttr,
     entry::FullEntry,
-    ino::{Ino, CONFIG_INODE, CONTROL_INODE, LOG_INODE, STATS_INODE},
+    ino::{CONFIG_INODE, CONTROL_INODE, Ino, LOG_INODE, STATS_INODE},
 };
 
 pub const LOG_INODE_NAME: &str = ".accesslog";

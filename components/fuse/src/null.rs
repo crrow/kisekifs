@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use fuser::{spawn_mount2, Filesystem, MountOption};
+use fuser::{Filesystem, MountOption, spawn_mount2};
 use kiseki_common::KISEKI;
 use snafu::{ResultExt, Whatever};
 

@@ -7,6 +7,7 @@ edition = "2024"
 
 [features]
 tokio-console = ["console-subscriber", "tokio/tracing"]
+deadlock_detection = ["parking_lot"]
 
 [dependencies]
 bytes.workspace = true
@@ -36,6 +37,7 @@ opentelemetry-otlp = { version = "0.14.0", default-features = false, features = 
 ] }
 opentelemetry-semantic-conventions = "0.13.0"
 opentelemetry_sdk = { version = "0.21.2", features = ["rt-tokio"] }
+parking_lot = { version = "0.12", optional = true, features = ["deadlock_detection"] }
 proc-macro2 = "1.0.101"
 pyroscope = "0.5.8"
 pyroscope_pprofrs = "0.2.10"

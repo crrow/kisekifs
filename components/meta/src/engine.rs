@@ -15,46 +15,38 @@
 // limitations under the License.
 
 use std::{
-    cmp::{max, min},
     collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
-    ops::Add,
-    path::{Component, Path, PathBuf},
+    path::Path,
     sync::{
-        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
 
-use bitflags::{bitflags, Flags};
+use bitflags::bitflags;
 use bytes::Bytes;
-use crossbeam::{atomic::AtomicCell, channel::at};
-use dashmap::{DashMap, DashSet};
-use futures::AsyncReadExt;
-use kiseki_common::{ChunkIndex, CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
+use kiseki_common::{CHUNK_SIZE, ChunkIndex, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::{
-    attr::{InodeAttr, SetAttrFlags},
-    entry::{DEntry, Entry, FullEntry},
-    ino::{Ino, ROOT_INO},
-    internal_nodes::InternalNode,
-    setting::Format,
-    slice::{Slice, SliceID, Slices, SLICE_BYTES},
-    stat::{DirStat, FSStat},
     FileType,
+    attr::{InodeAttr, SetAttrFlags},
+    entry::{Entry, FullEntry},
+    ino::{Ino, ROOT_INO},
+    setting::Format,
+    slice::{SLICE_BYTES, Slice, SliceID, Slices},
+    stat::FSStat,
 };
-use kiseki_utils::readable_size::ReadableSize;
 use scopeguard::defer;
-use serde::Serialize;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::{
     sync::{RwLock, Semaphore},
-    time::{timeout, Instant},
+    time::Instant,
 };
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    backend::{key::Counter, open_backend, BackendRef},
+    backend::{BackendRef, key::Counter, open_backend},
     config::MetaConfig,
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
@@ -185,9 +177,7 @@ impl MetaEngine {
         if !read_guard.contains_key(&inode) {
             drop(read_guard);
             let mut write_guard = self.dir_parents.write().await;
-            if !write_guard.contains_key(&inode) {
-                write_guard.insert(inode, parent);
-            }
+            write_guard.entry(inode).or_insert(parent);
         }
     }
 
@@ -288,10 +278,10 @@ impl MetaEngine {
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
         let inode = self.check_root(inode);
         // check cache
-        if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.load_attr(inode, false).await {
-                return Ok(attr);
-            }
+        if !self.config.open_cache.is_zero()
+            && let Some(attr) = self.open_files.load_attr(inode, false).await
+        {
+            return Ok(attr);
         }
 
         // TODO: add timeout here
@@ -518,8 +508,7 @@ impl MetaEngine {
             Ok(r) => r,
             Err(e) if matches!(e, LibcError{errno, ..} if errno == libc::EEXIST) => {
                 warn!("create failed: {:?}", e);
-                let r = self.do_lookup(parent, name)?;
-                r
+                self.do_lookup(parent, name)?
             }
             Err(e) => return Err(e),
         };
@@ -709,10 +698,10 @@ impl MetaEngine {
 
         defer!(self.refresh_atime(ctx, inode));
 
-        if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.load_attr(inode, true).await {
-                return Ok(attr);
-            }
+        if !self.config.open_cache.is_zero()
+            && let Some(attr) = self.open_files.load_attr(inode, true).await
+        {
+            return Ok(attr);
         }
 
         let mut attr = self.backend.get_attr(inode)?;
@@ -826,7 +815,7 @@ impl MetaEngine {
     #[allow(clippy::too_many_arguments)]
     pub async fn set_lk(
         &self,
-        ctx: Arc<FuseContext>,
+        _ctx: Arc<FuseContext>,
         inode: Ino,
         owner: u64,
         block: bool,
@@ -878,9 +867,9 @@ impl MetaEngine {
     // Fallocate preallocate given space for given file.
     pub async fn fallocate(
         &self,
-        inode: Ino,
-        offset: usize,
-        length: usize,
+        _inode: Ino,
+        _offset: usize,
+        _length: usize,
         mode: u8,
     ) -> Result<()> {
         let mode = FallocateMode::from_bits(mode).expect("invalid fallocate mode");
@@ -914,7 +903,7 @@ impl MetaEngine {
 
     pub async fn flock(
         &self,
-        ctx: Arc<FuseContext>,
+        _ctx: Arc<FuseContext>,
         inode: Ino,
         owner: u64,
         ltype: libc::c_int,
@@ -989,13 +978,7 @@ impl MetaEngine {
         let open_files = self.open_files.clone();
         let unlink_result = self
             .backend
-            .do_unlink(
-                ctx,
-                parent,
-                name.to_string(),
-                self.session_id.clone(),
-                open_files,
-            )
+            .do_unlink(ctx, parent, name.to_string(), self.session_id, open_files)
             .await?;
         self.fs_stat_used_size
             .fetch_sub(unlink_result.freed_space, Ordering::AcqRel);
@@ -1004,7 +987,7 @@ impl MetaEngine {
         self.open_files
             .invalid(unlink_result.inode, InvalidReq::OnlyAttr)
             .await;
-        if let Some(_) = unlink_result.removed {
+        if unlink_result.removed.is_some() {
             self.delete_file(unlink_result.is_opened, unlink_result.inode)
                 .await;
         }
@@ -1035,7 +1018,7 @@ impl MetaEngine {
         Ok((inode, attr))
     }
 
-    pub async fn readlink(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<Bytes> {
+    pub async fn readlink(&self, _ctx: Arc<FuseContext>, inode: Ino) -> Result<Bytes> {
         let read_guard = self.symlinks.read().await;
         if let Some(target) = read_guard.get(&inode) {
             return Ok(target.clone());

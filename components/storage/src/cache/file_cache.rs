@@ -257,7 +257,7 @@ async fn copy_from_buffer_to_local(
         panic!(
             "close writer failed: {:?}, expect flush len: {}",
             e,
-            ReadableSize(block_length as u64).to_string()
+            ReadableSize(block_length as u64)
         );
     }
     writer.shutdown().await.context(UnknownIOSnafu)?;
