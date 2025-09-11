@@ -15,42 +15,38 @@
 // limitations under the License.
 
 use std::{
-    cmp::{max, min},
     fmt::{Debug, Formatter},
-    ops::Sub,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
-use bitflags::Flags;
 use bytes::Bytes;
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
+    FileType,
     attr::InodeAttr,
     entry::DEntry,
     ino::{Ino, ZERO_INO},
     setting::Format,
     slice::Slices,
     stat::DirStat,
-    FileType,
 };
 use kiseki_utils::align::align4k;
-use rocksdb::{DBAccess, DBPinnableSlice, MultiThreaded, WriteBatchWithTransaction};
-use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
-use tracing::{debug, error, info};
+use rocksdb::{DBAccess, MultiThreaded};
+use serde::Serialize;
+use snafu::{OptionExt, ResultExt, ensure};
+use tracing::{debug, error};
 
-use super::{key, key::Counter, Backend, RenameResult, UnlinkResult};
+use super::{Backend, RenameResult, UnlinkResult, key, key::Counter};
 use crate::{
     context::FuseContext,
     engine::RenameFlags,
     err::{
-        model_err, model_err::ModelKind, InvalidSettingSnafu, LibcSnafu, ModelSnafu, Result,
-        RocksdbSnafu, UninitializedEngineSnafu,
+        LibcSnafu, ModelSnafu, Result, RocksdbSnafu, UninitializedEngineSnafu, model_err,
+        model_err::ModelKind,
     },
     open_files::OpenFilesRef,
-    Error,
 };
 
 #[derive(Debug, Default)]
@@ -488,7 +484,7 @@ impl Backend for RocksdbBackend {
     ) -> Result<()> {
         let key = key::chunk_slices(inode, chunk_index);
         self.db.put(&key, &buf).context(RocksdbSnafu)?;
-        assert!(buf.len() > 0, "slices is empty");
+        assert!(!buf.is_empty(), "slices is empty");
         Ok(())
     }
 
@@ -511,8 +507,8 @@ impl Backend for RocksdbBackend {
             .context(ModelSnafu)?;
         let slices = Slices::decode(&buf).unwrap();
 
-        assert!(buf.len() > 0, "slices is empty");
-        assert!(slices.0.len() > 0, "slices is empty");
+        assert!(!buf.is_empty(), "slices is empty");
+        assert!(!slices.0.is_empty(), "slices is empty");
         debug!("get_chunk_slices: key: {:?}", String::from_utf8_lossy(&key));
         for slice in slices.0.iter() {
             debug!("get_chunk_slices: slice: {:?}", slice);
@@ -620,9 +616,9 @@ impl Backend for RocksdbBackend {
         new_inode_attr.set_mtime(now);
         new_inode_attr.set_ctime(now);
 
-        #[cfg(target_os = "darwin")]
+        #[cfg(target_os = "macos")]
         {
-            attr.set_gid(parent_attr.gid);
+            new_inode_attr.set_gid(parent_attr.gid);
         }
 
         // TODO: review the logic here
@@ -925,10 +921,11 @@ impl Backend for RocksdbBackend {
             attr.ctime = now;
             attr.nlink -= 1;
             new_nlink_cnt = attr.nlink;
-            if attr.is_file() && attr.nlink == 0 {
-                if let Some(of) = open_files_ref.load(&entry.inode).await {
-                    opened = of.is_opened().await;
-                }
+            if attr.is_file()
+                && attr.nlink == 0
+                && let Some(of) = open_files_ref.load(&entry.inode).await
+            {
+                opened = of.is_opened().await;
             };
             attr_place_holder = attr;
         }
@@ -1010,14 +1007,14 @@ impl Backend for RocksdbBackend {
         iter.seek_to_first();
         // Scan the keys in the iterator
         while iter.valid() {
-            if let Some(k) = iter.key() {
-                if k.starts_with(prefix) {
-                    // at present, we delete the slice directly, since we haven't implemented the
-                    // borrow mechanism.
-                    batch.delete(k);
-                    iter.next();
-                    continue;
-                }
+            if let Some(k) = iter.key()
+                && k.starts_with(prefix)
+            {
+                // at present, we delete the slice directly, since we haven't implemented the
+                // borrow mechanism.
+                batch.delete(k);
+                iter.next();
+                continue;
             }
             break;
         }
@@ -1147,24 +1144,22 @@ impl Backend for RocksdbBackend {
                             dst_attr.parent = old_parent;
                         }
                     }
-                } else {
-                    if matches!(dst_entry.typ, FileType::Directory) {
-                        ensure!(
-                            !do_check_exist_children(&txn, dst_entry.inode)?,
-                            LibcSnafu {
-                                errno: libc::ENOTEMPTY,
-                            }
-                        );
-                        new_parent_attr.nlink -= 1;
-                        update_new_parent = true;
-                    } else {
-                        dst_attr.nlink -= 1;
-                        if matches!(dst_entry.typ, FileType::RegularFile) && dst_attr.nlink == 0 {
-                            if let Some(of) = open_files_ref.load(&dst_entry.inode).await {
-                                opened = of.is_opened().await;
-                            }
-                            need_invalid_attr = true;
+                } else if matches!(dst_entry.typ, FileType::Directory) {
+                    ensure!(
+                        !do_check_exist_children(&txn, dst_entry.inode)?,
+                        LibcSnafu {
+                            errno: libc::ENOTEMPTY,
                         }
+                    );
+                    new_parent_attr.nlink -= 1;
+                    update_new_parent = true;
+                } else {
+                    dst_attr.nlink -= 1;
+                    if matches!(dst_entry.typ, FileType::RegularFile) && dst_attr.nlink == 0 {
+                        if let Some(of) = open_files_ref.load(&dst_entry.inode).await {
+                            opened = of.is_opened().await;
+                        }
+                        need_invalid_attr = true;
                     }
                 }
 
@@ -1235,9 +1230,7 @@ impl Backend for RocksdbBackend {
                     )?;
                     let cnt = {
                         let mut cnt = do_get_hard_link_count(&txn, dst_dentry.inode, new_parent)?;
-                        if cnt > 0 {
-                            cnt -= 1;
-                        }
+                        cnt = cnt.saturating_sub(1);
                         cnt
                     };
                     set_hard_link_count_in_write_batch(
@@ -1328,9 +1321,7 @@ impl Backend for RocksdbBackend {
                     cnt + 1,
                 )?;
                 let mut cnt = do_get_hard_link_count(&txn, old_entry.inode, old_parent)?;
-                if cnt > 0 {
-                    cnt -= 1;
-                }
+                cnt = cnt.saturating_sub(1);
                 set_hard_link_count_in_write_batch(
                     &mut write_batch,
                     old_entry.inode,
@@ -1359,7 +1350,7 @@ impl Backend for RocksdbBackend {
 
     fn do_readlink(&self, inode: Ino) -> Result<Bytes> {
         let symlink = do_get_symlink(&self.db, inode)?;
-        Ok(Bytes::from(symlink))
+        Ok(symlink)
     }
 }
 
@@ -1383,12 +1374,12 @@ mod tests {
         };
         // it should be empty at first
         let exist = do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
-        assert_eq!(exist, false);
+        assert!(!exist);
 
         // it should be empty after we insert a key-value pair
         backend.set_attr(Ino(1), &InodeAttr::default()).unwrap();
         let exist = do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
-        assert_eq!(exist, false);
+        assert!(!exist);
 
         // now create a new inode under the inode 1
         backend.set_attr(Ino(2), &InodeAttr::default()).unwrap();
@@ -1398,7 +1389,7 @@ mod tests {
             .unwrap();
         // now it should exist
         let exist = do_check_exist_children(&backend.db.transaction(), Ino(1)).unwrap();
-        assert_eq!(exist, true);
+        assert!(exist);
 
         backend
             .list_dentry(Ino(1), -1)

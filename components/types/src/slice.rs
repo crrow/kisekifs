@@ -28,7 +28,7 @@ use kiseki_utils::{object_storage::ObjectStoragePath, readable_size::ReadableSiz
 use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, Location, ResultExt, Snafu};
+use snafu::{Location, ResultExt, Snafu, ensure};
 
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
@@ -106,6 +106,8 @@ impl Slices {
     }
 
     pub fn len(&self) -> usize { self.0.len() }
+
+    pub fn is_empty(&self) -> bool { self.0.is_empty() }
 }
 
 #[derive(Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -221,7 +223,7 @@ impl Slice {
 
 pub const SLICE_BYTES: usize = 28;
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct SliceKey {
     pub slice_id:   SliceID,
     pub block_idx:  usize,

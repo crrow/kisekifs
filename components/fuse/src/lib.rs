@@ -14,17 +14,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    cmp::max,
-    ffi::{OsStr, OsString},
-    path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{cmp::max, ffi::OsStr, path::Path, sync::Arc, time::SystemTime};
 
 pub use config::FuseConfig;
 use fuser::{
-    FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow,
 };
@@ -40,11 +34,9 @@ use kiseki_types::{
 use kiseki_utils::readable_size::ReadableSize;
 use kiseki_vfs::KisekiVFS;
 use libc::c_int;
-use snafu::{ResultExt, Snafu, Whatever};
+use snafu::{ResultExt, Whatever};
 use tokio::runtime;
 use tracing::{Instrument, debug, error, field, info, instrument};
-
-use crate::err::Error;
 
 mod config;
 mod err;
@@ -52,7 +44,7 @@ pub mod null;
 
 #[derive(Debug)]
 pub struct KisekiFuse {
-    config:  FuseConfig,
+    _config: FuseConfig,
     vfs:     Arc<KisekiVFS>,
     runtime: runtime::Runtime,
 }
@@ -71,7 +63,7 @@ impl KisekiFuse {
             fuse_config.async_work_threads
         );
         Ok(Self {
-            config: fuse_config,
+            _config: fuse_config,
             vfs: Arc::new(vfs),
             runtime,
         })
@@ -611,7 +603,7 @@ impl Filesystem for KisekiFuse {
                 entry.get_inode().0,
                 offset,
                 entry.get_file_type(),
-                &entry.get_name(),
+                entry.get_name(),
             ) {
                 break;
             } else {
@@ -645,22 +637,19 @@ impl Filesystem for KisekiFuse {
         let mut offset = offset + 1;
         debug!("get entry length: { }", entries.len());
         for entry in entries.iter() {
-            match entry {
-                Entry::Full(fe) => {
-                    if reply.add(
-                        entry.get_inode().0,
-                        offset,
-                        &entry.get_name(),
-                        self.vfs.get_entry_ttl(entry.get_file_type()),
-                        &fe.attr.to_fuse_attr(fe.inode),
-                        1,
-                    ) {
-                        break;
-                    } else {
-                        offset += 1;
-                    }
+            if let Entry::Full(fe) = entry {
+                if reply.add(
+                    entry.get_inode().0,
+                    offset,
+                    entry.get_name(),
+                    self.vfs.get_entry_ttl(entry.get_file_type()),
+                    &fe.attr.to_fuse_attr(fe.inode),
+                    1,
+                ) {
+                    break;
+                } else {
+                    offset += 1;
                 }
-                _ => {}
             }
         }
         reply.ok();

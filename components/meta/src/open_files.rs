@@ -22,7 +22,7 @@ use std::{
 
 use kiseki_common::ChunkIndex;
 use kiseki_types::{attr::InodeAttr, ino::Ino, slice::Slices};
-use tokio::{sync::RwLock, time::Instant};
+use tokio::sync::RwLock;
 
 /// [OpenFile] represents an opened file in the cache.
 /// It is used for accelerating the query of the file's slices and attr.
@@ -70,7 +70,7 @@ impl OpenFile {
         write_guard.reference_count
     }
 
-    pub(crate) async fn read_guard(&self) -> tokio::sync::RwLockReadGuard<OpenFileInner> {
+    pub(crate) async fn read_guard(&self) -> tokio::sync::RwLockReadGuard<'_, OpenFileInner> {
         self.0.read().await
     }
 
@@ -87,20 +87,20 @@ pub(crate) struct OpenFileInner {
     chunks:          HashMap<usize, Arc<Slices>>,
 }
 
-pub(crate) type OpenFilesRef = Arc<OpenFiles>;
+pub type OpenFilesRef = Arc<OpenFiles>;
 
-pub(crate) struct OpenFiles {
-    ttl:   Duration,
-    limit: usize,
-    files: RwLock<HashMap<Ino, OpenFile>>,
+pub struct OpenFiles {
+    ttl:    Duration,
+    _limit: usize,
+    files:  RwLock<HashMap<Ino, OpenFile>>,
     // TODO: background clean up
 }
 
 impl OpenFiles {
-    pub(crate) fn new(ttl: Duration, limit: usize) -> Self {
+    pub fn new(ttl: Duration, limit: usize) -> Self {
         Self {
             ttl,
-            limit,
+            _limit: limit,
             files: Default::default(),
         }
     }
@@ -108,7 +108,7 @@ impl OpenFiles {
     /// [load] fetches the [OpenFile] from the cache.
     pub(crate) async fn load(&self, inode: &Ino) -> Option<OpenFile> {
         let read_guard = self.files.read().await;
-        let of = read_guard.get(inode).map(|v| v.clone());
+        let of = read_guard.get(inode).cloned();
         drop(read_guard); // explicit drop to release the lock
         of
     }
@@ -127,7 +127,7 @@ impl OpenFiles {
                 drop(read_guard);
                 let mut outer_write_guard = self.files.write().await;
                 // check again
-                let of = match outer_write_guard.get(&inode) {
+                match outer_write_guard.get(&inode) {
                     None => {
                         outer_write_guard.insert(
                             inode,
@@ -141,8 +141,7 @@ impl OpenFiles {
                         return;
                     }
                     Some(of) => of.clone(),
-                };
-                of
+                }
             }
         };
         // exists case
@@ -161,7 +160,7 @@ impl OpenFiles {
     /// expired.
     pub(crate) async fn load_attr(&self, ino: Ino, add_ref: bool) -> Option<InodeAttr> {
         let outer_read_guard = self.files.read().await;
-        if let Some(of) = outer_read_guard.get(&ino).map(|v| v.clone()) {
+        if let Some(of) = outer_read_guard.get(&ino).cloned() {
             drop(outer_read_guard);
 
             let read_guard = of.0.read().await;
@@ -185,12 +184,12 @@ impl OpenFiles {
         chunk_index: ChunkIndex,
     ) -> Option<Arc<Slices>> {
         let outer_read_guard = self.files.read().await;
-        if let Some(of) = outer_read_guard.get(&inode).map(|of| of.clone()) {
+        if let Some(of) = outer_read_guard.get(&inode).cloned() {
             drop(outer_read_guard);
 
             let read_guard = of.0.read().await;
             if read_guard.last_check.elapsed().unwrap() < self.ttl {
-                return read_guard.chunks.get(&chunk_index).map(|s| s.clone());
+                return read_guard.chunks.get(&chunk_index).cloned();
             }
         }
         None
@@ -199,7 +198,7 @@ impl OpenFiles {
     /// [refresh_attr] refresh the open file's [InodeAttr].
     pub(crate) async fn refresh_attr(&self, ino: Ino, attr: &mut InodeAttr) {
         let read_guard = self.files.read().await;
-        if let Some(of) = read_guard.get(&ino).map(|of| of.clone()) {
+        if let Some(of) = read_guard.get(&ino).cloned() {
             drop(read_guard);
             of.refresh_access(attr).await;
         }
@@ -216,7 +215,7 @@ impl OpenFiles {
 
     pub(crate) async fn invalid(&self, inode: Ino, req: InvalidReq) {
         let read_guard = self.files.read().await;
-        if let Some(of) = read_guard.get(&inode).map(|of| of.clone()) {
+        if let Some(of) = read_guard.get(&inode).cloned() {
             drop(read_guard);
             match req {
                 InvalidReq::OneChunk(idx) => {

@@ -26,7 +26,6 @@ use dashmap::DashMap;
 use fuser::{FileType, TimeOrNow};
 use kiseki_common::{
     DOT, DOT_DOT, FH, MAX_FILE_SIZE, MAX_NAME_LENGTH, MAX_SYMLINK_LEN, MODE_MASK_R, MODE_MASK_W,
-    MODE_MASK_X,
 };
 use kiseki_meta::{MetaEngineRef, context::FuseContext};
 use kiseki_types::{
@@ -250,15 +249,16 @@ impl KisekiVFS {
     ) -> Result<FullEntry> {
         trace!("fs:lookup with parent {:?} name {:?}", parent, name);
         // TODO: handle the special case
-        if parent == ROOT_INO || name.eq(CONTROL_INODE_NAME) {
-            if let Some(n) = self.internal_nodes.get_internal_node_by_name(name) {
-                return Ok(n.0.clone());
-            }
+        if (parent == ROOT_INO || name.eq(CONTROL_INODE_NAME))
+            && let Some(n) = self.internal_nodes.get_internal_node_by_name(name)
+        {
+            return Ok(n.0.clone());
         }
-        if parent.is_special() && name == DOT {
-            if let Some(n) = self.internal_nodes.get_internal_node(parent) {
-                return Ok(n.0.clone());
-            }
+        if parent.is_special()
+            && name == DOT
+            && let Some(n) = self.internal_nodes.get_internal_node(parent)
+        {
+            return Ok(n.0.clone());
         }
         let (inode, attr) = self.meta.lookup(ctx, parent, name, true).await?;
         Ok(FullEntry {
@@ -270,10 +270,10 @@ impl KisekiVFS {
 
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
         debug!("vfs:get_attr with inode {:?}", inode);
-        if inode.is_special() {
-            if let Some(n) = self.internal_nodes.get_internal_node(inode) {
-                return Ok(n.get_attr());
-            }
+        if inode.is_special()
+            && let Some(n) = self.internal_nodes.get_internal_node(inode)
+        {
+            return Ok(n.get_attr());
         }
         let attr = self.meta.get_attr(inode).await?;
         debug!("vfs:get_attr with inode {:?} attr {:?}", inode, attr);
@@ -1073,7 +1073,7 @@ pub struct Opened {
 
 // TODO: review me, use a better way.
 fn get_file_type(mode: mode_t) -> Result<FileType> {
-    match mode & (libc::S_IFMT & 0xffff) {
+    match mode & libc::S_IFMT {
         libc::S_IFIFO => Ok(FileType::NamedPipe),
         libc::S_IFSOCK => Ok(FileType::Socket),
         libc::S_IFLNK => Ok(FileType::Symlink),

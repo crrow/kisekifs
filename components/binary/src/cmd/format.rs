@@ -17,16 +17,14 @@
 use std::str::FromStr;
 
 use clap::Args;
-use kiseki_meta::MetaConfig;
 use kiseki_types::setting::Format;
 use kiseki_utils::{
-    align::{align4k, align_to_block},
+    align::{align_to_block, align4k},
     readable_size::ReadableSize,
 };
 use regex::Regex;
-use snafu::{ensure, ensure_whatever, OptionExt, ResultExt, Whatever};
-use tokio::runtime;
-use tracing::{debug, info, level_filters::LevelFilter, warn, Instrument};
+use snafu::Whatever;
+use tracing::info;
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
 const MANAGEMENT_OPTIONS_HEADER: &str = "MANAGEMENT";
@@ -130,10 +128,6 @@ fn validate_name(name: &str) -> Result<String, String> {
     }
 
     Ok(name.to_string())
-}
-
-fn validate_trash_day(s: &str) -> Result<usize, String> {
-    clap_num::number_range(s, 1, u64::MAX as usize)
 }
 
 fn validate_block_size(s: &str) -> Result<ReadableSize, String> {

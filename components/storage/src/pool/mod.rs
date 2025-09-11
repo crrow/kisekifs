@@ -139,10 +139,10 @@ impl HybridPagePool {
             return Some(Page::Memory(page));
         }
 
-        if let Some(disk_pool) = &self.disk_pool {
-            if let Some(page) = disk_pool.try_acquire_page() {
-                return Some(Page::Disk(page));
-            }
+        if let Some(disk_pool) = &self.disk_pool
+            && let Some(page) = disk_pool.try_acquire_page()
+        {
+            return Some(Page::Disk(page));
         }
 
         None
@@ -156,10 +156,10 @@ impl HybridPagePool {
 
         debug!("pool free ratio {:?}", self.free_ratio());
 
-        if self.memory_pool.remain_page_cnt() > 0 {
-            if let Some(page) = self.try_acquire_page() {
-                return page;
-            }
+        if self.memory_pool.remain_page_cnt() > 0
+            && let Some(page) = self.try_acquire_page()
+        {
+            return page;
         }
 
         if let Some(disk_pool) = &self.disk_pool {

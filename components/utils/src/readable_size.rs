@@ -23,9 +23,8 @@ use std::{
 };
 
 use serde::{
-    de,
+    Deserialize, Deserializer, Serialize, Serializer, de,
     de::{Unexpected, Visitor},
-    Deserialize, Deserializer, Serialize, Serializer,
 };
 
 const UNIT: u64 = 1;
@@ -53,8 +52,6 @@ impl ReadableSize {
     pub const fn as_bytes(self) -> u64 { self.0 }
 
     pub const fn as_bytes_usize(self) -> usize { self.0 as usize }
-
-    pub fn to_string(self) -> String { format!("{:?}", self) }
 }
 
 impl Div<u64> for ReadableSize {

@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::panic;
+use std::panic::{self, PanicHookInfo};
 #[cfg(feature = "deadlock_detection")]
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ pub fn set_panic_hook() {
     // will include the current span, allowing the context in which the panic
     // occurred to be recorded.
     let default_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic| {
+    panic::set_hook(Box::new(move |panic: &PanicHookInfo| {
         let backtrace = Backtrace::new();
         let backtrace = format!("{backtrace:?}");
         if let Some(location) = panic.location() {

@@ -281,7 +281,7 @@ impl InodeAttr {
         match fa.kind {
             FileType::Directory | FileType::Symlink | FileType::RegularFile => {
                 fa.size = self.length;
-                fa.blocks = (fa.size + 512 - 1) / 512;
+                fa.blocks = fa.size.div_ceil(512);
             }
             FileType::BlockDevice | FileType::CharDevice => {
                 fa.rdev = self.rdev;

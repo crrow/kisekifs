@@ -27,32 +27,32 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt::{Debug, Display, Formatter},
     sync::{
-        atomic::{AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Weak,
+        atomic::{AtomicIsize, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
-use kiseki_common::{cal_chunk_idx, cal_chunk_offset, ChunkIndex, BLOCK_SIZE, CHUNK_SIZE};
+use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, ChunkIndex, cal_chunk_idx, cal_chunk_offset};
 use kiseki_meta::MetaEngineRef;
 use kiseki_storage::slice_buffer::SliceBuffer;
 use kiseki_types::{
     ino::Ino,
-    slice::{SliceID, EMPTY_SLICE_ID},
+    slice::{EMPTY_SLICE_ID, SliceID},
 };
 use kiseki_utils::readable_size::ReadableSize;
 use libc::EBADF;
 use scopeguard::defer;
 use snafu::{OptionExt, ResultExt};
 use tokio::{
-    sync::{mpsc, Notify, RwLock},
+    sync::{Notify, RwLock, mpsc},
     task::yield_now,
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, instrument, Instrument};
+use tracing::{Instrument, debug, error, instrument};
 
 use crate::{
     data_manager::DataManager,
@@ -283,10 +283,10 @@ impl FileWriter {
             write_len += n;
             let sw = sw.clone();
 
-            if let Some(req) = sw.make_flush_req(self.pattern.is_seq(), false).await {
-                if let Err(e) = self.slice_flush_queue.send(req).await {
-                    panic!("failed to send flush request {e}");
-                }
+            if let Some(req) = sw.make_flush_req(self.pattern.is_seq(), false).await
+                && let Err(e) = self.slice_flush_queue.send(req).await
+            {
+                panic!("failed to send flush request {e}");
             }
         }
 
@@ -371,8 +371,8 @@ impl FileWriter {
             return Ok(());
         }
         let handles = read_guard
-            .iter()
-            .map(|(_, cw)| {
+            .values()
+            .map(|cw| {
                 let cw = cw.clone();
                 tokio::spawn(async move {
                     cw.finish().await;
@@ -558,10 +558,10 @@ impl ChunkWriter {
                     // try to flush in advance
                     let sw = sw.clone();
                     let req = sw.make_flush_req(fw.pattern.is_seq(), true).await;
-                    if let Some(req) = req {
-                        if let Err(e) = fw.slice_flush_queue.send(req).await {
-                            panic!("failed to send flush request {e}");
-                        }
+                    if let Some(req) = req
+                        && let Err(e) = fw.slice_flush_queue.send(req).await
+                    {
+                        panic!("failed to send flush request {e}");
                     }
                     continue;
                 }
@@ -597,10 +597,7 @@ impl ChunkWriter {
             }
 
             let mut done = vec![];
-            let sws = read_guard
-                .iter()
-                .map(|(_, sw)| sw.clone())
-                .collect::<Vec<_>>();
+            let sws = read_guard.values().cloned().collect::<Vec<_>>();
             drop(read_guard);
             let _current_len = sws.len();
             for sw in sws {
