@@ -15,50 +15,43 @@
 // limitations under the License.
 
 use std::{
-    cmp::{max, min},
     collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
-    ops::Add,
-    path::{Component, Path, PathBuf},
+    path::Path,
     sync::{
-        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
 
-use bitflags::{bitflags, Flags};
+use bitflags::bitflags;
 use bytes::Bytes;
-use crossbeam::{atomic::AtomicCell, channel::at};
-use dashmap::{DashMap, DashSet};
-use futures::AsyncReadExt;
-use kiseki_common::{ChunkIndex, CHUNK_SIZE, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
+use kiseki_common::{CHUNK_SIZE, ChunkIndex, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::{
-    attr::{InodeAttr, SetAttrFlags},
-    entry::{DEntry, Entry, FullEntry},
-    ino::{Ino, ROOT_INO},
-    internal_nodes::InternalNode,
-    setting::Format,
-    slice::{Slice, SliceID, Slices, SLICE_BYTES},
-    stat::{DirStat, FSStat},
     FileType,
+    attr::{InodeAttr, SetAttrFlags},
+    entry::{Entry, FullEntry},
+    ino::{Ino, ROOT_INO},
+    setting::Format,
+    slice::{SLICE_BYTES, Slice, SliceID, Slices},
+    stat::FSStat,
 };
-use kiseki_utils::readable_size::ReadableSize;
 use scopeguard::defer;
-use serde::Serialize;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::{
     sync::{RwLock, Semaphore},
-    time::{timeout, Instant},
+    time::Instant,
 };
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    backend::{key::Counter, open_backend, BackendRef},
+    backend::{BackendRef, key::Counter, open_backend},
     config::MetaConfig,
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
     id_table::IdTable,
+    metrics,
     open_files::{InvalidReq, OpenFiles, OpenFilesRef},
 };
 
@@ -185,9 +178,7 @@ impl MetaEngine {
         if !read_guard.contains_key(&inode) {
             drop(read_guard);
             let mut write_guard = self.dir_parents.write().await;
-            if !write_guard.contains_key(&inode) {
-                write_guard.insert(inode, parent);
-            }
+            write_guard.entry(inode).or_insert(parent);
         }
     }
 
@@ -239,7 +230,9 @@ impl MetaEngine {
         check_perm: bool,
     ) -> Result<(Ino, InodeAttr)> {
         trace!(parent=?parent, ?name, "lookup");
+        let _timer = crate::metrics_start_timer!(lookup_duration_ms);
         let parent = self.check_root(parent);
+
         if check_perm {
             let parent_attr = self.get_attr(parent).await?;
             ctx.check_access(&parent_attr, MODE_MASK_X)?;
@@ -262,11 +255,13 @@ impl MetaEngine {
                     }
                 );
                 let attr = self.get_attr(parent_attr.parent).await?;
+                crate::metrics_counter!(lookups_total);
                 return Ok((parent_attr.parent, attr));
             }
         }
         if name == DOT {
             let attr = self.get_attr(parent).await?;
+            crate::metrics_counter!(lookups_total);
             return Ok((parent, attr));
         }
         let (inode, attr) = self.do_lookup(parent, name)?;
@@ -275,6 +270,7 @@ impl MetaEngine {
             self.add_dir2parent_mapping(inode, parent).await;
         }
 
+        crate::metrics_counter!(lookups_total);
         Ok((inode, attr))
     }
 
@@ -288,12 +284,14 @@ impl MetaEngine {
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
         let inode = self.check_root(inode);
         // check cache
-        if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.load_attr(inode, false).await {
-                return Ok(attr);
-            }
+        if !self.config.open_cache.is_zero()
+            && let Some(attr) = self.open_files.load_attr(inode, false).await
+        {
+            crate::metrics_cache!(HIT);
+            return Ok(attr);
         }
 
+        crate::metrics_cache!(MISS);
         // TODO: add timeout here
         let mut attr = self.backend.get_attr(inode)?;
 
@@ -415,6 +413,8 @@ impl MetaEngine {
             .await
         {
             Ok(r) => {
+                crate::metrics_business_op!(MKDIR, crate::metrics::labels::TYPE_DIRECTORY);
+                crate::metrics_fs_file_count_change!(1);
                 self.add_dir2parent_mapping(r.0, parent).await;
                 Ok(r)
             }
@@ -428,6 +428,11 @@ impl MetaEngine {
         let (dentry, _) = self
             .backend
             .do_rmdir(ctx, parent, name, self.config.skip_dir_mtime)?;
+
+        crate::metrics_business_op!(RMDIR, crate::metrics::labels::TYPE_DIRECTORY);
+        crate::metrics_fs_file_count_change!(-1);
+        crate::metrics_fs_size_change!(-4096);
+
         self.fs_stat_file_count.fetch_sub(1, Ordering::AcqRel);
         self.fs_stat_used_size.fetch_sub(4096, Ordering::AcqRel);
         self.del_dir2parents_mapping(dentry.inode).await;
@@ -483,6 +488,18 @@ impl MetaEngine {
             .backend
             .do_mknod(ctx, new_inode, attr, parent, name, typ, path)?;
 
+        // Record business metrics for node creation
+        let inode_type = match typ {
+            FileType::RegularFile => crate::metrics::labels::TYPE_REGULAR_FILE,
+            FileType::Directory => crate::metrics::labels::TYPE_DIRECTORY,
+            FileType::Symlink => crate::metrics::labels::TYPE_SYMLINK,
+            _ => crate::metrics::labels::TYPE_OTHER,
+        };
+        crate::metrics_counter_with_labels!(inodes_created_total, 
+            crate::metrics::labels::TYPE => inode_type);
+        crate::metrics_fs_file_count_change!(1);
+        crate::metrics_fs_size_change!(4096);
+
         self.fs_stat_file_count.fetch_add(1, Ordering::AcqRel);
         self.fs_stat_used_size.fetch_add(4096, Ordering::Acquire);
 
@@ -515,11 +532,13 @@ impl MetaEngine {
             )
             .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                crate::metrics_business_op!(CREATE, crate::metrics::labels::TYPE_REGULAR_FILE);
+                r
+            }
             Err(e) if matches!(e, LibcError{errno, ..} if errno == libc::EEXIST) => {
                 warn!("create failed: {:?}", e);
-                let r = self.do_lookup(parent, name)?;
-                r
+                self.do_lookup(parent, name)?
             }
             Err(e) => return Err(e),
         };
@@ -709,10 +728,10 @@ impl MetaEngine {
 
         defer!(self.refresh_atime(ctx, inode));
 
-        if !self.config.open_cache.is_zero() {
-            if let Some(attr) = self.open_files.load_attr(inode, true).await {
-                return Ok(attr);
-            }
+        if !self.config.open_cache.is_zero()
+            && let Some(attr) = self.open_files.load_attr(inode, true).await
+        {
+            return Ok(attr);
         }
 
         let mut attr = self.backend.get_attr(inode)?;
@@ -826,7 +845,7 @@ impl MetaEngine {
     #[allow(clippy::too_many_arguments)]
     pub async fn set_lk(
         &self,
-        ctx: Arc<FuseContext>,
+        _ctx: Arc<FuseContext>,
         inode: Ino,
         owner: u64,
         block: bool,
@@ -878,9 +897,9 @@ impl MetaEngine {
     // Fallocate preallocate given space for given file.
     pub async fn fallocate(
         &self,
-        inode: Ino,
-        offset: usize,
-        length: usize,
+        _inode: Ino,
+        _offset: usize,
+        _length: usize,
         mode: u8,
     ) -> Result<()> {
         let mode = FallocateMode::from_bits(mode).expect("invalid fallocate mode");
@@ -914,7 +933,7 @@ impl MetaEngine {
 
     pub async fn flock(
         &self,
-        ctx: Arc<FuseContext>,
+        _ctx: Arc<FuseContext>,
         inode: Ino,
         owner: u64,
         ltype: libc::c_int,
@@ -980,6 +999,7 @@ impl MetaEngine {
 
         let new_attr = self.backend.do_link(ctx, inode, new_parent, new_name)?;
 
+        crate::metrics_business_op!(HARDLINK, crate::metrics::labels::OP_HARDLINK_CREATE);
         self.open_files.invalid(inode, InvalidReq::OnlyAttr).await;
 
         Ok(new_attr)
@@ -989,14 +1009,19 @@ impl MetaEngine {
         let open_files = self.open_files.clone();
         let unlink_result = self
             .backend
-            .do_unlink(
-                ctx,
-                parent,
-                name.to_string(),
-                self.session_id.clone(),
-                open_files,
-            )
+            .do_unlink(ctx, parent, name.to_string(), self.session_id, open_files)
             .await?;
+
+        // Record business metrics for unlink
+        crate::metrics_counter_with_labels!(file_ops_total, 
+            crate::metrics::labels::OPERATION => crate::metrics::labels::OP_UNLINK);
+        if unlink_result.freed_inode > 0 {
+            crate::metrics_counter_with_labels!(inodes_deleted_total, 
+                crate::metrics::labels::TYPE => crate::metrics::labels::TYPE_REGULAR_FILE);
+        }
+        crate::metrics_fs_size_change!(-(unlink_result.freed_space as i64));
+        crate::metrics_fs_file_count_change!(-(unlink_result.freed_inode as i64));
+
         self.fs_stat_used_size
             .fetch_sub(unlink_result.freed_space, Ordering::AcqRel);
         self.fs_stat_file_count
@@ -1004,7 +1029,7 @@ impl MetaEngine {
         self.open_files
             .invalid(unlink_result.inode, InvalidReq::OnlyAttr)
             .await;
-        if let Some(_) = unlink_result.removed {
+        if unlink_result.removed.is_some() {
             self.delete_file(unlink_result.is_opened, unlink_result.inode)
                 .await;
         }
@@ -1032,10 +1057,12 @@ impl MetaEngine {
                 target.to_string_lossy().to_string(),
             )
             .await?;
+
+        crate::metrics_business_op!(SYMLINK_CREATE);
         Ok((inode, attr))
     }
 
-    pub async fn readlink(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<Bytes> {
+    pub async fn readlink(&self, _ctx: Arc<FuseContext>, inode: Ino) -> Result<Bytes> {
         let read_guard = self.symlinks.read().await;
         if let Some(target) = read_guard.get(&inode) {
             return Ok(target.clone());
@@ -1113,6 +1140,11 @@ impl MetaEngine {
                 open_files,
             )
             .await?;
+
+        // Record business metrics for rename - we'll determine the type from backend
+        // For now, record as generic operation
+        crate::metrics_histogram_with_labels!(fs_operation_duration_ms, 0.0, 
+            crate::metrics::labels::OPERATION => crate::metrics::labels::OP_RENAME);
 
         if let Some((inode, opened)) = rename_result.need_delete {
             self.delete_file(opened, inode).await;

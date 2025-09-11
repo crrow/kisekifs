@@ -16,7 +16,7 @@
 
 use std::{error::Error, str::FromStr};
 
-use snafu::{whatever, ResultExt, Whatever};
+use snafu::{ResultExt, Whatever, whatever};
 
 /// Reads an environment variable for the current process.
 ///

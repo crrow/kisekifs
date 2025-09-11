@@ -17,8 +17,8 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -105,7 +105,7 @@ impl HandleTable {
             // check again
             out_write_guard
                 .entry(inode)
-                .or_insert_with(|| Default::default());
+                .or_insert_with(Default::default);
             drop(out_write_guard);
 
             // acquire the read lock again.
@@ -123,7 +123,7 @@ impl HandleTable {
 
     pub(crate) async fn find_handle(&self, ino: Ino, fh: u64) -> Option<Handle> {
         let outer_read_guard = self.handles.read().await;
-        if let Some(inner_map) = outer_read_guard.get(&ino).map(|v| v.clone()) {
+        if let Some(inner_map) = outer_read_guard.get(&ino).cloned() {
             drop(outer_read_guard);
             let inner_read_guard = inner_map.read().await;
             inner_read_guard.get(&fh).cloned()
@@ -134,7 +134,7 @@ impl HandleTable {
 
     pub(crate) async fn get_handles(&self, ino: Ino) -> Vec<Handle> {
         let outer_read_guard = self.handles.read().await;
-        match outer_read_guard.get(&ino).map(|v| v.clone()) {
+        match outer_read_guard.get(&ino).cloned() {
             None => Default::default(),
             Some(inner_map) => {
                 drop(outer_read_guard);
@@ -147,7 +147,7 @@ impl HandleTable {
     // after writes it waits for data sync, so do it after everything
     pub(crate) async fn release_file_handle(&self, inode: Ino, fh: FH) {
         let outer_read_guard = self.handles.read().await;
-        if let Some(inner_map) = outer_read_guard.get(&inode).map(|v| v.clone()) {
+        if let Some(inner_map) = outer_read_guard.get(&inode).cloned() {
             drop(outer_read_guard);
 
             let mut inner_write_guard = inner_map.write().await;

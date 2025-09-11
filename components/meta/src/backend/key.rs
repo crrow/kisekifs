@@ -34,9 +34,9 @@ pub(crate) enum Counter {
     NextSlice,
 }
 
-impl Into<Vec<u8>> for Counter {
-    fn into(self) -> Vec<u8> {
-        match self {
+impl From<Counter> for Vec<u8> {
+    fn from(val: Counter) -> Self {
+        match val {
             Counter::UsedSpace => USED_SPACE.as_bytes().to_vec(),
             Counter::TotalInodes => TOTAL_INODES.as_bytes().to_vec(),
             Counter::LegacySessions => LEGACY_SESSIONS.as_bytes().to_vec(),

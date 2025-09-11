@@ -79,8 +79,7 @@ impl UmountArgs {
             }
         }
 
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        Err(std::io::Error::other(
             "Failed to unmount: fusermount command not found or failed",
         ))
     }

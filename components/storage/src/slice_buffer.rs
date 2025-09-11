@@ -18,12 +18,12 @@ use std::{
     cmp::{max, min},
     io::Cursor,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
-use kiseki_common::{BlockIndex, BlockSize, BLOCK_SIZE, CHUNK_SIZE, PAGE_SIZE};
+use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, PAGE_SIZE};
 use kiseki_types::slice::SliceID;
 use kiseki_utils::{
     object_storage::{ObjectStorage, ObjectStoragePath},
@@ -39,7 +39,7 @@ use crate::{
         InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, ObjectStorageSnafu, Result,
         UnknownIOSnafu,
     },
-    pool::{Page, GLOBAL_HYBRID_PAGE_POOL},
+    pool::{GLOBAL_HYBRID_PAGE_POOL, Page},
 };
 
 // read_slice_from_object_storage will allocate memory in place and then drop
@@ -450,7 +450,7 @@ impl SliceBuffer {
                         panic!(
                             "close writer failed: {:?}, expect flush len: {}",
                             e,
-                            ReadableSize(total_flush_data as u64).to_string()
+                            ReadableSize(total_flush_data as u64)
                         );
                     }
                     writer.shutdown().await.context(UnknownIOSnafu)?;

@@ -15,7 +15,7 @@
 // limitations under the License.
 
 use libc::c_int;
-use snafu::{location, Location, Snafu};
+use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

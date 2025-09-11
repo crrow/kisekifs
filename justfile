@@ -37,7 +37,7 @@ PWD := invocation_directory()
     cd api && buf lint
     cd examples/goclient && golangci-lint run
 
-@fmt: fmt-go
+@fmt:
     cargo +nightly fmt --all
     taplo format
     taplo format --check

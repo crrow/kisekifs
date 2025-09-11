@@ -30,16 +30,22 @@ sonyflake.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-
+opentelemetry.workspace = true
+opentelemetry_api.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-prometheus.workspace = true
+prometheus.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 kiseki-common = { path = "../../components/common" }
 kiseki-types = { path = "../../components/types" }
 kiseki-utils = { path = "../../components/utils" }
 
 log = "0.4.27"
 rocksdb = { version = "0.22.0", features = ["lz4", "snappy"], optional = true }
-strum = "0.26"
-strum_macros = "0.26"
 tikv-client = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+rstest = "0.19"
+tokio-test = "0.4"

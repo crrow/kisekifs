@@ -16,7 +16,7 @@
 
 use std::{path::Path, sync::Arc};
 
-use object_store::{aws::AmazonS3Builder, ObjectStore};
+use object_store::{ObjectStore, aws::AmazonS3Builder};
 
 pub type ObjectStorage = Arc<dyn ObjectStore>;
 
@@ -64,7 +64,7 @@ pub fn new_minio_store() -> Result<ObjectStorage, ObjectStorageError> {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use object_store::{path::Path, ObjectStore};
+    use object_store::{ObjectStore, path::Path};
     use tokio::io::AsyncWriteExt;
 
     use super::*;

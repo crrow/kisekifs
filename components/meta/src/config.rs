@@ -14,11 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt::Display, path::PathBuf, str::FromStr, time::Duration};
+use std::time::Duration;
 
-use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
-
-use crate::err::Result;
+use serde::{Deserialize, Serialize};
 
 /// Atime (Access Time):
 /// Every file has three timestamps:

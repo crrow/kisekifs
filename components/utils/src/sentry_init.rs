@@ -15,7 +15,7 @@
 // limitations under the License.
 
 pub use sentry::release_name;
-use sentry::{types::Dsn, ClientInitGuard, IntoDsn};
+use sentry::{ClientInitGuard, IntoDsn, types::Dsn};
 use snafu::{ResultExt, Whatever};
 use tracing::error;
 

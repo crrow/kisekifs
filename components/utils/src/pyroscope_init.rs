@@ -14,15 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use pyroscope::{pyroscope::PyroscopeAgentRunning, PyroscopeAgent};
-use pyroscope_pprofrs::{pprof_backend, PprofConfig};
+use pyroscope::{PyroscopeAgent, pyroscope::PyroscopeAgentRunning};
+use pyroscope_pprofrs::{PprofConfig, pprof_backend};
 use snafu::{ResultExt, Whatever};
 
 use crate::env::var;
 
 pub type Guard = PyroscopeAgent<PyroscopeAgentRunning>;
 
-#[must_use]
 pub fn init_pyroscope() -> Result<Option<Guard>, Whatever> {
     let url = var("PYROSCOPE_SERVER_URL")?;
     if url.is_none() {

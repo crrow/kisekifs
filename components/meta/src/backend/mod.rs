@@ -14,13 +14,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use kiseki_common::ChunkIndex;
 use kiseki_types::{
-    attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices, stat, stat::DirStat,
-    FileType,
+    FileType, attr::InodeAttr, entry::DEntry, ino::Ino, setting::Format, slice::Slices,
+    stat::DirStat,
 };
 use snafu::ensure;
 use strum_macros::EnumString;
@@ -31,13 +31,15 @@ use crate::{backend::key::Counter, context::FuseContext, err::Result};
 pub mod key;
 #[cfg(feature = "meta-rocksdb")]
 mod rocksdb;
+#[cfg(feature = "meta-rocksdb")]
+mod rocksdb_metrics;
 
 use crate::{engine::RenameFlags, err::UnsupportedMetaDSNSnafu, open_files::OpenFilesRef};
 
 // TODO: optimize me
 pub fn open_backend(dsn: &str, skip_dir_mtime: Duration) -> Result<BackendRef> {
     let x = dsn.splitn(2, "://:").collect::<Vec<_>>();
-    ensure!(x.len() == 2, UnsupportedMetaDSNSnafu { dsn: dsn.clone() });
+    ensure!(x.len() == 2, UnsupportedMetaDSNSnafu { dsn });
     let backend_kind = x[0];
     let path = x[1];
 
@@ -69,6 +71,7 @@ impl BackendKinds {
 
 pub type BackendRef = Arc<dyn Backend>;
 
+#[allow(clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync {
     fn set_format(&self, format: &Format) -> Result<()>;

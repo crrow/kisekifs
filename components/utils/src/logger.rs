@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use opentelemetry::{global, KeyValue};
+use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::Sampler};
 use opentelemetry_semantic_conventions::resource;
@@ -25,7 +25,7 @@ use tracing_appender::{
     rolling::{RollingFileAppender, Rotation},
 };
 use tracing_subscriber::{
-    filter, fmt::Layer, layer::SubscriberExt, prelude::*, EnvFilter, Registry,
+    EnvFilter, Registry, filter, fmt::Layer, layer::SubscriberExt, prelude::*,
 };
 
 use crate::sentry_init::init_sentry;
