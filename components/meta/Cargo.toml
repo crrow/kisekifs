@@ -43,3 +43,5 @@ tikv-client = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+rstest = "0.19"
+tokio-test = "0.4"
