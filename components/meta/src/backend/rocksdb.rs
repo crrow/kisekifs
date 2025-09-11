@@ -17,7 +17,7 @@
 use std::{
     fmt::{Debug, Formatter},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
 
@@ -32,13 +32,16 @@ use kiseki_types::{
     slice::Slices,
     stat::DirStat,
 };
-use kiseki_utils::align::align4k;
 use rocksdb::{DBAccess, MultiThreaded};
 use serde::Serialize;
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing::{debug, error};
 
-use super::{Backend, RenameResult, UnlinkResult, key, key::Counter};
+// Import RocksDB metrics macros from internal module
+use super::rocksdb_metrics::{
+    rocksdb_counter, rocksdb_delete, rocksdb_error, rocksdb_histogram, rocksdb_timed_op,
+};
+use super::{Backend, RenameResult, UnlinkResult, key, key::Counter as BackendCounter};
 use crate::{
     context::FuseContext,
     engine::RenameFlags,
@@ -146,13 +149,20 @@ macro_rules! serialize_batch {
             })
             .context(ModelSnafu)?;
         $batch.put(&$key, buf);
+        rocksdb_counter!(db_puts_total);
     }};
 }
 
-/// Macro for database operations with automatic error context
+/// Macro for database operations with automatic error context and metrics
 macro_rules! db_try {
     ($op:expr) => {
-        $op.context(RocksdbSnafu)?
+        match $op {
+            Ok(result) => result,
+            Err(e) => {
+                rocksdb_error!(crate::metrics::labels::ERROR_ROCKSDB);
+                return Err(e).context(RocksdbSnafu);
+            }
+        }
     };
 }
 
@@ -230,16 +240,23 @@ impl Debug for RocksdbBackend {
 /// - Uses pinned read to avoid data copying for performance
 /// - Direct RocksDB read ensures data consistency
 /// - Error context provides debugging information for POSIX error mapping
+/// - Metrics: Records database read operations and timings
 fn do_get_symlink<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<Bytes> {
     let symlink_key = key::symlink(inode);
-    let buf = db
-        .get_pinned_opt(&symlink_key, &rocksdb::ReadOptions::default())
-        .context(RocksdbSnafu)?
-        .context(model_err::NotFoundSnafu {
-            kind: ModelKind::Symlink,
-            key:  String::from_utf8_lossy(&symlink_key).to_string(),
-        })
-        .context(ModelSnafu)?;
+
+    // Record the database read operation with metrics
+    let buf = rocksdb_timed_op!(
+        db_gets_total,
+        db_get_duration_ms,
+        db.get_pinned_opt(&symlink_key, &rocksdb::ReadOptions::default())
+    )
+    .context(RocksdbSnafu)?
+    .context(model_err::NotFoundSnafu {
+        kind: ModelKind::Symlink,
+        key:  String::from_utf8_lossy(&symlink_key).to_string(),
+    })
+    .context(ModelSnafu)?;
+
     Ok(Bytes::from(buf.to_vec()))
 }
 /// Get hard link count for specific parent-child relationship - POSIX link
@@ -262,7 +279,11 @@ fn do_get_symlink<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<Bytes> {
 /// - Uses bincode for efficient serialization of count values
 fn do_get_hard_link_count<Layer: DBAccess>(db: &Layer, inode: Ino, parent: Ino) -> Result<u64> {
     let key = key::parent(inode, parent);
-    let buf = db_try!(db.get_pinned_opt(&key, &rocksdb::ReadOptions::default()));
+    let buf = rocksdb_timed_op!(
+        db_gets_total,
+        db_get_duration_ms,
+        db_try!(db.get_pinned_opt(&key, &rocksdb::ReadOptions::default()))
+    );
     match buf {
         Some(buf) => {
             let count: u64 = model_try!(bincode::deserialize(&buf).context(
@@ -314,9 +335,18 @@ fn do_get_dentry<Layer: DBAccess>(db: &Layer, parent: Ino, name: &str) -> Result
 /// - Directly deserializes InodeAttr from persistent storage
 /// - Single atomic read operation ensures consistency
 /// - Error handling distinguishes between corruption and missing inode
+/// - Metrics: Records database read operations for stat calls
 fn do_get_attr<Layer: DBAccess>(db: &Layer, inode: Ino) -> Result<InodeAttr> {
     let attr_key = key::attr(inode);
-    Ok(deserialize_db!(db, attr_key, InodeAttr, ModelKind::Attr))
+
+    // Record database read with metrics and use our deserialize macro
+    let result = rocksdb_timed_op!(
+        db_gets_total,
+        db_get_duration_ms,
+        deserialize_db!(db, attr_key, InodeAttr, ModelKind::Attr)
+    );
+
+    Ok(result)
 }
 
 /// Check if directory has any children - POSIX rmdir(2) empty directory
@@ -372,7 +402,11 @@ fn txn_put_attr<DB>(txn: &rocksdb::Transaction<DB>, inode: Ino, attr: &InodeAttr
             key:  String::from_utf8_lossy(&attr_key).to_string(),
         })
     );
-    db_try!(txn.put(&attr_key, &buf));
+    rocksdb_timed_op!(
+        db_puts_total,
+        db_put_duration_ms,
+        db_try!(txn.put(&attr_key, &buf))
+    );
     Ok(())
 }
 
@@ -470,6 +504,7 @@ where
         })
         .context(ModelSnafu)?;
     batch.put(key, buf);
+    rocksdb_counter!(db_puts_total);
     Ok(())
 }
 
@@ -505,13 +540,21 @@ impl Backend for RocksdbBackend {
             }
         ));
 
-        db_try!(self.db.put(key::CURRENT_FORMAT, setting_buf));
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(self.db.put(key::CURRENT_FORMAT, setting_buf))
+        );
         Ok(())
     }
 
     fn load_format(&self) -> Result<Format> {
-        let setting_buf =
-            db_try!(self.db.get_pinned(key::CURRENT_FORMAT)).context(UninitializedEngineSnafu)?;
+        let setting_buf = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(self.db.get_pinned(key::CURRENT_FORMAT))
+        )
+        .context(UninitializedEngineSnafu)?;
         let setting: Format = model_try!(bincode::deserialize(&setting_buf).context(
             model_err::CorruptionSnafu {
                 kind: ModelKind::Setting,
@@ -521,20 +564,24 @@ impl Backend for RocksdbBackend {
         Ok(setting)
     }
 
-    fn increase_count_by(&self, counter: Counter, step: usize) -> Result<u64> {
+    fn increase_count_by(&self, counter: BackendCounter, step: usize) -> Result<u64> {
         let key: Vec<u8> = counter.into();
         let transaction = self.db.transaction();
-        let current = db_try!(transaction.get(&key))
-            .map(|v| {
-                bincode::deserialize::<u64>(&v)
-                    .context(model_err::CorruptionSnafu {
-                        kind: ModelKind::Counter,
-                        key:  String::from_utf8_lossy(&key).to_string(),
-                    })
-                    .context(ModelSnafu)
-            })
-            .transpose()?
-            .unwrap_or(0u64);
+        let current = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(transaction.get(&key))
+        )
+        .map(|v| {
+            bincode::deserialize::<u64>(&v)
+                .context(model_err::CorruptionSnafu {
+                    kind: ModelKind::Counter,
+                    key:  String::from_utf8_lossy(&key).to_string(),
+                })
+                .context(ModelSnafu)
+        })
+        .transpose()?
+        .unwrap_or(0u64);
 
         let new = current + step as u64;
         let new_buf = model_try!(
@@ -543,12 +590,20 @@ impl Backend for RocksdbBackend {
                 key:  String::from_utf8_lossy(&key).to_string(),
             })
         );
-        db_try!(transaction.put(&key, new_buf));
-        db_try!(transaction.commit());
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(transaction.put(&key, new_buf))
+        );
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            db_try!(transaction.commit())
+        );
         Ok(new)
     }
 
-    fn load_count(&self, counter: Counter) -> Result<u64> {
+    fn load_count(&self, counter: BackendCounter) -> Result<u64> {
         let key: Vec<u8> = counter.into();
         Ok(deserialize_db!(self.db, key, u64, ModelKind::Counter))
     }
@@ -581,7 +636,11 @@ impl Backend for RocksdbBackend {
                 key:  String::from_utf8_lossy(&attr_key).to_string(),
             })
         );
-        db_try!(self.db.put(&attr_key, &buf));
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(self.db.put(&attr_key, &buf))
+        );
         Ok(())
     }
 
@@ -603,7 +662,11 @@ impl Backend for RocksdbBackend {
                 key:  String::from_utf8_lossy(&entry_key).to_string(),
             }
         ));
-        db_try!(self.db.put(&entry_key, entry_buf));
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(self.db.put(&entry_key, entry_buf))
+        );
         Ok(())
     }
 
@@ -640,18 +703,26 @@ impl Backend for RocksdbBackend {
 
     fn set_symlink(&self, inode: Ino, path: String) -> Result<()> {
         let symlink_key = key::symlink(inode);
-        db_try!(self.db.put(&symlink_key, path.into_bytes()));
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(self.db.put(&symlink_key, path.into_bytes()))
+        );
         Ok(())
     }
 
     fn get_symlink(&self, inode: Ino) -> Result<String> {
         let symlink_key = key::symlink(inode);
-        let path_buf = db_try!(self.db.get_pinned(&symlink_key))
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::Symlink,
-                key:  String::from_utf8_lossy(&symlink_key).to_string(),
-            })
-            .context(ModelSnafu)?;
+        let path_buf = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(self.db.get_pinned(&symlink_key))
+        )
+        .context(model_err::NotFoundSnafu {
+            kind: ModelKind::Symlink,
+            key:  String::from_utf8_lossy(&symlink_key).to_string(),
+        })
+        .context(ModelSnafu)?;
         Ok(String::from_utf8_lossy(path_buf.as_ref()).to_string())
     }
 
@@ -663,7 +734,11 @@ impl Backend for RocksdbBackend {
                 key:  String::from_utf8_lossy(&key).to_string(),
             })
         );
-        db_try!(self.db.put(&key, &buf));
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(self.db.put(&key, &buf))
+        );
         Ok(())
     }
 
@@ -674,25 +749,37 @@ impl Backend for RocksdbBackend {
         buf: Vec<u8>,
     ) -> Result<()> {
         let key = key::chunk_slices(inode, chunk_index);
-        db_try!(self.db.put(&key, &buf));
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(self.db.put(&key, &buf))
+        );
         assert!(!buf.is_empty(), "slices is empty");
         Ok(())
     }
 
     fn get_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Option<Vec<u8>>> {
         let key = key::chunk_slices(inode, chunk_index);
-        let buf = db_try!(self.db.get(&key));
+        let buf = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(self.db.get(&key))
+        );
         Ok(buf)
     }
 
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices> {
         let key = key::chunk_slices(inode, chunk_index);
-        let buf = db_try!(self.db.get_pinned(&key))
-            .context(model_err::NotFoundSnafu {
-                kind: ModelKind::ChunkSlices,
-                key:  String::from_utf8_lossy(&key).to_string(),
-            })
-            .context(ModelSnafu)?;
+        let buf = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(self.db.get_pinned(&key))
+        )
+        .context(model_err::NotFoundSnafu {
+            kind: ModelKind::ChunkSlices,
+            key:  String::from_utf8_lossy(&key).to_string(),
+        })
+        .context(ModelSnafu)?;
         let slices = Slices::decode(&buf).unwrap();
 
         assert!(!buf.is_empty(), "slices is empty");
@@ -712,7 +799,11 @@ impl Backend for RocksdbBackend {
                 key:  String::from_utf8_lossy(&key).to_string(),
             })
         );
-        db_try!(self.db.put(&key, &buf));
+        rocksdb_timed_op!(
+            db_puts_total,
+            db_put_duration_ms,
+            db_try!(self.db.put(&key, &buf))
+        );
         Ok(())
     }
 
@@ -843,9 +934,30 @@ impl Backend for RocksdbBackend {
         if typ == FileType::Symlink {
             let symlink_key = key::symlink(new_inode);
             batch.put(&symlink_key, path.into_bytes());
+            rocksdb_counter!(db_puts_total);
         }
-        db_try!(self.db.write(batch));
-        db_try!(txn.commit());
+
+        // Record RocksDB write and transaction with metrics
+        rocksdb_timed_op!(
+            db_batch_writes_total,
+            db_write_duration_ms,
+            self.db.write(batch).map_err(|e| {
+                rocksdb_error!(crate::metrics::labels::ERROR_WRITE_BATCH);
+                e
+            })
+        )
+        .context(RocksdbSnafu)?;
+
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            txn.commit().map_err(|e| {
+                rocksdb_error!(crate::metrics::labels::ERROR_TRANSACTION_COMMIT);
+                e
+            })
+        )
+        .context(RocksdbSnafu)?;
+
         Ok((new_inode, new_inode_attr))
     }
 
@@ -957,8 +1069,10 @@ impl Backend for RocksdbBackend {
         let mut batch = txn.get_writebatch();
         // delete entry
         batch.delete(key::dentry(parent, name));
+        rocksdb_delete!();
         // delete inode attr
         batch.delete(key::attr(entry_info.inode));
+        rocksdb_delete!();
         if need_update_parent_attr {
             let parent_attr_key = key::attr(parent);
             // update parent attr
@@ -969,9 +1083,23 @@ impl Backend for RocksdbBackend {
                 }
             ));
             batch.put(&parent_attr_key, serialized);
+            rocksdb_counter!(db_puts_total);
         }
-        db_try!(self.db.write(batch));
-        db_try!(txn.commit());
+
+        // Record RocksDB operations with metrics
+        rocksdb_timed_op!(
+            db_batch_writes_total,
+            db_write_duration_ms,
+            self.db.write(batch)
+        )
+        .context(RocksdbSnafu)?;
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            txn.commit()
+        )
+        .context(RocksdbSnafu)?;
+
         Ok((entry_info, child_attr))
     }
 
@@ -1029,7 +1157,11 @@ impl Backend for RocksdbBackend {
         // info.
 
         txn_put_attr(&txn, inode, &old_attr)?;
-        db_try!(txn.commit());
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            db_try!(txn.commit())
+        );
         Ok(old_attr.clone())
     }
 
@@ -1124,8 +1256,21 @@ impl Backend for RocksdbBackend {
         }
         let cnt = do_get_hard_link_count(&txn, inode, new_parent)?;
         set_hard_link_count_in_write_batch(&mut batch, inode, new_parent, cnt + 1)?;
-        db_try!(self.db.write(batch));
-        db_try!(txn.commit());
+
+        // Record RocksDB operations with metrics
+        rocksdb_timed_op!(
+            db_batch_writes_total,
+            db_write_duration_ms,
+            self.db.write(batch)
+        )
+        .context(RocksdbSnafu)?;
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            txn.commit()
+        )
+        .context(RocksdbSnafu)?;
+
         Ok(child_attr)
     }
 
@@ -1225,6 +1370,7 @@ impl Backend for RocksdbBackend {
         }
         // delete the entry
         batch.delete(key::dentry(parent, &name));
+        rocksdb_delete!();
         let mut free_inode_cnt = 0;
         let mut free_space_size = 0;
 
@@ -1247,14 +1393,17 @@ impl Backend for RocksdbBackend {
                     set_delete_chunk_after_in_write_batch(&mut batch, entry.inode)?;
                     // delete inode attr
                     batch.delete(key::attr(entry.inode));
+                    rocksdb_delete!();
                     free_inode_cnt += 1;
                     free_space_size += attr_place_holder.length;
                 }
             } else {
                 if matches!(attr_place_holder.kind, FileType::Symlink) {
                     batch.delete(key::symlink(entry.inode));
+                    rocksdb_delete!();
                 }
                 batch.delete(key::attr(entry.inode));
+                rocksdb_delete!();
                 free_inode_cnt += 1;
                 free_space_size += constants::DEFAULT_FILE_SIZE;
             }
@@ -1269,7 +1418,11 @@ impl Backend for RocksdbBackend {
                 );
             }
         }
-        db_try!(self.db.write(batch));
+        rocksdb_timed_op!(
+            db_batch_writes_total,
+            db_write_duration_ms,
+            db_try!(self.db.write(batch))
+        );
         let mut r = UnlinkResult {
             inode:       entry.inode,
             removed:     None,
@@ -1280,7 +1433,15 @@ impl Backend for RocksdbBackend {
         if attr_place_holder.nlink == 0 && attr_place_holder.is_file() {
             r.removed = Some(attr_place_holder);
         }
-        db_try!(txn.commit());
+
+        // Record RocksDB transaction with metrics
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            txn.commit()
+        )
+        .context(RocksdbSnafu)?;
+
         Ok(r)
     }
 
@@ -1310,12 +1471,21 @@ impl Backend for RocksdbBackend {
         drop(iter);
         // clear the delete notification
         batch.delete(key::delete_chunk_after(inode));
+        rocksdb_delete!();
 
-        if let Err(e) = self.db.write(batch) {
+        if let Err(e) = rocksdb_timed_op!(
+            db_batch_writes_total,
+            db_write_duration_ms,
+            self.db.write(batch)
+        ) {
             error!("write batch failed when do_delete_chunks: {:?}", e);
             return;
         }
-        if let Err(e) = txn.commit() {
+        if let Err(e) = rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            txn.commit()
+        ) {
             error!("commit failed in do_delete_chunks: {:?}", e);
         }
     }
@@ -1569,6 +1739,7 @@ impl Backend for RocksdbBackend {
             }
             _ => {
                 write_batch.delete(key::dentry(old_parent, old_name));
+                rocksdb_delete!();
                 if let Some(dst_attr) = dst_attr_opt {
                     let dst_entry = dst_dentry_opt.unwrap();
                     if !matches!(dst_attr.kind, FileType::Directory) && dst_attr.nlink > 0 {
@@ -1604,15 +1775,19 @@ impl Backend for RocksdbBackend {
                                     dst_entry.inode,
                                 )?;
                                 write_batch.delete(key::attr(dst_entry.inode));
-                                rename_result.freed_space += align4k(dst_attr.length) as u64;
+                                rocksdb_delete!();
+                                rename_result.freed_space +=
+                                    kiseki_utils::align::align4k(dst_attr.length) as u64;
                                 rename_result.freed_inode += 1;
                             }
                             rename_result.need_delete = Some((dst_entry.inode, opened));
                         } else {
                             if matches!(dst_attr.kind, FileType::Symlink) {
                                 write_batch.delete(key::symlink(dst_entry.inode));
+                                rocksdb_delete!();
                             }
                             write_batch.delete(key::attr(dst_entry.inode));
+                            rocksdb_delete!();
                             rename_result.freed_space += 4096;
                             rename_result.freed_inode += 1;
                         }
@@ -1669,8 +1844,20 @@ impl Backend for RocksdbBackend {
             set_attr_in_write_batch(&mut write_batch, new_parent, &new_parent_attr)?;
         }
 
-        db_try!(self.db.write(write_batch));
-        db_try!(txn.commit());
+        // Record RocksDB operations with metrics
+        rocksdb_timed_op!(
+            db_batch_writes_total,
+            db_write_duration_ms,
+            self.db.write(write_batch)
+        )
+        .context(RocksdbSnafu)?;
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            txn.commit()
+        )
+        .context(RocksdbSnafu)?;
+
         Ok(rename_result)
     }
 
@@ -1766,12 +1953,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(Counter::NextInode, 10)]
-    #[case(Counter::NextSlice, 100)]
-    #[case(Counter::UsedSpace, 1024)]
+    #[case(BackendCounter::NextInode, 10)]
+    #[case(BackendCounter::NextSlice, 100)]
+    #[case(BackendCounter::UsedSpace, 1024)]
     fn test_counter_operations(
         test_backend: (RocksdbBackend, TempDir),
-        #[case] counter: Counter,
+        #[case] counter: BackendCounter,
         #[case] step: usize,
     ) {
         let (backend, _tempdir) = test_backend;
@@ -1964,7 +2151,7 @@ mod tests {
         assert!(result.is_err());
 
         // Loading non-existent counter should fail
-        let result = backend.load_count(Counter::NextInode);
+        let result = backend.load_count(BackendCounter::NextInode);
         assert!(result.is_err());
     }
 

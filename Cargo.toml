@@ -50,6 +50,14 @@ tokio-stream = "0.1.17"
 tokio-util = { version = "0.7.16", features = ["rt", "io"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+opentelemetry = "0.29"
+opentelemetry_api = "0.20"
+opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"] }
+opentelemetry-prometheus = "0.29"
+prometheus = "0.14"
+opentelemetry-otlp = { version = "0.29", features = ["http-proto", "reqwest-client"] }
+strum = "0.27"
+strum_macros = "0.27"
 
 [profile.release]
 debug = true

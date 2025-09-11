@@ -23,4 +23,6 @@ pub use engine::{MetaEngineRef, open, update_format};
 mod err;
 pub use err::Error;
 mod id_table;
+pub mod metrics;
 mod open_files;
+
