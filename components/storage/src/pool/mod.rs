@@ -20,36 +20,42 @@ pub mod memory_pool;
 use std::{
     fmt::{Debug, Formatter},
     sync::Arc,
-    thread,
 };
 
 use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::readable_size::ReadableSize;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use tracing::debug;
 
 use crate::err::Result;
 
-lazy_static! {
-    pub static ref GLOBAL_MEMORY_PAGE_POOL: Arc<memory_pool::MemoryPagePool> =
-        memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE);
-    pub static ref GLOBAL_HYBRID_PAGE_POOL: Arc<HybridPagePool> = thread::spawn(|| {
+pub static GLOBAL_MEMORY_PAGE_POOL: Lazy<Arc<memory_pool::MemoryPagePool>> =
+    Lazy::new(|| memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE));
+
+pub static GLOBAL_HYBRID_PAGE_POOL: Lazy<Arc<HybridPagePool>> = Lazy::new(|| {
+    std::thread::spawn(|| {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.handle().block_on(async {
-            Arc::new(
-                PagePoolBuilder::default()
-                    .with_page_size(PAGE_SIZE)
-                    .with_memory_capacity(1 << 30)
-                    .with_disk_capacity(1 << 30)
-                    .build()
-                    .await
-                    .unwrap(),
-            )
+            // 根据环境变量决定是否启用disk pool
+            // 测试环境下默认只使用内存pool避免并发冲突
+            let builder = PagePoolBuilder::default()
+                .with_page_size(PAGE_SIZE)
+                .with_memory_capacity(1 << 30);
+
+            let builder = if cfg!(test) || std::env::var("KISEKI_DISABLE_DISK_POOL").is_ok() {
+                // 测试环境或明确禁用时，不使用disk pool
+                builder
+            } else {
+                // 生产环境使用disk pool
+                builder.with_disk_capacity(1 << 30)
+            };
+
+            Arc::new(builder.build().await.unwrap())
         })
     })
     .join()
-    .unwrap();
-}
+    .unwrap()
+});
 
 const DEFAULT_DISK_PAGE_POOL_PATH: &str = "/tmp/kiseki.page_pool";
 
@@ -59,6 +65,7 @@ pub struct PagePoolBuilder {
     memory_capacity: usize,
     // disk page pool is optional
     disk_capacity:   Option<usize>,
+    disk_pool_path:  Option<String>,
 }
 
 impl PagePoolBuilder {
@@ -77,17 +84,23 @@ impl PagePoolBuilder {
         self
     }
 
+    pub fn with_disk_capacity_and_path(mut self, disk_capacity: usize, path: &str) -> Self {
+        self.disk_capacity = Some(disk_capacity);
+        self.disk_pool_path = Some(path.to_string());
+        self
+    }
+
     pub async fn build(self) -> Result<HybridPagePool> {
         let mut total_page_cnt = self.memory_capacity / self.page_size;
         let memory_pool = memory_pool::MemoryPagePool::new(self.page_size, self.memory_capacity);
         let (disk_pool, disk_capacity) = if let Some(disk_capacity) = self.disk_capacity {
             total_page_cnt += disk_capacity / self.page_size;
-            let disk_pool = disk_pool::DiskPagePool::new(
-                DEFAULT_DISK_PAGE_POOL_PATH,
-                self.page_size,
-                disk_capacity,
-            )
-            .await?;
+            let disk_pool_path = self
+                .disk_pool_path
+                .as_deref()
+                .unwrap_or(DEFAULT_DISK_PAGE_POOL_PATH);
+            let disk_pool =
+                disk_pool::DiskPagePool::new(disk_pool_path, self.page_size, disk_capacity).await?;
             (Some(disk_pool), disk_capacity)
         } else {
             (None, 0)
@@ -238,11 +251,15 @@ mod tests {
 
         let start = Instant::now();
 
+        // 为测试创建唯一的临时目录避免并发冲突
+        let temp_dir = tempfile::tempdir().unwrap();
+        let disk_pool_path = temp_dir.path().join("test_page_pool");
+
         let pool = Arc::new(
             PagePoolBuilder::default()
                 .with_page_size(PAGE_SIZE)
                 .with_memory_capacity(300 << 20)
-                .with_disk_capacity(1 << 30)
+                .with_disk_capacity_and_path(1 << 30, disk_pool_path.to_str().unwrap())
                 .build()
                 .await
                 .unwrap(),
