@@ -61,6 +61,11 @@ jobs:
           version: '25.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -82,13 +87,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: ${{ needs.rust-version.outputs.version }}
+          components: rustdoc
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           version: '25.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2

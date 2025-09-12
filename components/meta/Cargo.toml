@@ -37,6 +37,8 @@ opentelemetry-prometheus.workspace = true
 prometheus.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
+bon.workspace = true
+
 kiseki-common = { path = "../../components/common" }
 kiseki-types = { path = "../../components/types" }
 kiseki-utils = { path = "../../components/utils" }
@@ -47,5 +49,7 @@ tikv-client = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
-rstest = "0.19"
-tokio-test = "0.4"
+rstest.workspace = true
+proptest.workspace = true
+tokio-test.workspace = true
+serial_test.workspace = true
