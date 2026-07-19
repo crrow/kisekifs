@@ -19,20 +19,19 @@ pub mod memory_pool;
 
 use std::{
     fmt::{Debug, Formatter},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::readable_size::ReadableSize;
-use once_cell::sync::Lazy;
 use tracing::debug;
 
 use crate::err::Result;
 
-pub static GLOBAL_MEMORY_PAGE_POOL: Lazy<Arc<memory_pool::MemoryPagePool>> =
-    Lazy::new(|| memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE));
+pub static GLOBAL_MEMORY_PAGE_POOL: LazyLock<Arc<memory_pool::MemoryPagePool>> =
+    LazyLock::new(|| memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE));
 
-pub static GLOBAL_HYBRID_PAGE_POOL: Lazy<Arc<HybridPagePool>> = Lazy::new(|| {
+pub static GLOBAL_HYBRID_PAGE_POOL: LazyLock<Arc<HybridPagePool>> = LazyLock::new(|| {
     std::thread::spawn(|| {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.handle().block_on(async {

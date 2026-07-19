@@ -14,13 +14,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
+use std::{future::Future, sync::LazyLock};
 
-use once_cell::sync::Lazy;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-static GLOBAL_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+static GLOBAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     debug!("start tokio runtime");
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)

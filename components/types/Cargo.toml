@@ -10,7 +10,6 @@ bincode.workspace = true
 bitflags.workspace = true
 byteorder.workspace = true
 fuser.workspace = true
-lazy_static.workspace = true
 libc.workspace = true
 opendal.workspace = true
 rangemap.workspace = true

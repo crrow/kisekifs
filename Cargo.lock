@@ -2078,9 +2078,6 @@ dependencies = [
 [[package]]
 name = "kiseki-common"
 version = "0.1.0"
-dependencies = [
- "lazy_static",
-]
 
 [[package]]
 name = "kiseki-fuse"
@@ -2115,7 +2112,6 @@ dependencies = [
  "kiseki-common",
  "kiseki-types",
  "kiseki-utils",
- "lazy_static",
  "libc",
  "log",
  "opendal",
@@ -2162,10 +2158,8 @@ dependencies = [
  "kiseki-meta",
  "kiseki-types",
  "kiseki-utils",
- "lazy_static",
  "log",
  "moka",
- "once_cell",
  "opendal",
  "rand 0.8.5",
  "rustix 0.38.44",
@@ -2191,7 +2185,6 @@ dependencies = [
  "fuser",
  "kiseki-common",
  "kiseki-utils",
- "lazy_static",
  "libc",
  "opendal",
  "rangemap",
@@ -2211,10 +2204,8 @@ dependencies = [
  "console-subscriber",
  "dotenvy",
  "kiseki-common",
- "lazy_static",
  "num_cpus",
  "object_store",
- "once_cell",
  "opentelemetry 0.21.0",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",

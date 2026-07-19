@@ -21,11 +21,10 @@ use std::{
     hash::{Hash, Hasher},
     num::ParseIntError,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use kiseki_utils::{object_storage::ObjectStoragePath, readable_size::ReadableSize};
-use lazy_static::lazy_static;
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use snafu::{Location, ResultExt, Snafu, ensure};
@@ -56,10 +55,8 @@ pub enum Error {
     },
 }
 
-lazy_static! {
-    pub static ref ID_GENERATOR: sonyflake::Sonyflake =
-        sonyflake::Sonyflake::new().expect("failed to create id generator");
-}
+pub static ID_GENERATOR: LazyLock<sonyflake::Sonyflake> =
+    LazyLock::new(|| sonyflake::Sonyflake::new().expect("failed to create id generator"));
 
 pub fn make_slice_object_key(slice_id: SliceID, block_idx: usize, block_size: usize) -> String {
     SliceKey::new(slice_id, block_idx, block_size).gen_path_for_object_sto()

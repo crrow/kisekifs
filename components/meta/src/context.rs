@@ -14,18 +14,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Instant;
+use std::{sync::LazyLock, time::Instant};
 
 use kiseki_types::attr::InodeAttr;
-use lazy_static::lazy_static;
 use snafu::ensure;
 use tokio_util::sync::CancellationToken;
 
 use crate::err::{LibcSnafu, Result};
 
-lazy_static! {
-    pub static ref EMPTY_CONTEXT: FuseContext = FuseContext::background();
-}
+pub static EMPTY_CONTEXT: LazyLock<FuseContext> = LazyLock::new(FuseContext::background);
 
 #[derive(Debug, Clone)]
 pub struct FuseContext {

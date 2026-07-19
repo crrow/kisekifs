@@ -24,21 +24,22 @@ pub mod readable_size;
 pub mod runtime;
 pub mod sentry_init;
 
-lazy_static::lazy_static! {
-    pub static ref RANDOM_ID_GENERATOR: sonyflake::Sonyflake =
-        sonyflake::Sonyflake::new().expect("failed to create id generator");
+use std::sync::LazyLock;
 
-    /// the user ID for the user running the process.
-    static ref UID: u32 = users::get_current_uid();
-    /// the group ID for the user running the process.
-    static ref GID: u32 = users::get_current_gid();
+pub static RANDOM_ID_GENERATOR: LazyLock<sonyflake::Sonyflake> =
+    LazyLock::new(|| sonyflake::Sonyflake::new().expect("failed to create id generator"));
 
-    /// the number of available CPUs(number of logical cores.) of the current system.
-    static ref NUM_CPUS: usize = num_cpus::get();
-    /// the number of physical cores of the current system.
-    /// This will always return at least 1.
-    static ref NUM_PHYSICAL_CPUS: usize = num_cpus::get_physical();
-}
+/// the user ID for the user running the process.
+static UID: LazyLock<u32> = LazyLock::new(users::get_current_uid);
+/// the group ID for the user running the process.
+static GID: LazyLock<u32> = LazyLock::new(users::get_current_gid);
+
+/// the number of available CPUs(number of logical cores.) of the current
+/// system.
+static NUM_CPUS: LazyLock<usize> = LazyLock::new(num_cpus::get);
+/// the number of physical cores of the current system.
+/// This will always return at least 1.
+static NUM_PHYSICAL_CPUS: LazyLock<usize> = LazyLock::new(num_cpus::get_physical);
 
 pub fn random_id() -> u64 {
     RANDOM_ID_GENERATOR

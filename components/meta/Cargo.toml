@@ -19,7 +19,6 @@ bytes.workspace = true
 crossbeam.workspace = true
 dashmap.workspace = true
 futures.workspace = true
-lazy_static.workspace = true
 libc.workspace = true
 opendal.workspace = true
 scopeguard.workspace = true
