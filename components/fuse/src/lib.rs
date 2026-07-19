@@ -39,7 +39,6 @@ use tokio::runtime;
 use tracing::{Instrument, debug, error, field, info, instrument};
 
 mod config;
-mod err;
 pub mod null;
 
 #[derive(Debug)]

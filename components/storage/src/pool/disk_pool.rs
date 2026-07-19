@@ -16,7 +16,7 @@
 
 use std::{
     fmt::{Display, Formatter},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
@@ -33,8 +33,6 @@ use tracing::debug;
 use crate::err::{DiskPoolMmapSnafu, Result, UnknownIOSnafu};
 
 pub(crate) struct DiskPagePool {
-    // the file path of the pool.
-    filepath:  PathBuf,
     // the size of each page.
     page_size: usize,
     // the total space of the file will use.
@@ -61,7 +59,6 @@ impl DiskPagePool {
                 && capacity > page_size,
             "invalid page pool"
         );
-        let path_buf = path.as_ref().to_path_buf();
         let cnt = capacity / page_size;
         let mut file = AsyncOptions::new()
             .create(true)
@@ -82,7 +79,6 @@ impl DiskPagePool {
         });
         debug!("create disk pool finished, cost: {:?}", start.elapsed());
         Ok(Arc::new(Self {
-            filepath: path_buf,
             page_size,
             capacity,
             queue,

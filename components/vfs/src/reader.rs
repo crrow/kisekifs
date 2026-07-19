@@ -133,13 +133,17 @@ pub(crate) struct FileReader {
     // The max file read length, it was set when we crate the file handle.
     length:      AtomicUsize,
     // the write back cache.
+    // Cache integration on the read path is pending; not read yet.
+    #[allow(dead_code)]
     file_cache:  FileCacheRef,
     // the read-only cache.
+    #[allow(dead_code)]
     mem_cache:   MemCacheRef,
     // A file be divided into multiple chunks,
     // each chunk is composed by multiple slices.
     // This map is used to store latest slices that compose the chunk.
     // TODO: get rid of DashMap
+    #[allow(dead_code)]
     chunks:      DashMap<ChunkIndex, OverlookedSlicesRef>,
     // The file is closing or not.
     closing:     AtomicBool,

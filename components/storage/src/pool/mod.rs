@@ -22,14 +22,11 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use kiseki_common::{PAGE_BUFFER_SIZE, PAGE_SIZE};
+use kiseki_common::PAGE_SIZE;
 use kiseki_utils::readable_size::ReadableSize;
 use tracing::debug;
 
 use crate::err::Result;
-
-pub static GLOBAL_MEMORY_PAGE_POOL: LazyLock<Arc<memory_pool::MemoryPagePool>> =
-    LazyLock::new(|| memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_BUFFER_SIZE));
 
 pub static GLOBAL_HYBRID_PAGE_POOL: LazyLock<Arc<HybridPagePool>> = LazyLock::new(|| {
     std::thread::spawn(|| {
@@ -83,6 +80,7 @@ impl PagePoolBuilder {
         self
     }
 
+    #[allow(dead_code)] // only exercised by tests so far
     pub fn with_disk_capacity_and_path(mut self, disk_capacity: usize, path: &str) -> Self {
         self.disk_capacity = Some(disk_capacity);
         self.disk_pool_path = Some(path.to_string());
@@ -190,8 +188,10 @@ impl HybridPagePool {
                 .map_or(0, |pool| pool.remain_page_cnt())
     }
 
+    #[allow(dead_code)] // only exercised by tests so far
     pub fn total_page_cnt(&self) -> usize { self.total_page_cnt }
 
+    #[allow(dead_code)] // only exercised by tests so far
     pub fn capacity(&self) -> usize { self.memory_capacity + self.disk_capacity }
 
     pub fn free_ratio(&self) -> f64 { self.remain() as f64 / self.total_page_cnt as f64 }

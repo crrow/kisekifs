@@ -309,13 +309,6 @@ impl SliceBuffer {
             .count()
     }
 
-    fn partial_block_cnt(&self) -> usize {
-        self.block_slots
-            .iter()
-            .filter(|block| !block.is_full())
-            .count()
-    }
-
     pub fn flushed_length(&self) -> usize { self.flushed_length }
 
     pub fn length(&self) -> usize { self.length }

@@ -76,11 +76,3 @@ impl Default for Config {
         }
     }
 }
-
-/// Divide cpu num by a non-zero `divisor` and returns at least 1.
-fn divide_num_cpus(divisor: usize) -> usize {
-    debug_assert!(divisor > 0);
-    let cores = kiseki_utils::num_cpus();
-    debug_assert!(cores > 0);
-    cores.div_ceil(divisor)
-}

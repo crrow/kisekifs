@@ -180,13 +180,6 @@ impl Handle {
         }
     }
 
-    pub(crate) fn get_inode(&self) -> Ino {
-        match self {
-            Handle::File(h) => h.inode,
-            Handle::Dir(h) => h.inode,
-        }
-    }
-
     pub(crate) fn as_file_handle(&self) -> Option<Arc<FileHandle>> {
         match self {
             Handle::File(h) => Some(h.clone()),
@@ -212,6 +205,7 @@ impl Handle {
 pub(crate) struct FileHandle {
     fh:    FH,
     // cannot be changed
+    #[allow(dead_code)] // handle identity, kept for debugging
     inode: Ino, // cannot be changed
 
     reader:        Arc<FileReader>,
@@ -235,6 +229,8 @@ pub(crate) struct FileHandle {
     // kernel 3.1- does not pass lock_owner in release()
     ofd_owner:        AtomicU64,
 
+    // Lifecycle flag; written at construction only and never set on close.
+    #[allow(dead_code)]
     closed: AtomicBool,
 }
 
@@ -456,6 +452,8 @@ pub(crate) struct FileHandleWriteGuard {
     file_writer:           Arc<FileWriter>,
     exclusive_locking:     Arc<AtomicBool>,
     exclusive_lock_notify: Arc<Notify>,
+    // Keeps the request context alive for the guard's lifetime.
+    #[allow(dead_code)]
     ctx:                   Arc<FuseContext>,
 }
 
@@ -481,6 +479,8 @@ pub(crate) struct FileHandleReadGuard {
     reader:        Arc<FileReader>,
     reader_cnt:    Arc<AtomicUsize>,
     reader_notify: Arc<Notify>,
+    // Keeps the request context alive for the guard's lifetime.
+    #[allow(dead_code)]
     ctx:           Arc<FuseContext>,
 }
 
@@ -500,7 +500,8 @@ impl Drop for FileHandleReadGuard {
 
 pub(crate) struct DirHandle {
     fh:               FH,
-    inode:            Ino,
+    #[allow(dead_code)] // handle identity, kept for debugging
+    inode: Ino,
     pub(crate) inner: RwLock<DirHandleInner>,
 }
 
@@ -521,5 +522,7 @@ impl DirHandle {
 pub(crate) struct DirHandleInner {
     pub(crate) children:  Vec<Entry>,
     pub(crate) read_at:   Option<Instant>,
+    // OFD lock bookkeeping; not wired up yet.
+    #[allow(dead_code)]
     pub(crate) ofd_owner: u64, // OFD lock
 }

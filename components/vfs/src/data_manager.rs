@@ -40,7 +40,11 @@ pub(crate) type DataManagerRef = Arc<DataManager>;
 
 /// DataManager is responsible for managing the data of the VFS.
 pub(crate) struct DataManager {
+    // page_size/block_size are layout knobs plumbed from the config;
+    // nothing reads them yet.
+    #[allow(dead_code)]
     pub(crate) page_size:      usize,
+    #[allow(dead_code)]
     pub(crate) block_size:     usize,
     pub(crate) chunk_size:     usize,
     pub(crate) file_writers:   FileWritersRef,
@@ -49,6 +53,8 @@ pub(crate) struct DataManager {
     pub(crate) id_generator:   Arc<sonyflake::Sonyflake>,
     // Dependencies
     pub(crate) meta_engine:    MetaEngineRef,
+    // Kept alive as the storage handle backing the caches below.
+    #[allow(dead_code)]
     pub(crate) object_storage: ObjectStorage,
     pub(crate) file_cache:     FileCacheRef,
     pub(crate) mem_cache:      MemCacheRef,
@@ -84,6 +90,7 @@ impl DataManager {
         }
     }
 
+    #[allow(dead_code)] // only exercised by tests so far
     pub(crate) fn find_file_writer(&self, ino: Ino) -> Option<Arc<FileWriter>> {
         self.file_writers.get(&ino).map(|r| r.value().clone())
     }

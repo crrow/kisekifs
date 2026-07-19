@@ -247,6 +247,8 @@ impl OpenFiles {
 
 pub(crate) enum InvalidReq {
     OneChunk(ChunkIndex),
+    // Models whole-file invalidation; no call site constructs it yet.
+    #[allow(dead_code)]
     All,
     OnlyAttr,
 }

@@ -32,9 +32,6 @@ use opentelemetry::{
 };
 use tracing::debug;
 
-/// Global metrics initialization state
-static METRICS_INITIALIZED: OnceLock<bool> = OnceLock::new();
-
 /// Business Logic Metrics for Filesystem Operations
 ///
 /// These metrics track high-level filesystem operations and business logic,

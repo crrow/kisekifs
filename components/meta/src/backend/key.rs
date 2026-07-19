@@ -24,6 +24,9 @@ pub const NEXT_TRASH: &str = "next_trash";
 pub const NEXT_INODE: &str = "next_inode";
 pub const NEXT_SLICE: &str = "next_slice";
 
+// The variants mirror the counter keys persisted on disk; not all of
+// them are wired up yet.
+#[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub enum Counter {
     UsedSpace,

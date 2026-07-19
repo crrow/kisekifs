@@ -162,6 +162,7 @@ impl MemoryPagePool {
     #[inline]
     pub fn total_page_cnt(&self) -> usize { self.capacity / self.page_size }
 
+    #[allow(dead_code)] // only exercised by tests so far
     #[inline]
     pub fn capacity(&self) -> usize { self.capacity }
 }
@@ -226,6 +227,7 @@ impl Page {
         Ok(())
     }
 
+    #[allow(dead_code)] // only exercised by tests so far
     pub(crate) fn size(&self) -> usize { self._pool.page_size }
 }
 

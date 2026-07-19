@@ -80,8 +80,12 @@ impl Default for Config {
 pub type FileCacheRef = Arc<FileCache>;
 
 pub struct FileCache {
+    // Kept for the pending flush/recover logic; not read yet.
+    #[allow(dead_code)]
     stage_dir:      PathBuf,
     index:          moka::future::Cache<SliceKey, CacheIndex>,
+    // Kept for the pending flush/recover logic; not read yet.
+    #[allow(dead_code)]
     remote_storage: ObjectStorage,
     local_storage:  LocalStorage,
 }
