@@ -7,43 +7,25 @@ description = "The core storage implementation"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-trait.workspace = true
 bytes.workspace = true
-crossbeam.workspace = true
 crossbeam-queue.workspace = true
-dashmap.workspace = true
 futures.workspace = true
 opendal.workspace = true
-rustix.workspace = true
-scopeguard.workspace = true
-serde.workspace = true
 snafu.workspace = true
-sonyflake.workspace = true
 tokio.workspace = true
-tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-bon.workspace = true
 
 kiseki-common = { path = "../../components/common" }
-kiseki-meta = { path = "../../components/meta" }
 kiseki-types = { path = "../../components/types" }
 kiseki-utils = { path = "../../components/utils" }
 
-byte-pool = "0.2.4"
-crc32fast = "1.5.0"
 fmmap = { version = "0.3.3", features = ["tokio", "tokio-async"] }
-log = "0.4.27"
 moka = { version = "0.12.10", features = ["future"] }
-rand = "0.8.5"
 
 [dev-dependencies]
-criterion.workspace = true
 tempfile.workspace = true
-
-kiseki-utils = { path = "../../components/utils" }
-
-uuid = "1.18.1"
+tokio-stream.workspace = true
 
 #[[bench]]
 #name = "bench_main"

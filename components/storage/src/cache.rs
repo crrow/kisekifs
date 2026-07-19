@@ -14,6 +14,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// mod juice_cache;
 pub mod file_cache;
 pub mod mem_cache;

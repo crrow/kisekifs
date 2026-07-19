@@ -265,7 +265,8 @@ pub fn init_global_logging_without_runtime(
 
 #[allow(dead_code)]
 pub fn install_fmt_log() {
-    let stdout_log = tracing_subscriber::fmt::layer().pretty();
-    let subscriber = Registry::default().with(stdout_log);
-    tracing::subscriber::set_global_default(subscriber).expect("Unable to set global subscriber");
+    // Tests install logging from multiple threads. `try_init` lets the first
+    // caller win without turning subsequent initialization attempts into test
+    // failures.
+    let _ = tracing_subscriber::fmt().pretty().try_init();
 }

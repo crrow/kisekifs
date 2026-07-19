@@ -37,57 +37,48 @@ use crate::{
 };
 
 pub(crate) type DataManagerRef = Arc<DataManager>;
+type FileReadersByHandle = HashMap<FH, Arc<FileReader>>;
+type FileReaderTable = HashMap<Ino, Arc<RwLock<FileReadersByHandle>>>;
 
 /// DataManager is responsible for managing the data of the VFS.
 pub(crate) struct DataManager {
-    // page_size/block_size are layout knobs plumbed from the config;
-    // nothing reads them yet.
-    #[allow(dead_code)]
-    pub(crate) page_size:      usize,
-    #[allow(dead_code)]
-    pub(crate) block_size:     usize,
-    pub(crate) chunk_size:     usize,
-    pub(crate) file_writers:   FileWritersRef,
-    #[allow(clippy::type_complexity)]
-    pub(crate) file_readers:   RwLock<HashMap<Ino, Arc<RwLock<HashMap<FH, Arc<FileReader>>>>>>,
-    pub(crate) id_generator:   Arc<sonyflake::Sonyflake>,
+    pub(crate) chunk_size:   usize,
+    pub(crate) file_writers: FileWritersRef,
+    pub(crate) file_readers: RwLock<FileReaderTable>,
+    pub(crate) id_generator: Arc<sonyflake::Sonyflake>,
     // Dependencies
-    pub(crate) meta_engine:    MetaEngineRef,
-    // Kept alive as the storage handle backing the caches below.
-    #[allow(dead_code)]
-    pub(crate) object_storage: ObjectStorage,
-    pub(crate) file_cache:     FileCacheRef,
-    pub(crate) mem_cache:      MemCacheRef,
-    // pub(crate) data_cache: CacheRef,
+    pub(crate) meta_engine:  MetaEngineRef,
+    pub(crate) file_cache:   FileCacheRef,
+    pub(crate) mem_cache:    MemCacheRef,
 }
 
 impl DataManager {
     pub(crate) fn new(
-        page_size: usize,
-        block_size: usize,
         chunk_size: usize,
         meta_engine_ref: MetaEngineRef,
         object_storage: ObjectStorage,
-    ) -> Self {
-        let remote_storage = object_storage.clone();
-        Self {
-            page_size,
-            block_size,
+    ) -> Result<Self> {
+        let file_cache = Arc::new(FileCache::new(
+            cache::file_cache::Config::default(),
+            object_storage.clone(),
+        )?);
+        let mem_cache = Arc::new(MemCache::new(
+            cache::mem_cache::Config::default(),
+            object_storage,
+        ));
+
+        Ok(Self {
             chunk_size,
             file_writers: Arc::new(Default::default()),
             file_readers: Default::default(),
-            id_generator: Arc::new(sonyflake::Sonyflake::new().unwrap()),
-            meta_engine: meta_engine_ref,
-            object_storage,
-            file_cache: Arc::new(
-                FileCache::new(cache::file_cache::Config::default(), remote_storage.clone())
-                    .unwrap(),
+            id_generator: Arc::new(
+                sonyflake::Sonyflake::new()
+                    .expect("failed to initialize the data manager id generator"),
             ),
-            mem_cache: Arc::new(MemCache::new(
-                cache::mem_cache::Config::default(),
-                remote_storage,
-            )),
-        }
+            meta_engine: meta_engine_ref,
+            file_cache,
+            mem_cache,
+        })
     }
 
     #[allow(dead_code)] // only exercised by tests so far
@@ -95,13 +86,13 @@ impl DataManager {
         self.file_writers.get(&ino).map(|r| r.value().clone())
     }
 
-    pub(crate) fn get_length(self: &Arc<Self>, ino: Ino) -> u64 {
+    pub(crate) fn get_length(&self, ino: Ino) -> u64 {
         self.file_writers
-            .get(&(ino))
+            .get(&ino)
             .map_or(0, |w| w.value().get_length() as u64)
     }
 
-    pub(crate) fn update_mtime(self: &Arc<Self>, ino: Ino, mtime: SystemTime) -> Result<()> {
+    pub(crate) fn update_mtime(&self, ino: Ino, mtime: SystemTime) -> Result<()> {
         debug!("update_mtime do nothing, {ino}: {:?}", mtime);
         Ok(())
     }

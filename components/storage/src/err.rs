@@ -71,12 +71,6 @@ pub enum Error {
         #[snafu(implicit)]
         location:  Location,
     },
-
-    MetaError {
-        #[snafu(implicit)]
-        location: Location,
-        source:   kiseki_meta::Error,
-    },
 }
 
 impl Error {

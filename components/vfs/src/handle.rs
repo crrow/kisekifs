@@ -39,12 +39,13 @@ use crate::{
 };
 
 pub(crate) type HandleTableRef = Arc<HandleTable>;
+type HandlesByFileHandle = BTreeMap<FH, Handle>;
+type HandleTableByInode = HashMap<Ino, Arc<RwLock<HandlesByFileHandle>>>;
 
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
-    #[allow(clippy::type_complexity)]
-    handles:      RwLock<HashMap<Ino, Arc<RwLock<BTreeMap<FH, Handle>>>>>,
-    _next_fh:     AtomicU64,
+    handles:      RwLock<HandleTableByInode>,
+    next_fh:      AtomicU64,
 }
 
 impl HandleTable {
@@ -52,26 +53,21 @@ impl HandleTable {
         Arc::new(HandleTable {
             data_manager: data_manager_ref,
             handles:      Default::default(),
-            _next_fh:     AtomicU64::new(1),
+            next_fh:      AtomicU64::new(1),
         })
     }
 
-    fn next_fh(&self) -> FH { self._next_fh.fetch_add(1, Ordering::SeqCst) }
+    fn allocate_fh(&self) -> FH { self.next_fh.fetch_add(1, Ordering::Relaxed) }
 
-    pub(crate) async fn new_dir_handle(self: &Arc<Self>, inode: Ino) -> FH {
-        let fh = self.next_fh();
+    pub(crate) async fn new_dir_handle(&self, inode: Ino) -> FH {
+        let fh = self.allocate_fh();
         let dir_handle = Handle::Dir(Arc::new(DirHandle::new(inode, fh)));
         self.insert_handle(inode, fh, dir_handle).await;
         fh
     }
 
-    pub(crate) async fn new_file_handle(
-        self: &Arc<Self>,
-        inode: Ino,
-        length: u64,
-        flags: i32,
-    ) -> Result<FH> {
-        let fh = self.next_fh();
+    pub(crate) async fn new_file_handle(&self, inode: Ino, length: u64, flags: i32) -> Result<FH> {
+        let fh = self.allocate_fh();
         let h = match flags & libc::O_ACCMODE {
             libc::O_RDONLY => FileHandle::new(
                 inode,
@@ -97,7 +93,7 @@ impl HandleTable {
         Ok(fh)
     }
 
-    async fn insert_handle(self: &Arc<Self>, inode: Ino, fh: FH, handle: Handle) {
+    async fn insert_handle(&self, inode: Ino, fh: FH, handle: Handle) {
         // Release the outer lock before acquiring the inner lock to avoid
         // deadlock.
         let inner_map = {

@@ -113,12 +113,10 @@ impl KisekiVFS {
         // object_storage_dsn)         .context(ObjectStorageSnafu)?;
 
         let data_manager = Arc::new(DataManager::new(
-            vfs_config.page_size,
-            vfs_config.block_size,
             vfs_config.chunk_size,
             meta.clone(),
             object_storage,
-        ));
+        )?);
 
         let vfs = Self {
             config: vfs_config,

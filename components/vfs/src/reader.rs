@@ -494,13 +494,9 @@ mod tests {
             .await
             .unwrap();
 
-        let data_manager = Arc::new(DataManager::new(
-            format.page_size,
-            format.block_size,
-            format.chunk_size,
-            meta_engine,
-            new_memory_object_store(),
-        ));
+        let data_manager = Arc::new(
+            DataManager::new(format.chunk_size, meta_engine, new_memory_object_store()).unwrap(),
+        );
 
         data_manager.open_file_writer(inode, 0);
         let data = b"hello world" as &[u8];
@@ -568,13 +564,9 @@ mod tests {
             .await
             .unwrap();
 
-        let data_manager = Arc::new(DataManager::new(
-            format.page_size,
-            format.block_size,
-            format.chunk_size,
-            meta_engine,
-            new_memory_object_store(),
-        ));
+        let data_manager = Arc::new(
+            DataManager::new(format.chunk_size, meta_engine, new_memory_object_store()).unwrap(),
+        );
 
         data_manager.open_file_writer(inode, 0);
         let step_size: usize = 4 << 20;
