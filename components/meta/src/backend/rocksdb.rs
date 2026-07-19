@@ -17,7 +17,7 @@
 use std::{
     fmt::{Debug, Formatter},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -949,9 +949,8 @@ impl Backend for RocksdbBackend {
         rocksdb_timed_op!(
             db_batch_writes_total,
             db_write_duration_ms,
-            self.db.write(batch).map_err(|e| {
+            self.db.write(batch).inspect_err(|_e| {
                 rocksdb_error!(crate::metrics::labels::ERROR_WRITE_BATCH);
-                e
             })
         )
         .context(RocksdbSnafu)?;
@@ -959,9 +958,8 @@ impl Backend for RocksdbBackend {
         rocksdb_timed_op!(
             db_transactions_total,
             db_transaction_duration_ms,
-            txn.commit().map_err(|e| {
+            txn.commit().inspect_err(|_e| {
                 rocksdb_error!(crate::metrics::labels::ERROR_TRANSACTION_COMMIT);
-                e
             })
         )
         .context(RocksdbSnafu)?;
@@ -1657,10 +1655,11 @@ impl Backend for RocksdbBackend {
                     update_new_parent = true;
                 } else {
                     dst_attr.nlink -= 1;
-                    if matches!(dst_entry.typ, FileType::RegularFile) && dst_attr.nlink == 0 {
-                        if let Some(of) = open_files_ref.load(&dst_entry.inode).await {
-                            opened = of.is_opened().await;
-                        }
+                    if matches!(dst_entry.typ, FileType::RegularFile)
+                        && dst_attr.nlink == 0
+                        && let Some(of) = open_files_ref.load(&dst_entry.inode).await
+                    {
+                        opened = of.is_opened().await;
                     }
                 }
 

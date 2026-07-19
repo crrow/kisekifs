@@ -57,7 +57,10 @@ impl DiskPagePool {
     ) -> Result<Arc<DiskPagePool>> {
         let start = Instant::now();
         debug_assert!(
-            page_size > 0 && capacity > 0 && capacity % page_size == 0 && capacity > page_size,
+            page_size > 0
+                && capacity > 0
+                && capacity.is_multiple_of(page_size)
+                && capacity > page_size,
             "invalid page pool"
         );
         let path_buf = path.as_ref().to_path_buf();

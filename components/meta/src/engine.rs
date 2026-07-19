@@ -51,7 +51,6 @@ use crate::{
     context::FuseContext,
     err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
     id_table::IdTable,
-    metrics,
     open_files::{InvalidReq, OpenFiles, OpenFilesRef},
 };
 
@@ -86,12 +85,12 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
 }
 
 // update_format is used to change the file system's setting.
-pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
+pub fn update_format(dsn: &str, format: Format, _force: bool) -> Result<()> {
     let backend = open_backend(dsn, Duration::from_millis(100))?;
 
     let mut need_init_root = false;
     match backend.load_format() {
-        Ok(old_format) => {
+        Ok(_old_format) => {
             debug!("found exists format, need to update");
             // TODO: update the old format
         }
@@ -197,7 +196,7 @@ impl MetaEngine {
     /// [stat_fs] returns summary statistics of a volume.
     ///
     /// TODO: support chroot ?
-    pub fn stat_fs(&self, ctx: Arc<FuseContext>, inode: Ino) -> Result<FSStat> {
+    pub fn stat_fs(&self, _ctx: Arc<FuseContext>, _inode: Ino) -> Result<FSStat> {
         let total_used_file_count = self.fs_stat_file_count.load(Ordering::Acquire);
         let total_used_size = self.fs_stat_used_size.load(Ordering::Acquire);
         Ok(FSStat {
@@ -584,7 +583,7 @@ impl MetaEngine {
         &self,
         ctx: &FuseContext,
         flags: SetAttrFlags,
-        inode: Ino,
+        _inode: Ino,
         cur: &InodeAttr,
         new_attr: &mut InodeAttr,
         now: SystemTime,

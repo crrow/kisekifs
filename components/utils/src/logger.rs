@@ -202,7 +202,7 @@ pub fn init_global_logging(
             .as_ref()
             .map(|e| format!("http://{}", e))
             .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string());
-        println!("find otlp tracing config: {}", &endpoint);
+        println!("find otlp tracing config: {}", endpoint);
         // otlp exporter
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()

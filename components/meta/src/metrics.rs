@@ -24,10 +24,7 @@
 //! - **RocksDB Performance Metrics**: Database-level performance indicators
 //! - **Business Logic Metrics**: Filesystem operation metrics
 //! - **Error Tracking**: Comprehensive error monitoring
-use std::{
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use std::{sync::OnceLock, time::Instant};
 
 use opentelemetry::{
     KeyValue,

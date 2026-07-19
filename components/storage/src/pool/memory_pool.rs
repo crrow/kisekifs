@@ -80,7 +80,10 @@ impl MemoryPagePool {
     pub fn new(page_size: usize, capacity: usize) -> Arc<Self> {
         let start_at = Instant::now();
         debug_assert!(
-            page_size > 0 && capacity > 0 && capacity % page_size == 0 && capacity > page_size,
+            page_size > 0
+                && capacity > 0
+                && capacity.is_multiple_of(page_size)
+                && capacity > page_size,
             "invalid page pool"
         );
 

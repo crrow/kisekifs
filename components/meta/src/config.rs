@@ -24,12 +24,13 @@ use serde::{Deserialize, Serialize};
 /// mtime (modification time): The last time the file's content was modified.
 /// ctime (change time): The last time the file's metadata (e.g., permissions,
 /// owner) was changed.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccessTimeMode {
     /// Disables atime updates entirely.
     /// Reading a file doesn't update its atime timestamp.
     /// Improves performance, especially for frequently accessed files.
     /// Can make it difficult to determine when a file was last accessed.
+    #[default]
     Never,
     /// Default atime mode on many Linux systems.
     /// Updates atime only if:
@@ -42,10 +43,6 @@ pub enum AccessTimeMode {
     /// Can impact performance, especially on storage systems with slow write
     /// speeds.
     Everytime,
-}
-
-impl Default for AccessTimeMode {
-    fn default() -> Self { Self::Never }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]

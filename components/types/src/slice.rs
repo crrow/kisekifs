@@ -77,7 +77,7 @@ pub struct Slices(pub Vec<Slice>);
 impl Slices {
     pub fn decode(buf: &[u8]) -> Result<Slices, Error> {
         ensure!(
-            buf.len() % SLICE_BYTES == 0,
+            buf.len().is_multiple_of(SLICE_BYTES),
             InvalidSliceBufSnafu { len: buf.len() }
         );
         let mut slices = Vec::new();

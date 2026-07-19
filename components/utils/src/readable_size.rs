@@ -81,15 +81,15 @@ impl Serialize for ReadableSize {
         let mut buffer = String::new();
         if size == 0 {
             write!(buffer, "{}KiB", size).unwrap();
-        } else if size % PIB == 0 {
+        } else if size.is_multiple_of(PIB) {
             write!(buffer, "{}PiB", size / PIB).unwrap();
-        } else if size % TIB == 0 {
+        } else if size.is_multiple_of(TIB) {
             write!(buffer, "{}TiB", size / TIB).unwrap();
-        } else if size % GIB == 0 {
+        } else if size.is_multiple_of(GIB) {
             write!(buffer, "{}GiB", size / GIB).unwrap();
-        } else if size % MIB == 0 {
+        } else if size.is_multiple_of(MIB) {
             write!(buffer, "{}MiB", size / MIB).unwrap();
-        } else if size % KIB == 0 {
+        } else if size.is_multiple_of(KIB) {
             write!(buffer, "{}KiB", size / KIB).unwrap();
         } else {
             return serializer.serialize_u64(size);

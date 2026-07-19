@@ -113,7 +113,7 @@ impl DataManager {
 
             // acquire the inner lock.
             let inner_read_guard = inner_map.read().await;
-            for (_, fr) in inner_read_guard.iter() {
+            for fr in inner_read_guard.values() {
                 // TODO: review me, should we use compare and swap?
                 fr.length.store(length as usize, Ordering::Release);
             }
@@ -583,7 +583,7 @@ mod tests {
 
         data_manager.open_file_writer(inode, 0);
         let step_size: usize = 4 << 20;
-        let total_step: usize = 1 << 30 / step_size;
+        let total_step: usize = 1 << (30 / step_size);
         let data = vec![1u8; step_size];
 
         let fw = data_manager.find_file_writer(inode).unwrap();
@@ -597,7 +597,7 @@ mod tests {
             .open_file_reader(inode, 0, total_step * step_size)
             .await;
         let page_size: usize = 128 << 10;
-        let total_read_step = 1 << 30 / page_size;
+        let total_read_step = 1 << (30 / page_size);
         let expect_read_content = vec![1u8; page_size];
         for i in 0..total_read_step {
             let mut read_data = vec![0u8; page_size];

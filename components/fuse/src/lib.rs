@@ -194,7 +194,7 @@ impl Filesystem for KisekiFuse {
     }
 
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = ino, name = field::Empty))]
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         match self
             .runtime
             .block_on(self.vfs.get_attr(Ino::from(ino)).in_current_span())
