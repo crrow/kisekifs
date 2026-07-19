@@ -98,28 +98,22 @@ impl HandleTable {
     }
 
     async fn insert_handle(self: &Arc<Self>, inode: Ino, fh: FH, handle: Handle) {
-        let mut outer_read_guard = self.handles.read().await;
-        if !outer_read_guard.contains_key(&inode) {
-            drop(outer_read_guard);
-
-            let mut out_write_guard = self.handles.write().await;
-            // check again
-            out_write_guard
-                .entry(inode)
-                .or_insert_with(Default::default);
-            drop(out_write_guard);
-
-            // acquire the read lock again.
-            outer_read_guard = self.handles.read().await;
-        }
-
-        let inner_map = outer_read_guard.get(&inode).unwrap().clone();
-        // Release the outer lock before acquiring the inner lock to avoid deadlock
-        drop(outer_read_guard);
+        // Release the outer lock before acquiring the inner lock to avoid
+        // deadlock.
+        let inner_map = {
+            let outer_read_guard = self.handles.read().await;
+            match outer_read_guard.get(&inode) {
+                Some(inner) => inner.clone(),
+                None => {
+                    drop(outer_read_guard);
+                    let mut out_write_guard = self.handles.write().await;
+                    out_write_guard.entry(inode).or_default().clone()
+                }
+            }
+        };
 
         let mut write_guard = inner_map.write().await;
         write_guard.insert(fh, handle);
-        drop(write_guard);
     }
 
     pub(crate) async fn find_handle(&self, ino: Ino, fh: u64) -> Option<Handle> {
@@ -361,8 +355,10 @@ impl FileHandle {
             .insert(ctx.unique, ctx.clone());
 
         debug!("FileHandleWriteGuard is created");
+        // writer is guaranteed Some by the early `self.writer.as_ref()?` at the
+        // top of write_lock; `?` keeps this panic-free if that ever changes.
         Some(FileHandleWriteGuard {
-            file_writer: self.writer.as_ref().unwrap().clone(),
+            file_writer: self.writer.as_ref()?.clone(),
             exclusive_locking: self.exclusive_locking.clone(),
             exclusive_lock_notify: self.exclusive_lock_notify.clone(),
             ctx,
