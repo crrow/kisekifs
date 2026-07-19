@@ -215,7 +215,10 @@ impl InodeAttr {
         now: SystemTime,
         skip_update_duration: Duration,
     ) -> bool {
-        if now.duration_since(self.mtime).unwrap() > skip_update_duration {
+        // A future mtime (clock skew, or a setattr-set timestamp) makes
+        // duration_since err; treat it as "just modified" so we skip the
+        // update instead of panicking.
+        if now.duration_since(self.mtime).unwrap_or(Duration::ZERO) > skip_update_duration {
             self.mtime = now;
             self.ctime = now;
             true
@@ -304,17 +307,17 @@ impl InodeAttr {
     pub fn is_file(&self) -> bool { self.kind == FileType::RegularFile }
 
     pub fn is_immutable(&self) -> bool {
-        let flag = Flags::from_bits(self.flags as u8).unwrap();
+        let flag = Flags::from_bits_truncate(self.flags as u8);
         flag.contains(Flags::IMMUTABLE)
     }
 
     pub fn is_append_only(&self) -> bool {
-        let flag = Flags::from_bits(self.flags as u8).unwrap();
+        let flag = Flags::from_bits_truncate(self.flags as u8);
         flag.contains(Flags::APPEND)
     }
 
     pub fn is_normal(&self) -> bool {
-        let flag = Flags::from_bits(self.flags as u8).unwrap();
+        let flag = Flags::from_bits_truncate(self.flags as u8);
         let contains = flag.contains(Flags::IMMUTABLE) || flag.contains(Flags::APPEND);
         !contains
     }
