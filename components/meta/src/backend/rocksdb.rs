@@ -518,14 +518,12 @@ fn delete_prefix_in_txn_write_batch(
     let mut iter = txn.raw_iterator_opt(ro);
     iter.seek_to_first();
     // Scan the keys in the iterator
-    while iter.valid() {
-        let k = iter.key();
-        if matches!(k, Some(k) if k.starts_with(prefix)) {
-            batch.delete(k.unwrap());
-            iter.next();
-            continue;
+    while let Some(k) = iter.key() {
+        if !k.starts_with(prefix) {
+            break;
         }
-        break;
+        batch.delete(k);
+        iter.next();
     }
 }
 
@@ -780,10 +778,21 @@ impl Backend for RocksdbBackend {
             key:  String::from_utf8_lossy(&key).to_string(),
         })
         .context(ModelSnafu)?;
-        let slices = Slices::decode(&buf).unwrap();
-
-        assert!(!buf.is_empty(), "slices is empty");
-        assert!(!slices.0.is_empty(), "slices is empty");
+        let slices = Slices::decode(&buf)
+            .map_err(|e| e.to_string())
+            .and_then(|slices| {
+                if slices.0.is_empty() {
+                    Err("empty slices".to_string())
+                } else {
+                    Ok(slices)
+                }
+            })
+            .map_err(|reason| model_err::Error::CorruptionString {
+                kind: ModelKind::ChunkSlices,
+                key: String::from_utf8_lossy(&key).to_string(),
+                reason,
+            })
+            .context(ModelSnafu)?;
         debug!("get_chunk_slices: key: {:?}", String::from_utf8_lossy(&key));
         for slice in slices.0.iter() {
             debug!("get_chunk_slices: slice: {:?}", slice);
@@ -859,8 +868,7 @@ impl Backend for RocksdbBackend {
         // check if the parent have the permission
         ctx.check_access(&parent_attr, kiseki_common::MODE_MASK_W)?;
         ensure!(
-            !kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8)
-                .unwrap()
+            !kiseki_types::attr::Flags::from_bits_truncate(parent_attr.flags as u8)
                 .contains(kiseki_types::attr::Flags::IMMUTABLE),
             LibcSnafu { errno: libc::EPERM }
         );
@@ -1026,7 +1034,7 @@ impl Backend for RocksdbBackend {
             &parent_attr,
             kiseki_common::MODE_MASK_W | kiseki_common::MODE_MASK_X,
         )?;
-        let parent_flag = kiseki_types::attr::Flags::from_bits(parent_attr.flags as u8).unwrap();
+        let parent_flag = kiseki_types::attr::Flags::from_bits_truncate(parent_attr.flags as u8);
         ensure!(
             !parent_flag.contains(kiseki_types::attr::Flags::APPEND)
                 && !parent_flag.contains(kiseki_types::attr::Flags::IMMUTABLE),
@@ -1141,7 +1149,7 @@ impl Backend for RocksdbBackend {
             matches!(old_attr.kind, FileType::RegularFile),
             LibcSnafu { errno: libc::EPERM }
         );
-        let flags = kiseki_types::attr::Flags::from_bits(old_attr.flags as u8).unwrap();
+        let flags = kiseki_types::attr::Flags::from_bits_truncate(old_attr.flags as u8);
         if flags.contains(kiseki_types::attr::Flags::IMMUTABLE)
             || flags.contains(kiseki_types::attr::Flags::APPEND)
         {
@@ -1705,8 +1713,8 @@ impl Backend for RocksdbBackend {
         let mut write_batch = txn.get_writebatch();
         match flags {
             RenameFlags::EXCHANGE => {
-                // safety: we have checked before.
-                let dst_dentry = dst_dentry_opt.unwrap();
+                // EXCHANGE requires the destination to exist; checked above.
+                let dst_dentry = dst_dentry_opt.context(LibcSnafu { errno: libc::EIO })?;
                 set_dentry_in_write_batch(
                     &mut write_batch,
                     old_parent,
@@ -1714,7 +1722,7 @@ impl Backend for RocksdbBackend {
                     dst_dentry.inode,
                     dst_dentry.typ,
                 )?;
-                let dst_attr = dst_attr_opt.unwrap();
+                let dst_attr = dst_attr_opt.context(LibcSnafu { errno: libc::EIO })?;
                 set_attr_in_write_batch(&mut write_batch, dst_dentry.inode, &dst_attr)?;
                 if old_parent != new_parent && dst_attr.parent.is_zero() {
                     let cnt = do_get_hard_link_count(&txn, dst_dentry.inode, old_parent)?;
@@ -1741,7 +1749,8 @@ impl Backend for RocksdbBackend {
                 write_batch.delete(key::dentry(old_parent, old_name));
                 rocksdb_delete!();
                 if let Some(dst_attr) = dst_attr_opt {
-                    let dst_entry = dst_dentry_opt.unwrap();
+                    // a destination attr always comes with its dentry; checked above.
+                    let dst_entry = dst_dentry_opt.context(LibcSnafu { errno: libc::EIO })?;
                     if !matches!(dst_attr.kind, FileType::Directory) && dst_attr.nlink > 0 {
                         set_attr_in_write_batch(&mut write_batch, dst_entry.inode, &dst_attr)?;
                         if dst_attr.parent.is_zero() {

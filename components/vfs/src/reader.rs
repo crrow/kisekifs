@@ -54,24 +54,19 @@ impl DataManager {
         fh: FH,
         length: usize,
     ) -> Arc<FileReader> {
-        let mut outer_read_guard = self.file_readers.read().await;
-        if !outer_read_guard.contains_key(&inode) {
-            drop(outer_read_guard);
-
-            let mut out_write_guard = self.file_readers.write().await;
-            // check again
-            out_write_guard
-                .entry(inode)
-                .or_insert_with(Default::default);
-            drop(out_write_guard);
-
-            // acquire the read lock again.
-            outer_read_guard = self.file_readers.read().await;
-        }
-
-        let inner_map = outer_read_guard.get(&inode).unwrap().clone();
-        // Release the outer lock before acquiring the inner lock to avoid deadlock
-        drop(outer_read_guard);
+        // Release the outer lock before acquiring the inner lock to avoid
+        // deadlock.
+        let inner_map = {
+            let outer_read_guard = self.file_readers.read().await;
+            match outer_read_guard.get(&inode) {
+                Some(inner) => inner.clone(),
+                None => {
+                    drop(outer_read_guard);
+                    let mut out_write_guard = self.file_readers.write().await;
+                    out_write_guard.entry(inode).or_default().clone()
+                }
+            }
+        };
 
         // check if exists the file reader for the specified FH.
         let inner_read_guard = inner_map.read().await;

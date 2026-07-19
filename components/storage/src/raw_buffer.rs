@@ -26,7 +26,7 @@ use kiseki_utils::object_storage::ObjectStorage;
 use kiseki_utils::readable_size::ReadableSize;
 use opendal::Operator;
 use snafu::{ensure, ResultExt};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::err::{OpenDalSnafu, Result};
 
@@ -361,8 +361,14 @@ impl WriteBuffer {
                 async move {
                     debug!("flushing block: [{}], block_len: {} KiB", k, v.len() / 1024,);
                     let path = k.gen_path_for_object_sto();
-                    let path =
-                        kiseki_utils::object_storage::ObjectStoragePath::parse(&path).unwrap();
+                    let path = match kiseki_utils::object_storage::ObjectStoragePath::parse(&path) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            // errors are swallowed in this flush path; skip the bad key.
+                            warn!("invalid object storage path {path}: {e}");
+                            return;
+                        }
+                    };
                     let _ = sto.put(&path, bytes::Bytes::from(v)).await;
                     // let _ = cache.stage(k, Arc::new(v), true).await;
                 }

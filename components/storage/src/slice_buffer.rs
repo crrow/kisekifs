@@ -88,7 +88,9 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
         total_read_len += current_block_to_read_len;
 
         let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
-            let path = kiseki_utils::object_storage::ObjectStoragePath::parse(&key).unwrap();
+            let path = kiseki_utils::object_storage::ObjectStoragePath::parse(&key)
+                .map_err(kiseki_utils::object_storage::ObjectStorageError::from)
+                .context(ObjectStorageSnafu)?;
             let block = sto.get(&path).await.context(ObjectStorageSnafu)?;
             let block_buf = block.bytes().await.context(ObjectStorageSnafu)?;
 
@@ -406,7 +408,9 @@ impl SliceBuffer {
                 let sto = object_storage.clone();
                 let total_released_page_cnt = total_released_page_cnt.clone();
                 let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
-                    let path = ObjectStoragePath::parse(&key).unwrap();
+                    let path = ObjectStoragePath::parse(&key)
+                        .map_err(kiseki_utils::object_storage::ObjectStorageError::from)
+                        .context(ObjectStorageSnafu)?;
                     let (_id, mut writer) =
                         sto.put_multipart(&path).await.context(ObjectStorageSnafu)?;
                     // let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
