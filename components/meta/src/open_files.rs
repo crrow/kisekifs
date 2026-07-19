@@ -66,7 +66,9 @@ impl OpenFile {
     // decreases the reference count of the open file.
     async fn decrease_ref(&self) -> usize {
         let mut write_guard = self.0.write().await;
-        write_guard.reference_count -= 1;
+        // saturate at 0: an unpaired close must not underflow the unsigned
+        // count (which would wrap to a huge value and leak the open file).
+        write_guard.reference_count = write_guard.reference_count.saturating_sub(1);
         write_guard.reference_count
     }
 
