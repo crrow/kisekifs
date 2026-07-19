@@ -161,12 +161,9 @@ impl Filesystem for KisekiFuse {
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let ctx = Arc::new(FuseContext::from(_req));
-        let name = match name.to_str() {
-            Some(n) => n,
-            None => {
-                reply.error(libc::EINVAL);
-                return;
-            }
+        let Some(name) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
         };
 
         if name.len() > MAX_NAME_LENGTH {
@@ -584,7 +581,7 @@ impl Filesystem for KisekiFuse {
 
         let mut offset = offset + 1;
         debug!("get entry length: { }", entries.len());
-        for entry in entries.iter() {
+        for entry in &entries {
             if reply.add(
                 entry.get_inode().0,
                 offset,
@@ -622,7 +619,7 @@ impl Filesystem for KisekiFuse {
 
         let mut offset = offset + 1;
         debug!("get entry length: { }", entries.len());
-        for entry in entries.iter() {
+        for entry in &entries {
             if let Entry::Full(fe) = entry {
                 if reply.add(
                     entry.get_inode().0,

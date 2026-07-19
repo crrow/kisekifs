@@ -323,7 +323,7 @@ impl FileWriter {
         );
 
         let mut write_len = 0;
-        for (sw, state, l) in slice_writers.iter() {
+        for (sw, state, l) in &slice_writers {
             let data = &data[l.buf_start_at..l.buf_start_at + l.need_write_len];
             let n = sw
                 .write_at(*state, l.chunk_offset - sw.offset_of_chunk, data)
