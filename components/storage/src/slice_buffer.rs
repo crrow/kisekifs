@@ -64,7 +64,7 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
 
     let expected_read_len = min(length - offset, expected_read_len);
     let mut total_read_len = 0;
-    let mut hanldes = vec![];
+    let mut handles = vec![];
     let dst_ptr = dst.as_mut_ptr();
     let dst_len = dst.len();
 
@@ -100,11 +100,11 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
                 .context(UnknownIOSnafu)?;
             Ok(n)
         });
-        hanldes.push(handle);
+        handles.push(handle);
     }
 
     let mut actual_read_cnt = 0;
-    for x in futures::future::try_join_all(hanldes)
+    for x in futures::future::try_join_all(handles)
         .await
         .context(JoinErrSnafu)?
         .into_iter()
