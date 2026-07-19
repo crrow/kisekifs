@@ -188,13 +188,7 @@ impl FileReader {
             // then we get the range to read in current chunk.
             let current_read_range = chunk_pos..chunk_pos + max_can_read;
             // according to current chunk idx, we can get the slices.
-            let raw_slices = match meta_engine.read_slice(self.ino, chunk_idx).await {
-                Ok(v) => v,
-                Err(e) => {
-                    debug!("read slice error: {:?}", e);
-                    panic!("read slice error: {:?}", e);
-                }
-            };
+            let raw_slices = meta_engine.read_slice(self.ino, chunk_idx).await?;
             let raw_slices = match raw_slices {
                 None => {
                     debug!("no slice in chunk: {:?}", chunk_idx);
