@@ -42,6 +42,7 @@ pub(crate) type HandleTableRef = Arc<HandleTable>;
 
 pub(crate) struct HandleTable {
     data_manager: DataManagerRef,
+    #[allow(clippy::type_complexity)]
     handles:      RwLock<HashMap<Ino, Arc<RwLock<BTreeMap<FH, Handle>>>>>,
     _next_fh:     AtomicU64,
 }
@@ -407,8 +408,7 @@ impl FileHandle {
         {
             // wait for they notify that exclusive lock has been released or reader has been
             // released.
-            if cancel_token.is_some() {
-                let cancel_token = cancel_token.as_ref().unwrap().clone();
+            if let Some(cancel_token) = cancel_token.as_ref() {
                 tokio::select! {
                     _ = self.exclusive_lock_notify.notified() => {
                         debug!("exclusive lock is released")

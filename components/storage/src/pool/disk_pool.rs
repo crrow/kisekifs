@@ -16,7 +16,6 @@
 
 use std::{
     fmt::{Display, Formatter},
-    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -26,7 +25,6 @@ use fmmap::tokio::{AsyncMmapFileExt, AsyncMmapFileMut, AsyncMmapFileMutExt, Asyn
 use kiseki_utils::readable_size::ReadableSize;
 use snafu::ResultExt;
 use tokio::{
-    io::AsyncWriteExt,
     sync::{Notify, RwLock},
     time::Instant,
 };
@@ -131,7 +129,7 @@ impl Display for DiskPagePool {
     }
 }
 
-pub(crate) struct Page {
+pub struct Page {
     page_id: u64,
     pool:    Arc<DiskPagePool>,
 }

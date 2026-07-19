@@ -89,13 +89,15 @@ pub struct FormatArgs {
 
 impl FormatArgs {
     fn generate_format(&self) -> Format {
-        let mut format = Format::default();
-        format.max_capacity = self.capacity.map(|s| s.as_bytes_usize());
+        let mut format = Format {
+            max_capacity: self.capacity.map(|s| s.as_bytes_usize()),
+            block_size: self.block_size.as_bytes_usize(),
+            name: self.name.clone(),
+            ..Default::default()
+        };
         if let Some(inodes) = self.inodes {
             format.max_inodes = Some(inodes);
         }
-        format.block_size = self.block_size.as_bytes_usize();
-        format.name = self.name.clone();
         format
     }
 

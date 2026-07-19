@@ -326,7 +326,6 @@ pub fn record_operation_error(error_type: &str, operation: &str) {
 /// // ... do work
 /// // Timer automatically records when dropped
 /// ```
-
 /// Constants for metrics labels and operations
 ///
 /// These constants prevent typos and provide consistency across metrics
@@ -376,7 +375,6 @@ pub mod labels {
 ///
 /// These macros provide a lightweight way to record metrics without
 /// wrapping business logic or requiring complex setup code.
-
 /// Record a simple counter increment
 ///
 /// Usage: `metrics_counter!(lookups_total)`

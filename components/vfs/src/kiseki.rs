@@ -29,7 +29,6 @@ use kiseki_common::{
 };
 use kiseki_meta::{MetaEngineRef, context::FuseContext};
 use kiseki_types::{
-    ToErrno,
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
     ino::{CONTROL_INODE, Ino, ROOT_INO},
@@ -208,9 +207,9 @@ impl KisekiVFS {
     }
 
     fn invalidate_length(&self, ino: Ino) {
-        self.modified_at
-            .get_mut(&ino)
-            .map(|mut v| *v = std::time::Instant::now());
+        if let Some(mut v) = self.modified_at.get_mut(&ino) {
+            *v = std::time::Instant::now();
+        }
     }
 
     #[cfg(test)]
@@ -1824,6 +1823,7 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
 
 #[cfg(test)]
 mod tests {
+    use kiseki_types::ToErrno;
     use proptest::prelude::*;
     use rstest::rstest;
     use serial_test::serial;

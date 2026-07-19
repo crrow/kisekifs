@@ -204,9 +204,7 @@ impl SliceBuffer {
                 match block {
                     Block::Empty => {
                         // it is a hole, we should pad zero to the dst.
-                        for i in total_read_len..total_read_len + current_block_to_read_len {
-                            dst[i] = 0;
-                        }
+                        dst[total_read_len..total_read_len + current_page_to_read_len].fill(0);
                     }
                     Block::Data(db) => {
                         if let Some(page) = unsafe { db.pages.get_unchecked(page_idx) } {
@@ -218,9 +216,7 @@ impl SliceBuffer {
                                 .await?;
                         } else {
                             // it is a hole, we should pad zero to the dst.
-                            for i in total_read_len..total_read_len + current_block_to_read_len {
-                                dst[i] = 0;
-                            }
+                            dst[total_read_len..total_read_len + current_page_to_read_len].fill(0);
                         }
                     }
                 };

@@ -100,11 +100,11 @@ impl DataManager {
     /// [truncate_reader] is called when we modify the file length.
     /// Invoke this method to truncate the file reader's length.
     pub(crate) async fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
-        /// It's possible that the [FileReader] doesn't exist, even if we create
-        /// the FileReader in the [HandleTable::new_file_handle].
-        /// Since there are some other operation that can modify the file
-        /// length, such as [set_attr], etc. Especially when we haven't
-        /// open the file handle yet.
+        // It's possible that the [FileReader] doesn't exist, even if we create
+        // the FileReader in the [HandleTable::new_file_handle].
+        // Since there are some other operation that can modify the file
+        // length, such as [set_attr], etc. Especially when we haven't
+        // open the file handle yet.
         let out_read_guard = self.file_readers.read().await;
         if let Some(inner_map) = out_read_guard.get(&inode) {
             let inner_map = inner_map.clone();

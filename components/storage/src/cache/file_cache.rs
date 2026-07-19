@@ -20,25 +20,23 @@
 //!
 //! ## Where it will be used?
 //! 1. When slice buffer is going to flush, we take over the flush process,
-//! stage the data to the local file system first, then flush the data to the
-//! remote storage in the background.
+//!    stage the data to the local file system first, then flush the data to the
+//!    remote storage in the background.
 //! 2. When we read the slice, we first check the cache.
 //!
 //! ## Key Components
 //! 2. StageCache: when the block data is large, we treat the data as stage data
-//! put them in the stage cache dir, each block represents a file.
+//!    put them in the stage cache dir, each block represents a file.
 //! 3. Disk Eviction: When the cache is full, we need to evict the data from the
-//! disk to the remote storage.
+//!    disk to the remote storage.
 //! 4. Flusher: a background task periodically flush the expired data to the
-//!    remote
-//! storage.
+//!    remote storage.
 //! 5. Recover: when the system restarts, we will clean all cache and flush old
 //!    staged data to the remote storage.
 
 use std::{cmp::min, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use futures::{FutureExt, TryStreamExt};
 use kiseki_common::{BlockIndex, PAGE_SIZE};
 use kiseki_types::slice::{SliceID, SliceKey};
 use kiseki_utils::{
@@ -89,6 +87,9 @@ pub struct FileCache {
 }
 
 impl FileCache {
+    // The large `Err` variant comes from `opendal::Error`; boxing the error
+    // type is deferred to avoid touching the object storage facade.
+    #[allow(clippy::result_large_err)]
     pub fn new(config: Config, remote_storage: ObjectStorage) -> Result<Self> {
         // TODO: flush all the staged data to the remote storage at the beginning.
 

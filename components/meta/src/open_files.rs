@@ -239,7 +239,7 @@ impl OpenFiles {
             drop(read_guard);
 
             let new_ref_cnt = of.decrease_ref().await;
-            return new_ref_cnt <= 0;
+            return new_ref_cnt == 0;
         }
         true
     }

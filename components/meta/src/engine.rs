@@ -307,7 +307,7 @@ impl MetaEngine {
     pub async fn read_dir(&self, ctx: &FuseContext, inode: Ino, plus: bool) -> Result<Vec<Entry>> {
         debug!(dir=?inode, "readdir in plus?, {plus}");
         let inode = self.check_root(inode);
-        let mut attr = self.get_attr(inode).await?;
+        let attr = self.get_attr(inode).await?;
         let mmask = if plus {
             MODE_MASK_R | MODE_MASK_X
         } else {
@@ -315,10 +315,6 @@ impl MetaEngine {
         };
 
         ctx.check_access(&attr, mmask)?;
-
-        if inode == self.root {
-            attr.parent = self.root;
-        }
 
         // let mut basic_entries = Entry::new_basic_entry_pair(inode, attr.parent);
         let mut basic_entries = vec![];

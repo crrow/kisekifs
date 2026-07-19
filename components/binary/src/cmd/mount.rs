@@ -214,7 +214,12 @@ impl MountArgs {
     fn vfs_config(&self) -> VFSConfig { VFSConfig::default() }
 
     pub fn run(self) -> Result<(), Whatever> {
-        human_panic::setup_panic!();
+        // the `setup_panic!` expansion still uses the deprecated
+        // `std::panic::PanicInfo` alias; nothing to fix on our side.
+        #[allow(deprecated)]
+        {
+            human_panic::setup_panic!();
+        }
         kiseki_utils::panic_hook::set_panic_hook();
 
         if self.foreground {

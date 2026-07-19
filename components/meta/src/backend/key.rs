@@ -25,7 +25,7 @@ pub const NEXT_INODE: &str = "next_inode";
 pub const NEXT_SLICE: &str = "next_slice";
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
-pub(crate) enum Counter {
+pub enum Counter {
     UsedSpace,
     TotalInodes,
     LegacySessions,

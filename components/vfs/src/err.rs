@@ -26,13 +26,13 @@ pub enum Error {
         location: Location,
         source:   tokio::task::JoinError,
     },
-    OpenDalError {
+    OpenDal {
         #[snafu(implicit)]
         location: Location,
         source:   opendal::Error,
     },
 
-    ObjectStorageError {
+    ObjectStorage {
         #[snafu(implicit)]
         location: Location,
         source:   kiseki_utils::object_storage::ObjectStorageError,
@@ -44,15 +44,15 @@ pub enum Error {
         key:      SliceKey,
     },
 
-    StorageError {
+    Storage {
         source: kiseki_storage::err::Error,
     },
-    MetaError {
+    Meta {
         source: kiseki_meta::Error,
     },
 
     // ====VFS====
-    LibcError {
+    Libc {
         errno:    libc::c_int,
         #[snafu(implicit)]
         location: Location,
@@ -62,21 +62,21 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<kiseki_meta::Error> for Error {
-    fn from(value: kiseki_meta::Error) -> Self { Self::MetaError { source: value } }
+    fn from(value: kiseki_meta::Error) -> Self { Self::Meta { source: value } }
 }
 
 impl From<kiseki_storage::err::Error> for Error {
-    fn from(value: kiseki_storage::err::Error) -> Self { Self::StorageError { source: value } }
+    fn from(value: kiseki_storage::err::Error) -> Self { Self::Storage { source: value } }
 }
 
 impl kiseki_types::ToErrno for Error {
     fn to_errno(&self) -> kiseki_types::Errno {
         match self {
-            Self::LibcError { errno, .. } => {
+            Self::Libc { errno, .. } => {
                 error!("libc error: {}", errno);
                 *errno
             }
-            Self::MetaError { source } => {
+            Self::Meta { source } => {
                 error!("meta error: {}", source);
                 source.to_errno()
             }

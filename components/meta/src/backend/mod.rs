@@ -64,6 +64,8 @@ impl BackendKinds {
                 debug!("backend [rocksdb] is built with path: {}", path);
                 builder.build()
             }
+            // Only reachable when no backend feature is enabled.
+            #[cfg(not(feature = "meta-rocksdb"))]
             _ => unimplemented!("unsupported backend"),
         }
     }

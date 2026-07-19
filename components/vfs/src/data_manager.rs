@@ -44,6 +44,7 @@ pub(crate) struct DataManager {
     pub(crate) block_size:     usize,
     pub(crate) chunk_size:     usize,
     pub(crate) file_writers:   FileWritersRef,
+    #[allow(clippy::type_complexity)]
     pub(crate) file_readers:   RwLock<HashMap<Ino, Arc<RwLock<HashMap<FH, Arc<FileReader>>>>>>,
     pub(crate) id_generator:   Arc<sonyflake::Sonyflake>,
     // Dependencies

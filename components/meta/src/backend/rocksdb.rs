@@ -103,7 +103,7 @@ use crate::{
 /// - Batch operations ensure multiple related updates commit together
 /// - Transaction isolation prevents partial state visibility
 /// - Write-ahead logging provides crash recovery
-
+///
 /// Constants for file permissions and operation modes - POSIX compliant
 mod constants {
     // POSIX.1-2008 Section 4.5: File permission bits
@@ -2171,11 +2171,15 @@ mod tests {
         // Test that batch operations work correctly
         let parent = Ino(1);
         let child = Ino(2);
-        let mut parent_attr = InodeAttr::default();
-        parent_attr.kind = FileType::Directory;
+        let parent_attr = InodeAttr {
+            kind: FileType::Directory,
+            ..Default::default()
+        };
 
-        let mut child_attr = InodeAttr::default();
-        child_attr.kind = FileType::RegularFile;
+        let child_attr = InodeAttr {
+            kind: FileType::RegularFile,
+            ..Default::default()
+        };
 
         // Set up parent directory
         backend.set_attr(parent, &parent_attr).unwrap();

@@ -14,6 +14,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// `err::Error` transitively embeds `opendal::Error` (via the meta and storage
+// error types); boxing those variants is deferred to avoid touching the object
+// storage facade, so the large-Err lint is silenced crate-wide for now.
+#![allow(clippy::result_large_err)]
+
 mod config;
 
 pub use config::Config;

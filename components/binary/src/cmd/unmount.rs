@@ -14,7 +14,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{ffi::CString, path::PathBuf, process::Command};
+use std::{
+    ffi::CString,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use clap::Args;
 use snafu::{ResultExt, Whatever};
@@ -45,7 +49,7 @@ impl UmountArgs {
 
     /// Unmount using fuser-compatible approach
     /// This follows the same logic as fuser's internal unmount implementation
-    fn fuser_unmount(&self, mountpoint: &PathBuf) -> std::io::Result<()> {
+    fn fuser_unmount(&self, mountpoint: &Path) -> std::io::Result<()> {
         // Convert path to CString for libc calls
         let mountpoint_cstr =
             CString::new(mountpoint.canonicalize()?.as_os_str().as_encoded_bytes())?;

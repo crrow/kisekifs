@@ -17,7 +17,7 @@
 use std::{
     cell::UnsafeCell,
     fmt::{Display, Formatter},
-    io::{Cursor, Write},
+    io::Cursor,
     sync::Arc,
 };
 
@@ -56,6 +56,9 @@ impl Slot {
         }
     }
 
+    // SAFETY: each page id is handed out to at most one `Page` at a time by the
+    // pool's queue, so the caller has exclusive access to this slot's buffer.
+    #[allow(clippy::mut_from_ref)]
     fn get_mut_inner_slice(&self, offset: usize, len: usize) -> &mut [u8] {
         unsafe {
             std::slice::from_raw_parts_mut(
@@ -98,7 +101,7 @@ impl MemoryPagePool {
         let slots = page_buffer
             .chunks_exact_mut(page_size)
             .map(|chunk| {
-                let buf: &mut [u8] = chunk.try_into().unwrap();
+                let buf: &mut [u8] = chunk;
                 Slot {
                     inner: UnsafeCell::new(buf),
                     page_size,
@@ -247,7 +250,7 @@ mod tests {
         let slots: Box<[Slot]> = page_buffer
             .chunks_exact_mut(page_size)
             .map(|chunk| {
-                let buf: &mut [u8] = chunk.try_into().unwrap();
+                let buf: &mut [u8] = chunk;
                 Slot {
                     inner: UnsafeCell::new(buf),
                     page_size,
