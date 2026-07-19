@@ -208,8 +208,8 @@ impl InodeAttr {
         self.ctime = time;
     }
 
-    /// [update_modification_time_if] check if we need to update the
-    /// modification time  according to the [skip_update_duration]
+    /// Checks whether the modification time needs updating according to
+    /// `skip_update_duration`.
     pub fn update_modification_time_if(
         &mut self,
         now: SystemTime,

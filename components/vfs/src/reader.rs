@@ -46,8 +46,8 @@ use crate::{
 };
 
 impl DataManager {
-    /// [open_file_reader] will create [FileReader] for the given [Ino] and [FH]
-    /// if not exists.
+    /// [`Self::open_file_reader`] creates a [FileReader] for the given [Ino]
+    /// and [FH] if not exists.
     pub(crate) async fn open_file_reader(
         self: &Arc<Self>,
         inode: Ino,
@@ -97,7 +97,7 @@ impl DataManager {
         fr
     }
 
-    /// [truncate_reader] is called when we modify the file length.
+    /// [`Self::truncate_reader`] is called when the file length changes.
     /// Invoke this method to truncate the file reader's length.
     pub(crate) async fn truncate_reader(self: &Arc<Self>, inode: Ino, length: u64) {
         // It's possible that the [FileReader] doesn't exist, even if we create
@@ -150,7 +150,7 @@ pub(crate) struct FileReader {
 }
 
 impl FileReader {
-    /// [read] will read the content of file from the specified [offset].
+    /// [`Self::read`] reads file content from the specified `offset`.
     pub(crate) async fn read(self: &Arc<Self>, offset: usize, dst: &mut [u8]) -> Result<usize> {
         let expected_read_len = dst.len();
         let length = self.length.load(Ordering::Acquire);

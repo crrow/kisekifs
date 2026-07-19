@@ -173,7 +173,7 @@ impl KisekiVFS {
         Ok(attr)
     }
 
-    /// [get_entry_ttl] return the entry timeout according to the given file
+    /// [`Self::get_entry_ttl`] returns the entry timeout for the given file
     /// type.
     pub fn get_entry_ttl(&self, kind: FileType) -> &Duration {
         if kind == FileType::Directory {
@@ -183,7 +183,7 @@ impl KisekiVFS {
         }
     }
 
-    /// [try_update_file_reader_length] is used for checking and update the file
+    /// [`Self::try_update_file_reader_length`] checks and updates the file
     /// reader length.
     pub async fn try_update_file_reader_length(&self, inode: Ino, attr: &mut InodeAttr) {
         if attr.is_file() {
@@ -350,14 +350,14 @@ impl KisekiVFS {
     /// metadata. This corresponds to the statfs(2) system call.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
-    /// * `ino`: [I: Into<Ino>] - The inode number to query. Can be any valid
+    /// * `ino`: `I: Into<Ino>` - The inode number to query. Can be any valid
     ///   inode, though typically the root inode is used for filesystem
     ///   statistics.
     ///
     /// # Returns
-    /// * [Result<kiseki_types::stat::FSStat>] - Returns filesystem statistics
+    /// * `Result<kiseki_types::stat::FSStat>` - Returns filesystem statistics
     ///   including:
     ///   - Total blocks and free blocks
     ///   - Total inodes and free inodes
@@ -402,7 +402,7 @@ impl KisekiVFS {
     /// traditional filesystems.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata such as uid, gid, and process information for permission
     ///   checking
     /// * `parent`: [Ino] - The inode number of the parent directory to search
@@ -410,7 +410,7 @@ impl KisekiVFS {
     /// * `name`: [&str] - The name of the file or directory to look up
     ///
     /// # Returns
-    /// * [Result<FullEntry>] - Returns a `FullEntry` containing:
+    /// * `Result<FullEntry>` - Returns a `FullEntry` containing:
     ///   - `inode`: The inode number of the found entry
     ///   - `name`: The name of the entry (same as input)
     ///   - `attr`: Complete inode attributes including type, permissions,
@@ -478,7 +478,7 @@ impl KisekiVFS {
     /// * `inode`: [Ino] - The inode number to retrieve attributes for
     ///
     /// # Returns
-    /// * [Result<InodeAttr>] - Returns inode attributes including:
+    /// * `Result<InodeAttr>` - Returns inode attributes including:
     ///   - File type (regular file, directory, symlink, etc.)
     ///   - Access permissions (mode)
     ///   - File size in bytes
@@ -533,23 +533,23 @@ impl KisekiVFS {
     /// and the setattr operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata such as uid, gid for permission checking
     /// * `ino`: [Ino] - The inode number to modify attributes for
     /// * `flags`: [u32] - Bitmask specifying which attributes to modify
     ///   (SetAttrFlags)
-    /// * `atime`: [Option<TimeOrNow>] - New access time, if ATIME flag is set
-    /// * `mtime`: [Option<TimeOrNow>] - New modification time, if MTIME flag is
+    /// * `atime`: `Option<TimeOrNow>` - New access time, if ATIME flag is set
+    /// * `mtime`: `Option<TimeOrNow>` - New modification time, if MTIME flag is
     ///   set
-    /// * `mode`: [Option<u32>] - New file permissions, if MODE flag is set
-    /// * `uid`: [Option<u32>] - New owner user ID, if UID flag is set
-    /// * `gid`: [Option<u32>] - New owner group ID, if GID flag is set
-    /// * `size`: [Option<u64>] - New file size for truncation, if SIZE flag is
+    /// * `mode`: `Option<u32>` - New file permissions, if MODE flag is set
+    /// * `uid`: `Option<u32>` - New owner user ID, if UID flag is set
+    /// * `gid`: `Option<u32>` - New owner group ID, if GID flag is set
+    /// * `size`: `Option<u64>` - New file size for truncation, if SIZE flag is
     ///   set
-    /// * `fh`: [Option<u64>] - Optional file handle for size operations
+    /// * `fh`: `Option<u64>` - Optional file handle for size operations
     ///
     /// # Returns
-    /// * [Result<InodeAttr>] - Returns the updated inode attributes after
+    /// * `Result<InodeAttr>` - Returns the updated inode attributes after
     ///   modification
     ///
     /// # Errors
@@ -731,12 +731,12 @@ impl KisekiVFS {
     /// to the open(2) system call and the open operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [&FuseContext] - The FUSE context containing request metadata
+    /// * `ctx`: `&FuseContext` - The FUSE context containing request metadata
     /// * `inode`: [Ino] - The inode number of the file to open
     /// * `flags`: [i32] - Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
     ///
     /// # Returns
-    /// * [Result<Opened>] - Returns an `Opened` structure containing:
+    /// * `Result<Opened>` - Returns an `Opened` structure containing:
     ///   - `fh`: File handle identifier for subsequent operations
     ///   - `flags`: Open flags for the file handle
     ///   - `inode`: The inode number that was opened
@@ -807,17 +807,17 @@ impl KisekiVFS {
     /// read operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
     /// * `ino`: [Ino] - The inode number of the file to read from
     /// * `fh`: [u64] - File handle returned by open operation
     /// * `offset`: [i64] - Byte offset within the file to start reading from
     /// * `size`: [u32] - Number of bytes to read
     /// * `_flags`: [i32] - Read flags (currently unused)
-    /// * `_lock`: [Option<u64>] - File lock information (currently unused)
+    /// * `_lock`: `Option<u64>` - File lock information (currently unused)
     ///
     /// # Returns
-    /// * [Result<Bytes>] - Returns the read data as a `Bytes` object. The
+    /// * `Result<Bytes>` - Returns the read data as a `Bytes` object. The
     ///   actual number of bytes read may be less than requested if EOF is
     ///   reached.
     ///
@@ -909,7 +909,7 @@ impl KisekiVFS {
     /// write operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
     /// * `ino`: [Ino] - The inode number of the file to write to
     /// * `fh`: [u64] - File handle returned by open operation
@@ -917,11 +917,11 @@ impl KisekiVFS {
     /// * `data`: [&[u8]] - The data to write to the file
     /// * `_write_flags`: [u32] - Write flags (currently unused)
     /// * `_flags`: [i32] - Additional flags (currently unused)
-    /// * `_lock_owner`: [Option<u64>] - Lock owner information (currently
+    /// * `_lock_owner`: `Option<u64>` - Lock owner information (currently
     ///   unused)
     ///
     /// # Returns
-    /// * [Result<u32>] - Returns the number of bytes actually written
+    /// * `Result<u32>` - Returns the number of bytes actually written
     ///
     /// # Errors
     /// This function may return errors if:
@@ -1010,7 +1010,7 @@ impl KisekiVFS {
     /// call behavior and the flush operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
     /// * `ino`: [Ino] - The inode number of the file to flush
     /// * `fh`: [u64] - File handle to flush
@@ -1112,7 +1112,7 @@ impl KisekiVFS {
     /// fdatasync(2) system calls and the fsync operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
     /// * `ino`: [Ino] - The inode number of the file to synchronize
     /// * `fh`: [u64] - File handle to synchronize
@@ -1333,7 +1333,7 @@ impl KisekiVFS {
     /// and the mkdir operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
     /// * `parent`: [Ino] - The inode number of the parent directory
     /// * `name`: [&str] - The name of the new directory to create
@@ -1341,7 +1341,7 @@ impl KisekiVFS {
     /// * `umask`: [u32] - The umask to apply when setting permissions
     ///
     /// # Returns
-    /// * [Result<FullEntry>] - Returns a `FullEntry` containing the new
+    /// * `Result<FullEntry>` - Returns a `FullEntry` containing the new
     ///   directory's inode number, name, and attributes
     ///
     /// # Errors
@@ -1483,7 +1483,7 @@ impl KisekiVFS {
     /// create operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
     /// * `parent`: [Ino] - The inode number of the parent directory
     /// * `name`: [&str] - The name of the new file to create
@@ -1647,7 +1647,7 @@ impl KisekiVFS {
     /// * `parent`: [Ino] - the inode number of the parent directory where the
     ///   symbolic link will be created.
     /// * `link_name`: [&str] - the name of the symbolic link.
-    /// * `target`: [&Path] - the path to the file or directory that the
+    /// * `target`: `&Path` - the path to the file or directory that the
     ///   symbolic link
     ///
     /// # Returns
@@ -1713,7 +1713,7 @@ impl KisekiVFS {
     /// rename(2) system call and the rename operation in FUSE.
     ///
     /// # Arguments
-    /// * `ctx`: [Arc<FuseContext>] - The FUSE context containing request
+    /// * `ctx`: `Arc<FuseContext>` - The FUSE context containing request
     ///   metadata
     /// * `parent`: [Ino] - The inode number of the current parent directory
     /// * `name`: [&str] - The current name of the file or directory

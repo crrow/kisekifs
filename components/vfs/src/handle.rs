@@ -294,7 +294,7 @@ impl FileHandle {
         })
     }
 
-    /// [write_lock] will block until it gets the exclusive lock for the
+    /// [`Self::write_lock`] blocks until it gets the exclusive lock for the
     /// [FileHandle]. When there is no [FileWriter], then this function will
     /// return None. FIXME: add timeout mechanism
     #[instrument(skip(self))]

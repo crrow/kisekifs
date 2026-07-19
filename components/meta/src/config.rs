@@ -28,7 +28,7 @@ pub struct MetaConfig {
     pub open_cache:       Duration,
     /// max number of open files to cache (soft limit, 0 means unlimited)
     pub open_cache_limit: usize,
-    /// [skip_dir_mtime] skip updating attribute of a directory if the mtime
+    /// `skip_dir_mtime` skips updating a directory attribute if the mtime
     /// difference is smaller than this value
     pub skip_dir_mtime:   Duration,
 }

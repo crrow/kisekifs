@@ -101,8 +101,8 @@ pub trait Backend: Send + Sync {
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()>;
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat>;
 
-    /// [do_mknod] creates a node in a directory with given name, type and
-    /// permissions.
+    /// [`Self::do_mknod`] creates a node in a directory with given name, type
+    /// and permissions.
     fn do_mknod(
         &self,
         ctx: Arc<FuseContext>,
@@ -114,8 +114,9 @@ pub trait Backend: Send + Sync {
         path: String,
     ) -> Result<(Ino, InodeAttr)>;
 
-    /// [do_rmdir] removes a directory from the filesystem. The directory must
-    /// be empty. return the removed directory entry and its attribute
+    /// [`Self::do_rmdir`] removes a directory from the filesystem. The
+    /// directory must be empty. return the removed directory entry and its
+    /// attribute
     fn do_rmdir(
         &self,
         ctx: Arc<FuseContext>,
@@ -126,7 +127,7 @@ pub trait Backend: Send + Sync {
         skip_dir_mtime: Duration,
     ) -> Result<(DEntry, InodeAttr)>;
 
-    /// [truncate] changes the length for given file.
+    /// [`Self::do_truncate`] changes the length of the given file.
     fn do_truncate(
         &self,
         ctx: Arc<FuseContext>,
@@ -135,9 +136,9 @@ pub trait Backend: Send + Sync {
         skip_perm_check: bool,
     ) -> Result<InodeAttr>;
 
-    /// [do_link] creates an entry for the inode, return the new [InodeAttr].
-    /// Creating another directory entry (filename) that points directly to the
-    /// same inode as the original file.
+    /// [`Self::do_link`] creates an entry for the inode and returns the new
+    /// [InodeAttr]. Creating another directory entry (filename) that points
+    /// directly to the same inode as the original file.
     fn do_link(
         &self,
         ctx: Arc<FuseContext>,
@@ -146,7 +147,7 @@ pub trait Backend: Send + Sync {
         new_name: &str,
     ) -> Result<InodeAttr>;
 
-    /// [do_unlink] removes a file entry from a directory.
+    /// [`Self::do_unlink`] removes a file entry from a directory.
     /// return the freed space size and inode count.
     async fn do_unlink(
         &self,
@@ -157,7 +158,7 @@ pub trait Backend: Send + Sync {
         open_files_ref: OpenFilesRef,
     ) -> Result<UnlinkResult>;
 
-    /// do_delete_chunks try to delete all [free] slices of a file,
+    /// `do_delete_chunks` tries to delete all free slices of a file;
     /// free means that slice is not been borrowed.
     fn do_delete_chunks(&self, inode: Ino);
 

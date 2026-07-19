@@ -107,7 +107,7 @@ impl OpenFiles {
         }
     }
 
-    /// [load] fetches the [OpenFile] from the cache.
+    /// [`Self::load`] fetches the [OpenFile] from the cache.
     pub(crate) async fn load(&self, inode: &Ino) -> Option<OpenFile> {
         let read_guard = self.files.read().await;
         let of = read_guard.get(inode).cloned();
@@ -115,8 +115,8 @@ impl OpenFiles {
         of
     }
 
-    /// [open] create a new [OpenFile] if it does not exist, otherwise increase
-    /// the reference count.
+    /// [`Self::open`] creates a new [OpenFile] if it does not exist; otherwise
+    /// it increases the reference count.
     pub(crate) async fn open(&self, inode: Ino, attr: &mut InodeAttr) {
         let read_guard = self.files.read().await;
         let of = match read_guard.get(&inode) {
@@ -158,7 +158,7 @@ impl OpenFiles {
         write_guard.last_check = SystemTime::now();
     }
 
-    /// [load_attr] fetches the [InodeAttr] from the cache, if it is not
+    /// [`Self::load_attr`] fetches the [InodeAttr] from the cache if it is not
     /// expired.
     pub(crate) async fn load_attr(&self, ino: Ino, add_ref: bool) -> Option<InodeAttr> {
         let outer_read_guard = self.files.read().await;
@@ -179,7 +179,8 @@ impl OpenFiles {
         None
     }
 
-    /// [load_slices] fetches the [Slices] from the cache, if it is not expired.
+    /// [`Self::load_slices`] fetches the [Slices] from the cache if it is not
+    /// expired.
     pub(crate) async fn load_slices(
         &self,
         inode: Ino,
@@ -197,7 +198,7 @@ impl OpenFiles {
         None
     }
 
-    /// [refresh_attr] refresh the open file's [InodeAttr].
+    /// [`Self::refresh_attr`] refreshes the open file's [InodeAttr].
     pub(crate) async fn refresh_attr(&self, ino: Ino, attr: &mut InodeAttr) {
         let read_guard = self.files.read().await;
         if let Some(of) = read_guard.get(&ino).cloned() {
@@ -233,7 +234,7 @@ impl OpenFiles {
         }
     }
 
-    /// [close] a file, under the hood, it just decreases the reference count.
+    /// [`Self::close`] closes a file by decreasing its reference count.
     pub(crate) async fn close(&self, ino: Ino) -> bool {
         let read_guard = self.files.read().await;
         if let Some(of) = read_guard.get(&ino) {

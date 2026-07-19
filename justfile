@@ -33,7 +33,7 @@ PWD := invocation_directory()
 # Lint and automatically fix what we can fix
 @lint:
     cargo clippy --workspace --all-targets --all-features --no-deps -- -D warnings
-    cargo doc --workspace --all-features --no-deps --document-private-items
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --document-private-items
 
 @fmt:
     cargo +nightly fmt --all

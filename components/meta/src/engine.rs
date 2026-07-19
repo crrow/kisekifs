@@ -193,7 +193,7 @@ impl MetaEngine {
     #[instrument(skip(self))]
     pub async fn next_slice_id(&self) -> Result<SliceID> { self.free_slices.next().await }
 
-    /// [stat_fs] returns summary statistics of a volume.
+    /// [`Self::stat_fs`] returns summary statistics of a volume.
     ///
     /// TODO: support chroot ?
     pub fn stat_fs(&self, _ctx: Arc<FuseContext>, _inode: Ino) -> Result<FSStat> {
@@ -417,7 +417,7 @@ impl MetaEngine {
         }
     }
 
-    /// [rmdir] removes an empty subdirectory.
+    /// [`Self::rmdir`] removes an empty subdirectory.
     pub async fn rmdir(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
         let parent = self.check_root(parent);
         let (dentry, _) = self
@@ -940,9 +940,9 @@ impl MetaEngine {
         Ok(())
     }
 
-    /// [close] a file, try to decrease the reference count of the OpenFile,
-    /// if the reference count is zero, then we can remove the file from the
-    /// cache.
+    /// [`Self::close`] closes a file by decreasing the reference count of the
+    /// open file; if the reference count is zero, then we can remove the
+    /// file from the cache.
     pub async fn close(&self, inode: Ino) -> Result<()> {
         if self.open_files.close(inode).await {
             let mut write_guard = self.removed_files.write().await;
@@ -953,9 +953,9 @@ impl MetaEngine {
         Ok(())
     }
 
-    /// [truncate] changes the length for given file.
+    /// [`Self::truncate`] changes the length of the given file.
     ///
-    /// When the [set_attr] operation carry the [FH], then we can skip the perm
+    /// When the `set_attr` operation carries an `FH`, the permission
     /// check.
     pub async fn truncate(
         &self,
