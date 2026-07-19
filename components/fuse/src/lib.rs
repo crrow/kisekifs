@@ -322,11 +322,11 @@ impl Filesystem for KisekiFuse {
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let ctx = Arc::new(FuseContext::from(_req));
-        match self.runtime.block_on(
-            self.vfs
-                .unlink(ctx, Ino(parent), name.to_str().unwrap())
-                .in_current_span(),
-        ) {
+        let name = name.to_string_lossy();
+        match self
+            .runtime
+            .block_on(self.vfs.unlink(ctx, Ino(parent), &name).in_current_span())
+        {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         }
@@ -335,11 +335,11 @@ impl Filesystem for KisekiFuse {
     #[instrument(level = "warn", skip_all, fields(req = _req.unique(), parent = parent, name = ? name))]
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let ctx = Arc::new(FuseContext::from(_req));
-        match self.runtime.block_on(
-            self.vfs
-                .rmdir(ctx, Ino(parent), name.to_str().unwrap())
-                .in_current_span(),
-        ) {
+        let name = name.to_string_lossy();
+        match self
+            .runtime
+            .block_on(self.vfs.rmdir(ctx, Ino(parent), &name).in_current_span())
+        {
             Ok(_) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         };
@@ -355,14 +355,10 @@ impl Filesystem for KisekiFuse {
         reply: ReplyEntry,
     ) {
         let ctx = Arc::new(FuseContext::from(_req));
+        let link_name = link_name.to_string_lossy();
         match self.runtime.block_on(
             self.vfs
-                .symlink(
-                    ctx.clone(),
-                    Ino(parent),
-                    link_name.to_str().unwrap(),
-                    target,
-                )
+                .symlink(ctx.clone(), Ino(parent), &link_name, target)
                 .in_current_span(),
         ) {
             Ok(e) => self.reply_entry(&ctx, reply, e),
@@ -388,16 +384,11 @@ impl Filesystem for KisekiFuse {
         reply: ReplyEmpty,
     ) {
         let ctx = Arc::new(FuseContext::from(req));
+        let name = name.to_string_lossy();
+        let newname = newname.to_string_lossy();
         match self.runtime.block_on(
             self.vfs
-                .rename(
-                    ctx,
-                    Ino(parent),
-                    name.to_str().unwrap(),
-                    Ino(newparent),
-                    newname.to_str().unwrap(),
-                    flags,
-                )
+                .rename(ctx, Ino(parent), &name, Ino(newparent), &newname, flags)
                 .in_current_span(),
         ) {
             Ok(()) => reply.ok(),
@@ -415,14 +406,10 @@ impl Filesystem for KisekiFuse {
         reply: ReplyEntry,
     ) {
         let ctx = Arc::new(FuseContext::from(_req));
+        let new_name = new_name.to_string_lossy();
         match self.runtime.block_on(
             self.vfs
-                .link(
-                    ctx.clone(),
-                    Ino(ino),
-                    Ino(new_parent),
-                    new_name.to_str().unwrap(),
-                )
+                .link(ctx.clone(), Ino(ino), Ino(new_parent), &new_name)
                 .in_current_span(),
         ) {
             Ok(entry) => self.reply_entry(&ctx, reply, entry),
