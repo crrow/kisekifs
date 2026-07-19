@@ -490,7 +490,7 @@ impl MetaEngine {
             FileType::Symlink => crate::metrics::labels::TYPE_SYMLINK,
             _ => crate::metrics::labels::TYPE_OTHER,
         };
-        crate::metrics_counter_with_labels!(inodes_created_total, 
+        crate::metrics_counter_with_labels!(inodes_created_total,
             crate::metrics::labels::TYPE => inode_type);
         crate::metrics_fs_file_count_change!(1);
         crate::metrics_fs_size_change!(4096);
@@ -1008,10 +1008,10 @@ impl MetaEngine {
             .await?;
 
         // Record business metrics for unlink
-        crate::metrics_counter_with_labels!(file_ops_total, 
+        crate::metrics_counter_with_labels!(file_ops_total,
             crate::metrics::labels::OPERATION => crate::metrics::labels::OP_UNLINK);
         if unlink_result.freed_inode > 0 {
-            crate::metrics_counter_with_labels!(inodes_deleted_total, 
+            crate::metrics_counter_with_labels!(inodes_deleted_total,
                 crate::metrics::labels::TYPE => crate::metrics::labels::TYPE_REGULAR_FILE);
         }
         crate::metrics_fs_size_change!(-(unlink_result.freed_space as i64));
@@ -1138,7 +1138,7 @@ impl MetaEngine {
 
         // Record business metrics for rename - we'll determine the type from backend
         // For now, record as generic operation
-        crate::metrics_histogram_with_labels!(fs_operation_duration_ms, 0.0, 
+        crate::metrics_histogram_with_labels!(fs_operation_duration_ms, 0.0,
             crate::metrics::labels::OPERATION => crate::metrics::labels::OP_RENAME);
 
         if let Some((inode, opened)) = rename_result.need_delete {

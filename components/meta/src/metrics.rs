@@ -62,7 +62,7 @@ pub struct BusinessMetrics {
     // === Cache and Resource Metrics ===
     /// Cache hit rate for file attributes
     pub attr_cache_hits_total:   Counter<u64>,
-    /// Cache miss rate for file attributes  
+    /// Cache miss rate for file attributes
     pub attr_cache_misses_total: Counter<u64>,
     /// Number of currently open files
     pub open_files_total:        Counter<u64>,
@@ -214,7 +214,7 @@ pub fn record_inode_created(inode_type: &str) {
     metrics.inodes_created_total.add(1, labels);
 }
 
-/// Record inode deletion by type  
+/// Record inode deletion by type
 pub fn record_inode_deleted(inode_type: &str) {
     let metrics = get_business_metrics();
     let labels = &[KeyValue::new("type", inode_type.to_string())];

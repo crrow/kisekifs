@@ -110,7 +110,7 @@ mod constants {
     #[allow(dead_code)] // May be used by future POSIX operations
     pub const S_ISUID: u32 = 0o4000; // Set-user-ID on execution (setuid bit)
     #[allow(dead_code)] // False positive: actually used in Linux-specific code
-    pub const S_ISGID: u32 = 0o2000; // Set-group-ID on execution (setgid bit)  
+    pub const S_ISGID: u32 = 0o2000; // Set-group-ID on execution (setgid bit)
     pub const S_ISVTX: u32 = 0o1000; // Sticky bit (restricted deletion flag)
 
     #[allow(dead_code)] // Used in specific Linux filesystem scenarios
@@ -166,7 +166,7 @@ macro_rules! db_try {
     };
 }
 
-/// Macro for model operations with automatic error context  
+/// Macro for model operations with automatic error context
 macro_rules! model_try {
     ($op:expr) => {
         $op.context(ModelSnafu)?

@@ -16,7 +16,7 @@
 
 //! A write-back cache for immutable Object Blocks, which will be used both for
 //! the reading and flushing. It puts data in the local file system, and also
-//! maintains a memory index.  
+//! maintains a memory index.
 //!
 //! ## Where it will be used?
 //! 1. When slice buffer is going to flush, we take over the flush process,

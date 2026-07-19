@@ -1917,7 +1917,7 @@ mod tests {
             assert_eq!(attr.length, expected_size, "Size mismatch");
         }
 
-        /// 验证目录属性的辅助函数  
+        /// 验证目录属性的辅助函数
         pub fn assert_dir_attr(attr: &InodeAttr, expected_mode: u32) {
             assert!(attr.is_dir(), "Expected directory type");
             assert_eq!(attr.mode, expected_mode, "Mode mismatch");
