@@ -230,7 +230,7 @@ impl InodeAttr {
     // Enforces different access levels for owner, group, and others.
     // Grants full access to the root user.
     // Determines access based on user and group IDs.
-    pub fn access_mode(&self, uid: u32, gids: &Vec<u32>) -> u8 {
+    pub fn access_mode(&self, uid: u32, gids: &[u32]) -> u8 {
         if uid == 0 {
             // If uid is 0 (root user), returns 0x7 (full access) unconditionally.
             return 0x7;
@@ -246,10 +246,8 @@ impl InodeAttr {
         // If any gid matches attr.Gid (file group),
         // extracts group permissions by shifting mode 3 bits to the right and masking
         // with 7.
-        for gid in gids {
-            if *gid == self.gid {
-                return (perm >> 3) as u8 & 7;
-            }
+        if gids.contains(&self.gid) {
+            return (perm >> 3) as u8 & 7;
         }
         // If no previous conditions match,
         // returns other permissions by masking mode with 7.
