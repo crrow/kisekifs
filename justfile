@@ -34,20 +34,12 @@ PWD := invocation_directory()
 @lint:
     cargo clippy --workspace --all-targets --all-features --no-deps -- -D warnings
     cargo doc --workspace --all-features --no-deps --document-private-items
-    cd api && buf lint
-    cd examples/goclient && golangci-lint run
 
 @fmt:
     cargo +nightly fmt --all
     taplo format
     taplo format --check
     hawkeye format
-    cd api && buf format -w
-
-[working-directory: 'examples/goclient']
-@fmt-go:
-    go mod tidy
-    go fmt ./...
 
 alias c := check
 @check:
@@ -104,7 +96,7 @@ alias sh-m := help-mount
 
 alias sh-um := help-umount
 @help-umount:
-    cargo run --color=always --packgae kiseki-binary help umount
+    cargo run --color=always --package kiseki-binary help umount
 
 @umount:
     cargo run --release --color=always --package kiseki-binary umount
