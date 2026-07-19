@@ -69,7 +69,7 @@ impl Counter {
             Counter::NextTrash => 1,
             Counter::NextInode => 1 << 10,
             Counter::NextSlice => 4 << 10,
-            _ => panic!("Counter {:?} does not have a step", self),
+            _ => panic!("Counter {self:?} does not have a step"),
         }
     }
 }
@@ -124,6 +124,6 @@ pub fn chunk_slices_prefix(inode: Ino) -> Vec<u8> { format!("A{:0>8}C/", inode.0
 
 /// slice_ref tracks how many borrow slices are referencing to an Owned slice.
 /// We can only delete the slice when the reference count is zero.
-pub fn slice_ref(slice_id: SliceID) -> Vec<u8> { format!("K{:0>8}", slice_id).into_bytes() }
+pub fn slice_ref(slice_id: SliceID) -> Vec<u8> { format!("K{slice_id:0>8}").into_bytes() }
 
 pub fn dir_stat(inode: Ino) -> Vec<u8> { format!("U{:0>8}I", inode.0).into_bytes() }
