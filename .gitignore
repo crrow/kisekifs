@@ -23,3 +23,5 @@ public/
 __debug_bin
 
 .env
+
+.worktrees/
