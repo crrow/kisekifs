@@ -19,10 +19,10 @@ S3. The corresponding metadata can be stored in various databases such as Redis,
 scenarios and requirements.
 ```
 
-FUSE must be installed to build or run programs that use fuse-rs (i.e. kernel driver and libraries. Some platforms may
+FUSE must be installed to build or run programs that use fuser (i.e. kernel driver and libraries. Some platforms may
 also require userland utils like `fusermount`). A default installation of FUSE is usually sufficient.
 
-To build fuse-rs or any program that depends on it, `pkg-config` needs to be installed as well.
+To build fuser or any program that depends on it, `pkg-config` needs to be installed as well.
 
 ## Difference with juicefs
 
