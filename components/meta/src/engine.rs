@@ -394,7 +394,7 @@ impl MetaEngine {
         mode: u32,
         umask: u32,
     ) -> Result<(Ino, InodeAttr)> {
-        return match self
+        match self
             .mknod(
                 ctx,
                 parent,
@@ -414,7 +414,7 @@ impl MetaEngine {
                 Ok(r)
             }
             Err(e) => Err(e),
-        };
+        }
     }
 
     /// [rmdir] removes an empty subdirectory.
@@ -788,7 +788,7 @@ impl MetaEngine {
         let mut slices_buf = self
             .backend
             .get_raw_chunk_slices(inode, chunk_idx)?
-            .unwrap_or(vec![]);
+            .unwrap_or_default();
 
         let new_len =
             chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
@@ -805,7 +805,7 @@ impl MetaEngine {
         };
         attr.update_modification_time();
         let val = bincode::serialize(&slice).unwrap();
-        if slices_buf.eq(&val) {
+        if slices_buf == val {
             warn!(
                 "{inode} try to write the same slice {:?} at {chunk_idx}",
                 slice
@@ -964,7 +964,7 @@ impl MetaEngine {
         size: u64,
         skip_perm_check: bool,
     ) -> Result<InodeAttr> {
-        return if let Some(of) = self.open_files.load(&inode).await {
+        if let Some(of) = self.open_files.load(&inode).await {
             let guard = of.read_guard().await;
             if guard.attr.length == size {
                 return Ok(guard.attr.clone());
@@ -976,7 +976,7 @@ impl MetaEngine {
             Ok(attr)
         } else {
             self.backend.do_truncate(ctx, inode, size, skip_perm_check)
-        };
+        }
     }
 }
 
