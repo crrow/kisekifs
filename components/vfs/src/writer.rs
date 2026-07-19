@@ -27,7 +27,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt::{Debug, Display, Formatter},
     sync::{
-        Arc, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicIsize, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -56,7 +56,7 @@ use tracing::{Instrument, debug, error, instrument};
 
 use crate::{
     data_manager::DataManager,
-    err::{LibcSnafu, Result},
+    err::{Error, JoinErrSnafu, LibcSnafu, Result},
 };
 
 impl DataManager {
@@ -83,6 +83,7 @@ impl DataManager {
                     write_notify:           Arc::new(Default::default()),
                     pattern:                Default::default(),
                     early_flush_threshold:  0.3,
+                    flush_error:            Mutex::new(None),
                     data_manager:           Arc::downgrade(self),
                 };
 
@@ -212,6 +213,13 @@ pub struct FileWriter {
     // when should we flush the buffer in advance, according to current buffer pool free ratio.
     early_flush_threshold: f64,
 
+    // The first fatal error produced by a background flush task.
+    // Background tasks have no Result channel back to the caller, so they
+    // record the error here and it is surfaced (and cleared) by the next
+    // write/flush call — the same way the kernel reports async writeback
+    // errors on the next write/fsync.
+    flush_error: Mutex<Option<Error>>,
+
     // dependencies
     // the underlying object storage.
     data_manager: Weak<DataManager>,
@@ -219,6 +227,26 @@ pub struct FileWriter {
 
 impl FileWriter {
     pub fn get_length(self: &Arc<Self>) -> usize { self.length.load(Ordering::Acquire) }
+
+    /// Record a fatal error from a background flush task.
+    /// Only the first error is kept (later ones are logged and dropped),
+    /// it will be returned by the next [FileWriter::write] or
+    /// [FileWriter::finish] call.
+    fn record_flush_error(&self, err: Error) {
+        error!("Ino({}) background flush failed: {}", self.inode, err);
+        let mut guard = self.flush_error.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(err);
+        }
+    }
+
+    /// Take the recorded background flush error, if any.
+    fn take_flush_error(&self) -> Option<Error> {
+        self.flush_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
 
     /// Write data to the file.
     ///
@@ -239,6 +267,12 @@ impl FileWriter {
         let expected_write_len = data.len();
         if expected_write_len == 0 {
             return Ok(0);
+        }
+
+        // surface any error recorded by a background flush task before
+        // accepting new data.
+        if let Some(e) = self.take_flush_error() {
+            return Err(e);
         }
 
         self.pattern.monitor_write_at(offset, expected_write_len);
@@ -286,7 +320,10 @@ impl FileWriter {
             if let Some(req) = sw.make_flush_req(self.pattern.is_seq(), false).await
                 && let Err(e) = self.slice_flush_queue.send(req).await
             {
-                panic!("failed to send flush request {e}");
+                // the flusher task is gone (writer is being closed);
+                // fail this write with EIO instead of wedging the mount.
+                error!("Ino({}) failed to send flush request: {e}", self.inode);
+                return LibcSnafu { errno: libc::EIO }.fail();
             }
         }
 
@@ -381,12 +418,17 @@ impl FileWriter {
             .collect::<Vec<_>>();
         drop(read_guard);
 
-        if let Err(e) = futures::future::try_join_all(handles).await {
-            panic!("failed to flush chunk writers {e}");
-        }
+        futures::future::try_join_all(handles)
+            .await
+            .context(JoinErrSnafu)?;
         let mut write_guard = self.chunk_writers.write().await;
         write_guard.clear();
 
+        // surface errors recorded by the background flush tasks that this
+        // flush (or an earlier one) triggered, fsync-style.
+        if let Some(e) = self.take_flush_error() {
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -451,20 +493,23 @@ impl FileWriterFlusher {
                         match req {
                             FlushReq::FlushBulk {sw, offset} => {
                                 debug!("{ino} flush bulk to {offset}");
-                                let _fw = self.fw.clone();
+                                let fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
                                 let _me = meta_engine.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
                                         r = sw.do_flush_bulk(offset) => {
                                             if let Err(e) = r {
-                                                error!("{ino} failed to flush bulk {e}");
+                                                fw.record_flush_error(e);
                                             }
                                         }
                                         _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                            // we should not wait for the flush to finish.
-                                            // we should just commit the slice writer.
-                                            panic!("flush full is timeout");
+                                            // dropping the `do_flush_bulk` future resets the
+                                            // slice writer back to Idle (scopeguard), the data
+                                            // stays buffered; record EIO so the caller learns
+                                            // about it at the next write/flush.
+                                            error!("{ino} flush bulk timed out");
+                                            fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
                                         }
                                         _ = cancel_token.cancelled() => {;
                                         }
@@ -472,20 +517,28 @@ impl FileWriterFlusher {
                                 });
                             },
                             FlushReq::FlushFull(sw) => {
-                                let _fw = self.fw.clone();
+                                let fw = self.fw.clone();
                                 let cancel_token = cancel_token.clone();
                                 let me = meta_engine.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
                                         r = sw.flush_and_commit(ino, me) => {
                                             if let Err(e) = r {
-                                                panic!("{ino} failed to flush full {e}");
+                                                // mark the slice writer as failed so
+                                                // ChunkWriter::finish does not wait on it
+                                                // forever, and surface the error at the
+                                                // next write/flush.
+                                                sw.mark_flush_failed();
+                                                fw.record_flush_error(e);
                                             }
                                         }
                                         _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                            // we should not wait for the flush to finish.
-                                            // we should just commit the slice writer.
-                                            panic!("flush full is timeout");
+                                            // the flush future is dropped mid-flight; the
+                                            // buffered data may be lost, record EIO so the
+                                            // caller learns about it at the next write/flush.
+                                            error!("{ino} flush full timed out");
+                                            sw.mark_flush_failed();
+                                            fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
                                         }
                                         _ = cancel_token.cancelled() => {
                                             debug!("{ino} flush full is cancelled");;
@@ -494,11 +547,15 @@ impl FileWriterFlusher {
                                 });
                             },
                             FlushReq::CommitIdle(sw) => {
-                                let _fw = self.fw.clone();
+                                let fw = self.fw.clone();
                                 let me = meta_engine.clone();
                                 // just commit the idle slice writer.
                                 tokio::spawn(async move {
-                                    sw.commit_partial(ino, me).await;
+                                    if let Err(e) = sw.commit_partial(ino, me).await {
+                                        // commit_partial's defer already marks the
+                                        // slice writer Done; just record the error.
+                                        fw.record_flush_error(e);
+                                    }
                                 });
                             },
                         }
@@ -561,7 +618,10 @@ impl ChunkWriter {
                     if let Some(req) = req
                         && let Err(e) = fw.slice_flush_queue.send(req).await
                     {
-                        panic!("failed to send flush request {e}");
+                        // the flusher task is gone (writer is being closed);
+                        // skip the early flush, the data stays buffered.
+                        error!("Ino({}) failed to send flush request: {e}", self.inode);
+                        fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
                     }
                     continue;
                 }
@@ -618,11 +678,14 @@ impl ChunkWriter {
                 // actually we don't care if we are in seq or random mode when the flush is
                 // called.
                 let req = sw.make_flush_req(false, true).await;
-                if let Some(req) = req {
-                    fw.slice_flush_queue
-                        .send(req)
-                        .await
-                        .expect("failed to send flush request");
+                if let Some(req) = req
+                    && let Err(e) = fw.slice_flush_queue.send(req).await
+                {
+                    // the flusher task is gone (writer is being closed);
+                    // stop waiting instead of panicking the flush task.
+                    error!("Ino({}) failed to send flush request: {e}", self.inode);
+                    fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
+                    return;
                 }
             }
 
@@ -675,7 +738,12 @@ impl From<u8> for SliceWriterState {
             3 => SliceWriterState::Flushing,
             4 => SliceWriterState::Committing,
             5 => SliceWriterState::Done,
-            _ => panic!("invalid state"),
+            // Invariant: the backing AtomicU8 is only ever stored/CASed with
+            // `SliceWriterState as u8` values in this file, so this arm is
+            // unreachable. Returning a made-up state here instead would
+            // silently corrupt the flush state machine (and the data it
+            // guards), so the panic stays.
+            _ => panic!("invalid slice writer state: {value}"),
         }
     }
 }
@@ -759,11 +827,17 @@ impl SliceWriter {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            panic!(
-                "failed to change state from {:?} to dirty, new_current_state: {:?}",
+            // only the writer that won the CAS in find_writable_slice_writer
+            // may transition out of Writing; a mismatch means the state
+            // machine was corrupted. Fail this write with EIO instead of
+            // wedging the mount.
+            error!(
+                "{self} failed to change state from {:?} to {:?}, current state: {:?}",
                 SliceWriterState::Writing,
+                new_state,
                 SliceWriterState::from(e)
             );
+            return LibcSnafu { errno: libc::EIO }.fail();
         }
         Ok(written)
     }
@@ -780,7 +854,10 @@ impl SliceWriter {
                 )
                 .is_err()
             {
-                panic!("failed to change state from flushing to idle after flush bulk");
+                // no Result channel inside a scopeguard; log and degrade.
+                // only this task transitions out of Flushing, so this should
+                // be unreachable.
+                error!("{self} failed to change state from flushing to idle after flush bulk");
             }
         });
         let slice_id = self.prepare_slice_id().await?;
@@ -791,10 +868,28 @@ impl SliceWriter {
                 offset,
                 self.data_manager.upgrade().unwrap().file_cache.clone(),
             )
-            .await
-            .expect("flush bulk to object storage failed");
+            .await?;
 
         Ok(())
+    }
+
+    /// Mark this slice writer as terminally failed after a background flush
+    /// error or timeout: force it to Done so [ChunkWriter::finish] does not
+    /// wait on it forever. The buffered data is lost; the caller must record
+    /// the error on the [FileWriter] so it is surfaced at the next
+    /// write/flush.
+    fn mark_flush_failed(self: &Arc<Self>) {
+        let prev = self
+            .state
+            .swap(SliceWriterState::Done as u8, Ordering::AcqRel);
+        if let Some(cw) = self.chunk_writer.upgrade() {
+            if SliceWriterState::from(prev) != SliceWriterState::Done {
+                // the successful flush path already decrements the counter
+                // when it reaches Done; only decrement for a real failure.
+                cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
+            }
+            cw.slice_done_notify.notify_waiters();
+        }
     }
 
     #[instrument(skip_all, fields(_internal_seq = self._internal_seq))]
@@ -805,15 +900,12 @@ impl SliceWriter {
     ) -> Result<()> {
         let slice_id = self.prepare_slice_id().in_current_span().await?;
         let mut write_guard = self.slice_buffer.write().await;
-        if let Err(e) = write_guard
+        write_guard
             .flush_v2(
                 slice_id,
                 self.data_manager.upgrade().unwrap().file_cache.clone(),
             )
-            .await
-        {
-            panic!("flush to object storage blocked, {:?}", e);
-        }
+            .await?;
 
         let len = write_guard.length();
         drop(write_guard);
@@ -843,8 +935,12 @@ impl SliceWriter {
             Ordering::AcqRel,
             Ordering::Relaxed,
         ) {
-            panic!(
-                "failed to change state from flushing to idle after flush, new_current_state: {:?}",
+            // data and meta are already durable at this point and only this
+            // task transitions out of Flushing; log and fall through, the
+            // slice is finished either way.
+            error!(
+                "{self} failed to change state from flushing to done after flush, current state: \
+                 {:?}",
                 SliceWriterState::from(e)
             );
         };
@@ -919,12 +1015,14 @@ impl SliceWriter {
                         Ordering::AcqRel,
                         Ordering::Relaxed,
                     ) {
-                        // someone win the contention. we give up
-                        panic!(
-                            "someone change the state {:?}, we expect {:?}",
-                            SliceWriterState::from(e),
-                            SliceWriterState::Dirty
+                        // someone won the contention, give up like the
+                        // non-finish paths do; the finish loop re-checks the
+                        // slice writer's state on its next round.
+                        debug!(
+                            "{self} give up flushing, state changed to {:?}",
+                            SliceWriterState::from(e)
                         );
+                        return None;
                     }
                     return Some(FlushReq::FlushFull(self.clone()));
                 }
@@ -996,8 +1094,11 @@ impl SliceWriter {
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
-                panic!(
-                    "failed to change state from committing to done, origin: {:?}",
+                // no Result channel inside a scopeguard; log and degrade.
+                // only this task transitions out of Committing, so this
+                // should be unreachable.
+                error!(
+                    "{self} failed to change state from committing to done, current state: {:?}",
                     SliceWriterState::from(e)
                 );
             }
@@ -1013,7 +1114,7 @@ impl SliceWriter {
 
         // then the sw is done.
         // write the meta info of this slice.
-        if let Err(e) = meta_engine_ref
+        meta_engine_ref
             .write_slice(
                 inode,
                 self.chunk_index,
@@ -1026,10 +1127,7 @@ impl SliceWriter {
                 },
                 self.last_modified.load(),
             )
-            .await
-        {
-            panic!("failed to write slice meta info {e}");
-        };
+            .await?;
 
         Ok(())
     }
