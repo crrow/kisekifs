@@ -69,8 +69,6 @@ just test               # Run tests with nextest (expensive — only when asked)
 just mount              # Mount filesystem (debug mode, mounts at /tmp/kiseki)
 just umount             # Unmount filesystem
 just book               # Serve the mdbook docs
+just lint               # clippy -D warnings + cargo doc
+just fmt                # cargo +nightly fmt + taplo + hawkeye
 ```
-
-Note: the `just lint` and `just fmt` recipes include steps for `api/` and
-`examples/` directories that do not exist in this repo; prefer the cargo
-commands above.
