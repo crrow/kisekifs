@@ -43,9 +43,12 @@ use kiseki_types::{
     slice::{EMPTY_SLICE_ID, SliceID},
 };
 use kiseki_utils::readable_size::ReadableSize;
+#[cfg(test)]
 use libc::EBADF;
 use scopeguard::defer;
-use snafu::{OptionExt, ResultExt};
+#[cfg(test)]
+use snafu::OptionExt;
+use snafu::ResultExt;
 use tokio::{
     sync::{Notify, RwLock, mpsc},
     task::yield_now,
@@ -105,6 +108,10 @@ impl DataManager {
 
     /// Use the [FileWriter] to write data to the file.
     /// Return the number of bytes written and current file length.
+    ///
+    /// Only used by tests; the production write path goes through the file
+    /// handle (see `KisekiVFS::write`).
+    #[cfg(test)]
     pub(crate) async fn write(
         self: &Arc<Self>,
         ino: Ino,
@@ -204,6 +211,10 @@ pub struct FileWriter {
     flush_waiting:          Arc<AtomicUsize>,
     flush_done_notify:      Arc<Notify>,
     write_waiting:          Arc<AtomicUsize>,
+    // reserved for the not-yet-wired write-throttle wakeup (mirrors
+    // flush_done_notify); write_waiting is maintained but nothing waits on
+    // this Notify yet.
+    #[allow(dead_code)]
     write_notify:           Arc<Notify>,
     total_slice_writer_cnt: Arc<AtomicUsize>,
 
@@ -211,6 +222,8 @@ pub struct FileWriter {
     // when we reach the threshold, we should flush some flush to the remote storage.
     pattern:               Arc<WriterPattern>,
     // when should we flush the buffer in advance, according to current buffer pool free ratio.
+    // reserved for the not-yet-wired early-flush heuristic.
+    #[allow(dead_code)]
     early_flush_threshold: f64,
 
     // The first fatal error produced by a background flush task.
@@ -276,7 +289,8 @@ impl FileWriter {
         }
 
         self.pattern.monitor_write_at(offset, expected_write_len);
-        while let cnt = self.total_slice_writer_cnt.load(Ordering::Acquire) {
+        loop {
+            let cnt = self.total_slice_writer_cnt.load(Ordering::Acquire);
             if cnt < 1000 {
                 break;
             }
@@ -447,6 +461,7 @@ impl FileWriter {
         };
     }
 
+    #[cfg(test)]
     pub(crate) fn get_reference_count(self: &Arc<Self>) -> usize {
         self.ref_count.load(Ordering::Acquire)
     }
@@ -511,8 +526,7 @@ impl FileWriterFlusher {
                                             error!("{ino} flush bulk timed out");
                                             fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
                                         }
-                                        _ = cancel_token.cancelled() => {;
-                                        }
+                                        _ = cancel_token.cancelled() => {}
                                     }
                                 });
                             },
@@ -541,7 +555,7 @@ impl FileWriterFlusher {
                                             fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
                                         }
                                         _ = cancel_token.cancelled() => {
-                                            debug!("{ino} flush full is cancelled");;
+                                            debug!("{ino} flush full is cancelled");
                                         }
                                     }
                                 });
