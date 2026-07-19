@@ -118,7 +118,7 @@ impl DataManager {
                 fr.length.store(length as usize, Ordering::Release);
             }
         } else {
-            warn!("not found any file reader under: {:?}", inode);
+            warn!("not found any file reader under: {inode:?}");
         }
     }
 }
@@ -195,14 +195,14 @@ impl FileReader {
             let raw_slices = meta_engine.read_slice(self.ino, chunk_idx).await?;
             let raw_slices = match raw_slices {
                 None => {
-                    debug!("no slice in chunk: {:?}", chunk_idx);
+                    debug!("no slice in chunk: {chunk_idx:?}");
                     return Ok(0);
                 }
                 Some(v) => v,
             };
 
             for x in raw_slices.0.iter() {
-                debug!("find raw-slice in chunk: {:?}, slice: {:?}", chunk_idx, x);
+                debug!("find raw-slice in chunk: {chunk_idx:?}, slice: {x:?}");
             }
 
             // make a virtual slice map to record the slice and hole.
@@ -215,7 +215,7 @@ impl FileReader {
 
             let range_map = raw_slices.overlook();
             for x in range_map.gaps(&current_read_range) {
-                debug!("current range: {:?}, find gap: {:?}", current_read_range, x);
+                debug!("current range: {current_read_range:?}, find gap: {x:?}");
                 virtual_slice_map.insert(x, VirtualSlice::Hole);
             }
             for (r, s) in range_map.overlapping(&current_read_range) {

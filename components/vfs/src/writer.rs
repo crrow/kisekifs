@@ -123,7 +123,7 @@ impl DataManager {
             .file_writers
             .get(&ino)
             .context(LibcSnafu { errno: EBADF })?;
-        debug!("Ino({}) get file write success", ino);
+        debug!("Ino({ino}) get file write success");
         let write_len = fw.write(offset, data).await?;
         let current_len = fw.get_length();
         debug!(
@@ -150,7 +150,7 @@ impl DataManager {
                 ReadableSize(fw.get_length() as u64)
             );
         } else {
-            debug!("{} file writer not exists, don't need to flush", ino);
+            debug!("{ino} file writer not exists, don't need to flush");
         }
         Ok(())
     }

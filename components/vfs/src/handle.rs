@@ -151,7 +151,7 @@ impl HandleTable {
                 // remove the handle from the handle table.
                 if let Some(fh) = h.as_file_handle() {
                     if let Err(e) = fh.wait_all_operations_done(None).await {
-                        error!("wait all operations done failed: {}", e);
+                        error!("wait all operations done failed: {e}");
                     };
                     fh.close().await;
                 }

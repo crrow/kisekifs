@@ -390,7 +390,7 @@ impl KisekiVFS {
         ino: I,
     ) -> Result<kiseki_types::stat::FSStat> {
         let ino = ino.into();
-        trace!("fs:stat_fs with ino {:?}", ino);
+        trace!("fs:stat_fs with ino {ino:?}");
         let h = self.meta.stat_fs(ctx, ino)?;
         Ok(h)
     }
@@ -448,7 +448,7 @@ impl KisekiVFS {
         parent: Ino,
         name: &str,
     ) -> Result<FullEntry> {
-        trace!("fs:lookup with parent {:?} name {:?}", parent, name);
+        trace!("fs:lookup with parent {parent:?} name {name:?}");
         // TODO: handle the special case
         if (parent == ROOT_INO || name.eq(CONTROL_INODE_NAME))
             && let Some(n) = self.internal_nodes.get_internal_node_by_name(name)
@@ -515,14 +515,14 @@ impl KisekiVFS {
     /// * [stat(2)](https://man7.org/linux/man-pages/man2/stat.2.html)
     /// * [FUSE getattr](https://libfuse.github.io/doxygen/structfuse__operations.html#a1c4a3c6b982ba57d5d96acf49b1a6c8b)
     pub async fn get_attr(&self, inode: Ino) -> Result<InodeAttr> {
-        debug!("vfs:get_attr with inode {:?}", inode);
+        debug!("vfs:get_attr with inode {inode:?}");
         if inode.is_special()
             && let Some(n) = self.internal_nodes.get_internal_node(inode)
         {
             return Ok(n.get_attr());
         }
         let attr = self.meta.get_attr(inode).await?;
-        debug!("vfs:get_attr with inode {:?} attr {:?}", inode, attr);
+        debug!("vfs:get_attr with inode {inode:?} attr {attr:?}");
         Ok(attr)
     }
 
@@ -1258,7 +1258,7 @@ impl KisekiVFS {
         flags: i32,
     ) -> Result<FH> {
         let inode = inode.into();
-        trace!("vfs:open_dir with {:?}, flags: {:o}", inode, flags);
+        trace!("vfs:open_dir with {inode:?}, flags: {flags:o}");
 
         // 检查inode是否为目录类型
         let attr = self.meta.get_attr(inode).await?;
@@ -1381,7 +1381,7 @@ impl KisekiVFS {
         mode: u32,
         umask: u32,
     ) -> Result<FullEntry> {
-        debug!("fs:mkdir with parent {:?} name {:?}", parent, name);
+        debug!("fs:mkdir with parent {parent:?} name {name:?}");
 
         // 验证文件名是否有效（拒绝空字符串、"." 和 ".."）
         Self::validate_filename(name)?;
@@ -1408,7 +1408,7 @@ impl KisekiVFS {
     }
 
     pub async fn rmdir(&self, ctx: Arc<FuseContext>, parent: Ino, name: &str) -> Result<()> {
-        debug!("fs:rmdir with parent {:?} name {:?}", parent, name);
+        debug!("fs:rmdir with parent {parent:?} name {name:?}");
         ensure!(name != DOT, LibcSnafu { errno: EINVAL });
         ensure!(name != DOT_DOT, LibcSnafu { errno: EINVAL });
         ensure!(
@@ -1538,7 +1538,7 @@ impl KisekiVFS {
         umask: u32,
         flags: libc::c_int,
     ) -> Result<(FullEntry, FH)> {
-        debug!("fs:create with parent {:?} name {:?}", parent, name);
+        debug!("fs:create with parent {parent:?} name {name:?}");
 
         // 验证文件名是否有效（拒绝空字符串、"." 和 ".."）
         Self::validate_filename(name)?;

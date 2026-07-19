@@ -74,17 +74,17 @@ impl KisekiFuse {
             && entry.attr.is_file()
             && self.vfs.modified_since(inode, ctx.start_at)
         {
-            debug!("refresh attr for {:?}", inode);
+            debug!("refresh attr for {inode:?}");
             match self
                 .runtime
                 .block_on(self.vfs.get_attr(inode).in_current_span())
             {
                 Ok(new_attr) => {
-                    debug!("refresh attr for {:?} to {:?}", inode, new_attr);
+                    debug!("refresh attr for {inode:?} to {new_attr:?}");
                     entry.attr = new_attr;
                 }
                 Err(e) => {
-                    debug!("failed to refresh attr for {:?} {:?}", inode, e);
+                    debug!("failed to refresh attr for {inode:?} {e:?}");
                 }
             }
         }
@@ -115,17 +115,17 @@ impl KisekiFuse {
             && attr.is_file()
             && self.vfs.modified_since(inode, ctx.start_at)
         {
-            debug!("refresh attr for {:?}", inode);
+            debug!("refresh attr for {inode:?}");
             match self
                 .runtime
                 .block_on(self.vfs.get_attr(inode).in_current_span())
             {
                 Ok(new_attr) => {
-                    debug!("refresh attr for {:?} to {:?}", inode, new_attr);
+                    debug!("refresh attr for {inode:?} to {new_attr:?}");
                     attr = new_attr;
                 }
                 Err(e) => {
-                    debug!("failed to refresh attr for {:?} {:?}", inode, e);
+                    debug!("failed to refresh attr for {inode:?} {e:?}");
                 }
             }
             self.runtime.block_on(
@@ -187,7 +187,7 @@ impl Filesystem for KisekiFuse {
             }
         };
 
-        debug!("lookup {:?} {:?}", parent, entry);
+        debug!("lookup {parent:?} {entry:?}");
 
         self.reply_entry(&ctx, reply, entry);
     }
@@ -201,7 +201,7 @@ impl Filesystem for KisekiFuse {
         {
             Ok(attr) => self.reply_attr(&EMPTY_CONTEXT, reply, Ino(ino), attr, true),
             Err(e) => {
-                error!("getattr {:?} {:?}", ino, e);
+                error!("getattr {ino:?} {e:?}");
                 reply.error(e.to_errno())
             }
         };
