@@ -336,9 +336,10 @@ fn get_mode_t_from_filetype(kind: &FileType) -> libc::mode_t {
 }
 
 fn make_smode(kind: &FileType, perm: u32) -> u16 {
-    let mode = get_mode_t_from_filetype(kind);
-    let r = mode | (perm as u16);
-    r as u16
+    // libc::mode_t is u16 on macOS but u32 on Linux; widen both to u32 for the
+    // OR, then narrow to the u16 FUSE perm field (valid modes fit in 16 bits).
+    let mode = get_mode_t_from_filetype(kind) as u32;
+    (mode | perm) as u16
 }
 
 impl Default for InodeAttr {
