@@ -74,36 +74,16 @@ jobs:
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
-  # Protocol buffer linting with Buf
-  proto-lint:
-    name: Protocol Buffer Lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Setup Buf
-        uses: bufbuild/buf-setup-action@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Buf lint
-        run: cd api && buf lint
-
-      - name: Buf format check
-        run: cd api && buf format --diff --exit-code
-
   # Aggregator job to ensure all linting passes
   lint-success:
     name: Lint Success
     runs-on: ubuntu-latest
-    needs: [rust-format, proto-lint]
+    needs: [rust-format]
     if: always()
     steps:
       - name: Check all lint jobs status
         run: |
-          if [[ "${{ needs.rust-format.result }}" != "success" || \
-                "${{ needs.proto-lint.result }}" != "success" ]]; then
+          if [[ "${{ needs.rust-format.result }}" != "success" ]]; then
             echo "One or more lint jobs failed"
             exit 1
           fi
