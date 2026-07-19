@@ -105,10 +105,7 @@ impl FileCache {
         let remote_storage_clone = remote_storage.clone();
         let eviction_listener =
             move |k: Arc<SliceKey>, v: CacheIndex, cause| -> moka::notification::ListenerFuture {
-                debug!(
-                    "evicting block from the stage cache: {:?}, reason: {:?}",
-                    k, cause
-                );
+                debug!("evicting block from the stage cache: {k:?}, reason: {cause:?}");
                 let local_storage = local_storage_clone.clone();
                 let remote_storage = remote_storage_clone.clone();
                 // Create a Future that removes the block from the local storage and
@@ -125,7 +122,7 @@ impl FileCache {
                     )
                     .await
                     {
-                        error!("Failed to flush the block to the remote storage: {:?}", e);
+                        error!("Failed to flush the block to the remote storage: {e:?}");
                     }
                 })
             };
@@ -176,7 +173,7 @@ impl FileCache {
     ) -> Result<Option<Bytes>> {
         match self.index.get(slice_key).await {
             None => {
-                warn!("block not found in the stage cache: {:?}", slice_key);
+                warn!("block not found in the stage cache: {slice_key:?}");
                 Ok(None)
             }
             Some(_) => {
@@ -203,7 +200,7 @@ impl FileCache {
         pages: Box<[Option<Page>]>,
     ) -> Result<(usize, usize)> {
         let key = SliceKey::new(sid, block_index, block_length);
-        debug!("staging block: {:?}", key);
+        debug!("staging block: {key:?}");
         let mut total_flush_len = 0;
         let mut total_release_page_cnt = 0;
         let _ = self

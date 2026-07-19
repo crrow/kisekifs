@@ -82,7 +82,7 @@ impl MemCache {
                     Ok(None)
                 } else {
                     Err(CacheError {
-                        error: format!("failed to get from cache: {}", e),
+                        error: format!("failed to get from cache: {e}"),
                     })
                 }
             }

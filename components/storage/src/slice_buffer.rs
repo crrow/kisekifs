@@ -59,9 +59,7 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
 
     debug_assert!(
         offset + expected_read_len <= CHUNK_SIZE,
-        "offset {} + expect read len {} will exceed the chunk size",
-        offset,
-        expected_read_len
+        "offset {offset} + expect read len {expected_read_len} will exceed the chunk size"
     );
 
     let expected_read_len = min(length - offset, expected_read_len);
@@ -172,10 +170,8 @@ impl SliceBuffer {
         }
         debug_assert!(
             expected_read_len + offset <= CHUNK_SIZE,
-            "offset: {}, expected_read_len: {} should not exceed CHUNK_SIZE: {}",
-            offset,
-            expected_read_len,
-            CHUNK_SIZE
+            "offset: {offset}, expected_read_len: {expected_read_len} should not exceed \
+             CHUNK_SIZE: {CHUNK_SIZE}"
         );
 
         let mut total_read_len = 0;
@@ -242,10 +238,8 @@ impl SliceBuffer {
 
         debug_assert!(
             offset + expected_write_len <= CHUNK_SIZE,
-            "offset: {}, expected_write len: {} should not exceed CHUNK_SIZE: {}",
-            offset,
-            expected_write_len,
-            CHUNK_SIZE,
+            "offset: {offset}, expected_write len: {expected_write_len} should not exceed \
+             CHUNK_SIZE: {CHUNK_SIZE}"
         );
 
         if offset < self.flushed_length {
