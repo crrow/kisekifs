@@ -80,7 +80,12 @@ impl kiseki_types::ToErrno for Error {
                 error!("meta error: {}", source);
                 source.to_errno()
             }
-            _ => panic!("unhandled error type in to_errno {}", self),
+            _ => {
+                // a panic here would wedge the FUSE mount; EIO is the honest
+                // fallback for storage/join errors without a precise mapping.
+                error!("unhandled error type in to_errno {}", self);
+                libc::EIO
+            }
         }
     }
 }
