@@ -11,12 +11,14 @@
 
 ## Status
 
+- **State**: DONE
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
 - **Depends on**: `plans/001-green-ci-baseline.md`
 - **Category**: bug / correctness
 - **Planned at**: commit `1dc98d8`, 2026-07-20
+- **Completed at**: commit `805ee49`, CI run `29712721316`, 2026-07-20
 
 ## Why this matters
 
@@ -159,15 +161,36 @@ request's primary gid uses group permission bits.
 
 ## Done criteria
 
-- [ ] No request-reachable `todo!`, `unimplemented!`, `expect`, or `unwrap` in
+- [x] No request-reachable `todo!`, `unimplemented!`, `expect`, or `unwrap` in
       the in-scope boundary paths.
-- [ ] Negative/overflow ranges return errno without allocation or panic.
-- [ ] Reads never return bytes past EOF.
-- [ ] Unsupported fallocate and synthetic operations are honest and nonfatal.
-- [ ] Init errors prevent mount completion.
-- [ ] Primary gid affects group permissions.
-- [ ] Targeted tests and all quality gates pass.
-- [ ] Only in-scope files and `plans/README.md` changed.
+- [x] Negative/overflow ranges return errno without allocation or panic.
+- [x] Reads never return bytes past EOF.
+- [x] Unsupported fallocate and synthetic operations are honest and nonfatal.
+- [x] Init errors prevent mount completion.
+- [x] Primary gid affects group permissions.
+- [x] Targeted tests and all quality gates pass.
+- [x] Only in-scope files and `plans/README.md` changed.
+
+## Completion evidence
+
+- Implemented by commit `805ee49`.
+- CI run `29712721316` passed formatting, Clippy, Rustdoc, Ubuntu nextest,
+  coverage, dependency advisories, and all aggregators. Companion Web run
+  `29712721248` also completed successfully.
+- Signed offsets and offset-length ranges are validated before conversion or
+  allocation. Reads truncate their buffers to the actual byte count, including
+  empty reads at EOF.
+- Invalid setattr, rename, and fallocate inputs now return stable errno values.
+  Recognized fallocate modes and synthetic-node I/O return `ENOTSUP`; synthetic
+  release is idempotent and does not decrement metadata open counts.
+- FUSE initialization propagates VFS failures, request contexts include the
+  primary gid, and the FUSE setattr adapter now derives internal presence flags
+  from the actual optional request fields instead of misinterpreting file
+  flags.
+- Local verification passed targeted VFS (`56/56`), meta (`4/4`), and FUSE
+  (`2/2`) tests, `just check`, `just lint`, nightly formatting, and the full
+  workspace suite (`112/112`). The remaining panic-scan matches are confined to
+  tests and a comment, not request-reachable production paths.
 
 ## STOP conditions
 

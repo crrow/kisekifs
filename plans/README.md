@@ -14,7 +14,7 @@ full, honor its STOP conditions, run every gate, and update the status here.
 | 002 | Eliminate actionable dependency vulnerabilities | P1 | M | 001 | DONE |
 | 003 | Make volume formatting safe and explicit | P1 | M | 001 | DONE |
 | 004 | Make object storage configurable and secret-safe | P1 | M | 001, 002 | DONE |
-| 005 | Make the FUSE request boundary panic-free and correct | P1 | M | 001 | TODO |
+| 005 | Make the FUSE request boundary panic-free and correct | P1 | M | 001 | DONE |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
 `REJECTED (<reason>)`.
