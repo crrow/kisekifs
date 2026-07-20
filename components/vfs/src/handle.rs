@@ -456,6 +456,8 @@ impl FileHandleWriteGuard {
 
     pub(crate) async fn flush(&self) -> Result<()> { self.file_writer.finish().await }
 
+    pub(crate) async fn sync_remote(&self) -> Result<()> { self.file_writer.sync_remote().await }
+
     pub(crate) fn get_length(&self) -> usize { self.file_writer.get_length() }
 }
 

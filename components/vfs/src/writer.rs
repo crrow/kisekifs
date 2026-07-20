@@ -24,13 +24,12 @@
 
 use std::{
     cmp::min,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::{Debug, Display, Formatter},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicIsize, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 use crossbeam::atomic::AtomicCell;
@@ -46,9 +45,7 @@ use kiseki_utils::readable_size::ReadableSize;
 #[cfg(test)]
 use libc::EBADF;
 use scopeguard::defer;
-#[cfg(test)]
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::{
     sync::{Notify, RwLock, mpsc},
     task::yield_now,
@@ -87,6 +84,7 @@ impl DataManager {
                     pattern:                Default::default(),
                     early_flush_threshold:  0.3,
                     flush_error:            Mutex::new(None),
+                    published_slices:       Mutex::new(HashSet::new()),
                     data_manager:           Arc::downgrade(self),
                 };
 
@@ -157,6 +155,12 @@ impl DataManager {
 }
 
 type InternalSliceSeq = u64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Durability {
+    Local,
+    Remote,
+}
 
 #[derive(Debug, Default)]
 struct WriterPattern {
@@ -233,6 +237,10 @@ pub struct FileWriter {
     // errors on the next write/fsync.
     flush_error: Mutex<Option<Error>>,
 
+    // Slice ids whose metadata is published and whose local stage remains the
+    // durability owner until an explicit fsync confirms remote storage.
+    published_slices: Mutex<HashSet<SliceID>>,
+
     // dependencies
     // the underlying object storage.
     data_manager: Weak<DataManager>,
@@ -266,6 +274,13 @@ impl FileWriter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
+    }
+
+    fn record_published_slice(&self, slice_id: SliceID) {
+        self.published_slices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(slice_id);
     }
 
     /// Write data to the file.
@@ -412,13 +427,28 @@ impl FileWriter {
 
     /// Flush the data to the remote storage.
     #[instrument(skip(self), fields(self.inode))]
-    pub async fn finish(self: &Arc<Self>) -> Result<()> {
+    pub async fn finish(self: &Arc<Self>) -> Result<()> { self.flush_to(Durability::Local).await }
+
+    #[instrument(skip(self), fields(self.inode))]
+    pub async fn sync_remote(self: &Arc<Self>) -> Result<()> {
+        self.flush_to(Durability::Remote).await
+    }
+
+    async fn flush_to(self: &Arc<Self>, durability: Durability) -> Result<()> {
         self.flush_waiting.fetch_add(1, Ordering::AcqRel);
         defer!({
             self.flush_waiting.fetch_sub(1, Ordering::AcqRel);
             self.flush_done_notify.notify_waiters();
         });
 
+        self.finish_local().await?;
+        if durability == Durability::Remote {
+            self.flush_published_slices().await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_local(self: &Arc<Self>) -> Result<()> {
         // A previous attempt left the writer state intact for retry. Report
         // that failure once; the next finish call will retry the same slices.
         if let Some(e) = self.take_flush_error() {
@@ -458,6 +488,30 @@ impl FileWriter {
 
         let mut write_guard = self.chunk_writers.write().await;
         write_guard.clear();
+        Ok(())
+    }
+
+    async fn flush_published_slices(self: &Arc<Self>) -> Result<()> {
+        let slice_ids = self
+            .published_slices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let file_cache = self
+            .data_manager
+            .upgrade()
+            .context(LibcSnafu { errno: libc::EIO })?
+            .file_cache
+            .clone();
+        for slice_id in slice_ids {
+            file_cache.flush_slice(slice_id).await?;
+            self.published_slices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&slice_id);
+        }
         Ok(())
     }
 
@@ -502,7 +556,6 @@ impl FileWriterFlusher {
     async fn run(mut self) {
         debug!("Ino({}) flush task started", self.fw.inode);
         let cancel_token = self.fw.cancel_token.clone();
-        let cloned_cancel_token = cancel_token.clone();
         let ino = self.fw.inode;
         let meta_engine = self
             .fw
@@ -514,7 +567,7 @@ impl FileWriterFlusher {
 
         loop {
             tokio::select! {
-                _ = cloned_cancel_token.cancelled() => {
+                _ = cancel_token.cancelled() => {
                     debug!("flusher of [{ino}] is cancelled");
                     return;
                 }
@@ -523,64 +576,22 @@ impl FileWriterFlusher {
                         match req {
                             FlushReq::FlushBulk {sw, offset} => {
                                 debug!("{ino} flush bulk to {offset}");
-                                let fw = self.fw.clone();
-                                let cancel_token = cancel_token.clone();
-                                let _me = meta_engine.clone();
-                                tokio::spawn(async move {
-                                    tokio::select! {
-                                        r = sw.do_flush_bulk(offset) => {
-                                            if let Err(e) = r {
-                                                fw.record_flush_error(e);
-                                            }
-                                        }
-                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                            // dropping the `do_flush_bulk` future resets the
-                                            // slice writer back to Idle (scopeguard), the data
-                                            // stays buffered; record EIO so the caller learns
-                                            // about it at the next write/flush.
-                                            error!("{ino} flush bulk timed out");
-                                            fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
-                                        }
-                                        _ = cancel_token.cancelled() => {}
-                                    }
-                                });
+                                if let Err(e) = sw.do_flush_bulk(offset).await {
+                                    self.fw.record_flush_error(e);
+                                    sw.reset_after_flush_failure();
+                                }
                             },
                             FlushReq::FlushFull(sw) => {
-                                let fw = self.fw.clone();
-                                let cancel_token = cancel_token.clone();
-                                let me = meta_engine.clone();
-                                tokio::spawn(async move {
-                                    tokio::select! {
-                                        r = sw.flush_and_commit(ino, me) => {
-                                            if let Err(e) = r {
-                                                fw.record_flush_error(e);
-                                                sw.reset_after_flush_failure();
-                                            }
-                                        }
-                                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                            // the flush future is dropped mid-flight; the
-                                            // buffered data may be lost, record EIO so the
-                                            // caller learns about it at the next write/flush.
-                                            error!("{ino} flush full timed out");
-                                            fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
-                                            sw.reset_after_flush_failure();
-                                        }
-                                        _ = cancel_token.cancelled() => {
-                                            debug!("{ino} flush full is cancelled");
-                                        }
-                                    }
-                                });
+                                if let Err(e) = sw.flush_and_commit(ino, meta_engine.clone()).await {
+                                    self.fw.record_flush_error(e);
+                                    sw.reset_after_flush_failure();
+                                }
                             },
                             FlushReq::CommitIdle(sw) => {
-                                let fw = self.fw.clone();
-                                let me = meta_engine.clone();
-                                // just commit the idle slice writer.
-                                tokio::spawn(async move {
-                                    if let Err(e) = sw.commit_partial(ino, me).await {
-                                        fw.record_flush_error(e);
-                                        sw.reset_after_commit_failure();
-                                    }
-                                });
+                                if let Err(e) = sw.commit_partial(ino, meta_engine.clone()).await {
+                                    self.fw.record_flush_error(e);
+                                    sw.reset_after_commit_failure();
+                                }
                             },
                         }
                     }
@@ -870,23 +881,6 @@ impl SliceWriter {
     }
 
     async fn do_flush_bulk(self: &Arc<Self>, offset: usize) -> Result<()> {
-        defer!({
-            if self
-                .state
-                .compare_exchange(
-                    SliceWriterState::Flushing as u8,
-                    SliceWriterState::Idle as u8,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .is_err()
-            {
-                // no Result channel inside a scopeguard; log and degrade.
-                // only this task transitions out of Flushing, so this should
-                // be unreachable.
-                error!("{self} failed to change state from flushing to idle after flush bulk");
-            }
-        });
         let slice_id = self.prepare_slice_id().await?;
         let mut write_guard = self.slice_buffer.write().await;
         write_guard
@@ -896,6 +890,23 @@ impl SliceWriter {
                 self.data_manager.upgrade().unwrap().file_cache.clone(),
             )
             .await?;
+        drop(write_guard);
+
+        if let Err(state) = self.state.compare_exchange(
+            SliceWriterState::Flushing as u8,
+            SliceWriterState::Idle as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            error!(
+                "{self} cannot finish bulk flush from {:?}",
+                SliceWriterState::from(state)
+            );
+            return LibcSnafu { errno: libc::EIO }.fail();
+        }
+        if let Some(cw) = self.chunk_writer.upgrade() {
+            cw.slice_done_notify.notify_one();
+        }
 
         Ok(())
     }
@@ -916,7 +927,7 @@ impl SliceWriter {
             );
         }
         if let Some(cw) = self.chunk_writer.upgrade() {
-            cw.slice_done_notify.notify_waiters();
+            cw.slice_done_notify.notify_one();
         }
     }
 
@@ -933,7 +944,7 @@ impl SliceWriter {
             );
         }
         if let Some(cw) = self.chunk_writer.upgrade() {
-            cw.slice_done_notify.notify_waiters();
+            cw.slice_done_notify.notify_one();
         }
     }
 
@@ -955,15 +966,6 @@ impl SliceWriter {
         let len = write_guard.length();
         drop(write_guard);
 
-        // Metadata must never make a slice visible before every referenced
-        // object block has been confirmed in remote storage.
-        self.data_manager
-            .upgrade()
-            .unwrap()
-            .file_cache
-            .flush_slice(slice_id)
-            .await?;
-
         // then the sw is done.
         // write the meta info of this slice.
         meta_engine_ref
@@ -981,7 +983,14 @@ impl SliceWriter {
             )
             .await?;
 
-        let cw = self.chunk_writer.upgrade().unwrap();
+        let cw = self
+            .chunk_writer
+            .upgrade()
+            .context(LibcSnafu { errno: libc::EIO })?;
+        cw.fw
+            .upgrade()
+            .context(LibcSnafu { errno: libc::EIO })?
+            .record_published_slice(slice_id);
         cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
         if let Err(e) = self.state.compare_exchange(
             SliceWriterState::Flushing as u8,
@@ -998,7 +1007,6 @@ impl SliceWriter {
                 SliceWriterState::from(e)
             );
         };
-        cw.slice_done_notify.notify_waiters(); // notify the chunk writer to check if we are done.
         cw.slice_done_notify.notify_one();
 
         Ok(())
@@ -1145,13 +1153,6 @@ impl SliceWriter {
         let slice_id = self.slice_id.load(Ordering::Acquire);
         let len = self.slice_buffer.read().await.length();
         if len != 0 {
-            self.data_manager
-                .upgrade()
-                .unwrap()
-                .file_cache
-                .flush_slice(slice_id)
-                .await?;
-
             // then the sw is done.
             // write the meta info of this slice.
             meta_engine_ref
@@ -1168,6 +1169,11 @@ impl SliceWriter {
                     self.last_modified.load(),
                 )
                 .await?;
+
+            cw.fw
+                .upgrade()
+                .context(LibcSnafu { errno: libc::EIO })?
+                .record_published_slice(slice_id);
         }
 
         cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
@@ -1182,7 +1188,7 @@ impl SliceWriter {
                 SliceWriterState::from(e)
             );
         }
-        cw.slice_done_notify.notify_waiters();
+        cw.slice_done_notify.notify_one();
 
         Ok(())
     }
@@ -1249,7 +1255,7 @@ fn locate_chunk(chunk_size: usize, offset: usize, expect_write_len: usize) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{process::Command, sync::Arc, time::Duration};
 
     use futures::StreamExt;
     use kiseki_meta::{MetaConfig, context::FuseContext};
@@ -1257,13 +1263,20 @@ mod tests {
         file_cache::{Config as FileCacheConfig, FileCache},
         mem_cache::{Config as MemCacheConfig, MemCache},
     };
-    use kiseki_types::{ino::ROOT_INO, setting::Format};
-    use kiseki_utils::{object_storage::new_local_object_store, readable_size::ReadableSize};
+    use kiseki_types::{
+        ino::ROOT_INO,
+        setting::Format,
+        slice::{Slice, SliceKey},
+    };
+    use kiseki_utils::{
+        object_storage::{new_local_object_store, new_memory_object_store},
+        readable_size::ReadableSize,
+    };
 
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn failed_finish_keeps_writer_retryable_and_metadata_unpublished() {
+    async fn flush_is_local_durable_while_fsync_requires_remote_durability() {
         let tempdir = tempfile::tempdir().unwrap();
         let mut meta_config = MetaConfig::default();
         meta_config.with_dsn(&format!(
@@ -1286,11 +1299,12 @@ mod tests {
             .unwrap();
 
         let remote_dir = tempdir.path().join("remote");
+        let stage_dir = tempdir.path().join("stage");
         let remote_storage = new_local_object_store(&remote_dir).unwrap();
         let file_cache = Arc::new(
             FileCache::new(
                 FileCacheConfig {
-                    stage_cache_dir: tempdir.path().join("stage"),
+                    stage_cache_dir: stage_dir.clone(),
                     max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
                     cache_ttl:       Duration::from_secs(3600),
                 },
@@ -1314,30 +1328,75 @@ mod tests {
         let data = b"failed fsync must remain retryable";
         writer.write(0, data).await.unwrap();
 
+        std::fs::remove_dir_all(&stage_dir).unwrap();
+        std::fs::write(&stage_dir, b"local stage unavailable").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), writer.finish())
+                .await
+                .expect("failed full flush must not hang")
+                .is_err()
+        );
+        let chunk_writer = writer.chunk_writers.read().await.get(&0).unwrap().clone();
+        let slice_writer = chunk_writer
+            .slice_writers
+            .read()
+            .await
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            SliceWriterState::from(slice_writer.state.load(Ordering::Acquire)),
+            SliceWriterState::Dirty
+        );
+        assert!(meta_engine.read_slice(inode, 0).await.is_err());
+        std::fs::remove_file(&stage_dir).unwrap();
+        std::fs::create_dir(&stage_dir).unwrap();
+
         std::fs::remove_dir_all(&remote_dir).unwrap();
         std::fs::write(&remote_dir, b"remote unavailable").unwrap();
-        let first_finish = tokio::time::timeout(Duration::from_secs(3), writer.finish())
-            .await
-            .expect("failed finish must not hang");
-        assert!(first_finish.is_err());
-        assert!(!writer.chunk_writers.read().await.is_empty());
-        assert!(meta_engine.read_slice(inode, 0).await.is_err());
-
-        std::fs::remove_file(&remote_dir).unwrap();
-        std::fs::create_dir(&remote_dir).unwrap();
         tokio::time::timeout(Duration::from_secs(3), writer.finish())
             .await
-            .expect("retry must not hang")
+            .expect("local-durable flush must not hang")
             .unwrap();
         assert!(writer.chunk_writers.read().await.is_empty());
+        let slices = meta_engine.read_slice(inode, 0).await.unwrap().unwrap();
+        assert_eq!(slices.len(), 1);
+        let Slice::Owned { id, size, .. } = slices.0[0] else {
+            panic!("writer must publish an owned slice");
+        };
+        let slice_key = SliceKey::new(id, 0, size as usize);
         assert_eq!(
-            meta_engine
-                .read_slice(inode, 0)
+            data_manager
+                .file_cache
+                .get_range(&slice_key, 0, data.len())
                 .await
                 .unwrap()
                 .unwrap()
-                .len(),
-            1
+                .as_ref(),
+            data
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), writer.sync_remote())
+                .await
+                .expect("failed fsync must not hang")
+                .is_err()
+        );
+
+        std::fs::remove_file(&remote_dir).unwrap();
+        std::fs::create_dir(&remote_dir).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), writer.sync_remote())
+            .await
+            .expect("fsync retry must not hang")
+            .unwrap();
+        assert!(writer.chunk_writers.read().await.is_empty());
+        assert!(
+            data_manager
+                .file_cache
+                .get_range(&slice_key, 0, data.len())
+                .await
+                .unwrap()
+                .is_none()
         );
 
         let mut objects = remote_storage.list(None);
@@ -1354,5 +1413,325 @@ mod tests {
                 .as_ref(),
             data
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_bulk_and_idle_commit_remain_retryable() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut meta_config = MetaConfig::default();
+        meta_config.with_dsn(&format!(
+            "rocksdb://:{}",
+            tempdir.path().join("meta").to_str().unwrap()
+        ));
+        let format = Format::default();
+        kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let (inode, _) = meta_engine
+            .create(
+                Arc::new(FuseContext::background()),
+                ROOT_INO,
+                "bulk-retry",
+                0o600,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let stage_dir = tempdir.path().join("stage");
+        let remote_storage = new_memory_object_store();
+        let file_cache = Arc::new(
+            FileCache::new(
+                FileCacheConfig {
+                    stage_cache_dir: stage_dir.clone(),
+                    max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
+                    cache_ttl:       Duration::from_secs(3600),
+                },
+                remote_storage.clone(),
+            )
+            .unwrap(),
+        );
+        let data_manager = Arc::new(DataManager {
+            chunk_size: format.chunk_size,
+            file_writers: Arc::new(Default::default()),
+            file_readers: Default::default(),
+            id_generator: Arc::new(sonyflake::Sonyflake::new().unwrap()),
+            meta_engine: meta_engine.clone(),
+            file_cache,
+            mem_cache: Arc::new(MemCache::new(MemCacheConfig::default(), remote_storage)),
+        });
+        let writer = data_manager.open_file_writer(inode, 0);
+        let data = vec![0x5A; BLOCK_SIZE];
+        writer.write(0, &data).await.unwrap();
+
+        let chunk_writer = writer.chunk_writers.read().await.get(&0).unwrap().clone();
+        let slice_writer = chunk_writer
+            .slice_writers
+            .read()
+            .await
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let request = slice_writer
+            .clone()
+            .make_flush_req(false, false)
+            .await
+            .expect("a full block must create a bulk flush request");
+        std::fs::remove_dir_all(&stage_dir).unwrap();
+        std::fs::write(&stage_dir, b"prevent stage writes").unwrap();
+        writer.slice_flush_queue.send(request).await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), writer.finish())
+                .await
+                .expect("failed bulk flush must wake finish")
+                .is_err()
+        );
+        assert_eq!(
+            SliceWriterState::from(slice_writer.state.load(Ordering::Acquire)),
+            SliceWriterState::Dirty
+        );
+        let mut actual = vec![0; data.len()];
+        slice_writer
+            .slice_buffer
+            .read()
+            .await
+            .read_at(0, &mut actual)
+            .await
+            .unwrap();
+        assert_eq!(actual, data);
+
+        std::fs::remove_file(&stage_dir).unwrap();
+        std::fs::create_dir(&stage_dir).unwrap();
+        let retry = slice_writer
+            .clone()
+            .make_flush_req(false, false)
+            .await
+            .expect("dirty slice must be retryable as a bulk flush");
+        let FlushReq::FlushBulk { sw, offset } = retry else {
+            panic!("expected a bulk retry");
+        };
+        sw.do_flush_bulk(offset).await.unwrap();
+        assert_eq!(
+            SliceWriterState::from(slice_writer.state.load(Ordering::Acquire)),
+            SliceWriterState::Idle
+        );
+
+        let mut wrong_meta_config = MetaConfig::default();
+        wrong_meta_config.with_dsn(&format!(
+            "rocksdb://:{}",
+            tempdir.path().join("wrong-meta").to_str().unwrap()
+        ));
+        kiseki_meta::update_format(&wrong_meta_config.dsn, format.clone(), true).unwrap();
+        let wrong_meta = kiseki_meta::open(wrong_meta_config).unwrap();
+        let commit = slice_writer
+            .clone()
+            .make_flush_req(false, true)
+            .await
+            .expect("a staged idle slice must create a metadata commit request");
+        let FlushReq::CommitIdle(sw) = commit else {
+            panic!("expected an idle metadata commit");
+        };
+        let error = sw.commit_partial(inode, wrong_meta).await.unwrap_err();
+        writer.record_flush_error(error);
+        sw.reset_after_commit_failure();
+        assert_eq!(
+            SliceWriterState::from(slice_writer.state.load(Ordering::Acquire)),
+            SliceWriterState::Idle
+        );
+        assert!(meta_engine.read_slice(inode, 0).await.is_err());
+        assert!(writer.finish().await.is_err());
+
+        tokio::time::timeout(Duration::from_secs(3), writer.finish())
+            .await
+            .expect("metadata commit retry must not hang")
+            .unwrap();
+        assert!(writer.chunk_writers.read().await.is_empty());
+        assert_eq!(
+            meta_engine
+                .read_slice(inode, 0)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abrupt_exit_after_local_flush_reopens_exact_published_bytes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let meta_dir = tempdir.path().join("meta");
+        let stage_dir = tempdir.path().join("stage");
+        let remote_dir = tempdir.path().join("remote");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("writer::tests::crash_after_local_flush_helper")
+            .arg("--ignored")
+            .env("KISEKI_WRITER_CRASH_HELPER", "1")
+            .env("KISEKI_WRITER_CRASH_META", &meta_dir)
+            .env("KISEKI_WRITER_CRASH_STAGE", &stage_dir)
+            .env("KISEKI_WRITER_CRASH_REMOTE", &remote_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "writer crash helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let remote_storage = new_local_object_store(&remote_dir).unwrap();
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+        std::fs::write(&remote_dir, b"keep recovered data local").unwrap();
+        let mut meta_config = MetaConfig::default();
+        meta_config.with_dsn(&format!("rocksdb://:{}", meta_dir.to_str().unwrap()));
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let format = meta_engine.get_format().clone();
+        let (inode, attr) = meta_engine
+            .lookup(
+                Arc::new(FuseContext::background()),
+                ROOT_INO,
+                "crash-published",
+                false,
+            )
+            .await
+            .unwrap();
+        let data_manager = Arc::new(
+            DataManager::new(
+                format.chunk_size,
+                meta_engine,
+                remote_storage,
+                FileCacheConfig {
+                    stage_cache_dir: stage_dir,
+                    max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
+                    cache_ttl:       Duration::from_secs(3600),
+                },
+            )
+            .unwrap(),
+        );
+        let reader = data_manager
+            .open_file_reader(inode, 1, attr.length as usize)
+            .await;
+        let expected = b"published bytes survive process death";
+        let mut actual = vec![0; expected.len()];
+        assert_eq!(reader.read(0, &mut actual).await.unwrap(), expected.len());
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abrupt_exit_after_fsync_reopens_from_remote_without_stage() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let meta_dir = tempdir.path().join("meta");
+        let stage_dir = tempdir.path().join("stage");
+        let remote_dir = tempdir.path().join("remote");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("writer::tests::crash_after_local_flush_helper")
+            .arg("--ignored")
+            .env("KISEKI_WRITER_CRASH_HELPER", "1")
+            .env("KISEKI_WRITER_CRASH_SYNC_REMOTE", "1")
+            .env("KISEKI_WRITER_CRASH_META", &meta_dir)
+            .env("KISEKI_WRITER_CRASH_STAGE", &stage_dir)
+            .env("KISEKI_WRITER_CRASH_REMOTE", &remote_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "writer crash helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(&stage_dir).unwrap();
+        }
+        let remote_storage = new_local_object_store(&remote_dir).unwrap();
+        let mut meta_config = MetaConfig::default();
+        meta_config.with_dsn(&format!("rocksdb://:{}", meta_dir.to_str().unwrap()));
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let format = meta_engine.get_format().clone();
+        let (inode, attr) = meta_engine
+            .lookup(
+                Arc::new(FuseContext::background()),
+                ROOT_INO,
+                "crash-published",
+                false,
+            )
+            .await
+            .unwrap();
+        let data_manager = Arc::new(
+            DataManager::new(
+                format.chunk_size,
+                meta_engine,
+                remote_storage,
+                FileCacheConfig {
+                    stage_cache_dir: stage_dir,
+                    max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
+                    cache_ttl:       Duration::from_secs(3600),
+                },
+            )
+            .unwrap(),
+        );
+        let reader = data_manager
+            .open_file_reader(inode, 1, attr.length as usize)
+            .await;
+        let expected = b"published bytes survive process death";
+        let mut actual = vec![0; expected.len()];
+        assert_eq!(reader.read(0, &mut actual).await.unwrap(), expected.len());
+        assert_eq!(actual, expected);
+    }
+
+    #[ignore = "subprocess helper"]
+    #[tokio::test]
+    async fn crash_after_local_flush_helper() {
+        if std::env::var_os("KISEKI_WRITER_CRASH_HELPER").is_none() {
+            return;
+        }
+        let meta_dir =
+            std::path::PathBuf::from(std::env::var_os("KISEKI_WRITER_CRASH_META").unwrap());
+        let stage_dir =
+            std::path::PathBuf::from(std::env::var_os("KISEKI_WRITER_CRASH_STAGE").unwrap());
+        let remote_dir =
+            std::path::PathBuf::from(std::env::var_os("KISEKI_WRITER_CRASH_REMOTE").unwrap());
+        let mut meta_config = MetaConfig::default();
+        meta_config.with_dsn(&format!("rocksdb://:{}", meta_dir.to_str().unwrap()));
+        let format = Format::default();
+        kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let (inode, _) = meta_engine
+            .create(
+                Arc::new(FuseContext::background()),
+                ROOT_INO,
+                "crash-published",
+                0o600,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let data_manager = Arc::new(
+            DataManager::new(
+                format.chunk_size,
+                meta_engine,
+                new_local_object_store(remote_dir).unwrap(),
+                FileCacheConfig {
+                    stage_cache_dir: stage_dir,
+                    max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
+                    cache_ttl:       Duration::from_secs(3600),
+                },
+            )
+            .unwrap(),
+        );
+        let writer = data_manager.open_file_writer(inode, 0);
+        writer
+            .write(0, b"published bytes survive process death")
+            .await
+            .unwrap();
+        if std::env::var_os("KISEKI_WRITER_CRASH_SYNC_REMOTE").is_some() {
+            writer.sync_remote().await.unwrap();
+        } else {
+            writer.finish().await.unwrap();
+        }
+        std::process::exit(0);
     }
 }

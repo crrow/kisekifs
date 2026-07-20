@@ -494,6 +494,8 @@ impl CacheIndex {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use kiseki_common::BLOCK_SIZE;
 
     use super::*;
@@ -724,6 +726,96 @@ mod tests {
         })
         .await
         .expect("recovered stage entry must be scheduled for migration");
+    }
+
+    #[test]
+    fn abrupt_process_exit_preserves_stage_for_restart_recovery() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let stage_dir = tempdir.path().join("stage");
+        let remote_dir = tempdir.path().join("remote");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("cache::file_cache::tests::crash_after_stage_helper")
+            .arg("--ignored")
+            .env("KISEKI_STAGE_CRASH_HELPER", "1")
+            .env("KISEKI_STAGE_CRASH_DIR", &stage_dir)
+            .env("KISEKI_STAGE_CRASH_REMOTE", &remote_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stage helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let remote_storage =
+                kiseki_utils::object_storage::new_local_object_store(&remote_dir).unwrap();
+            let remote_probe = remote_storage.clone();
+            std::fs::remove_dir_all(&remote_dir).unwrap();
+            std::fs::write(&remote_dir, b"hold recovery in the local-readable state").unwrap();
+            let cache = Arc::new(
+                FileCache::new(
+                    test_config(stage_dir, Duration::from_secs(3600)),
+                    remote_storage,
+                )
+                .unwrap(),
+            );
+            let content = b"survive abrupt process exit";
+            let slice_key = SliceKey::new(0xABCD_EF08, 0, content.len());
+            assert_eq!(
+                cache
+                    .get_range(&slice_key, 0, content.len())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .as_ref(),
+                content
+            );
+
+            std::fs::remove_file(&remote_dir).unwrap();
+            std::fs::create_dir_all(&remote_dir).unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if remote_probe
+                        .get(&slice_key.make_object_storage_path())
+                        .await
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("recovered stage must migrate after remote repair");
+        });
+    }
+
+    #[ignore = "subprocess helper"]
+    #[tokio::test]
+    async fn crash_after_stage_helper() {
+        if std::env::var_os("KISEKI_STAGE_CRASH_HELPER").is_none() {
+            return;
+        }
+        let stage_dir = PathBuf::from(std::env::var_os("KISEKI_STAGE_CRASH_DIR").unwrap());
+        let remote_dir = PathBuf::from(std::env::var_os("KISEKI_STAGE_CRASH_REMOTE").unwrap());
+        let cache = Arc::new(
+            FileCache::new(
+                test_config(stage_dir, Duration::from_secs(3600)),
+                kiseki_utils::object_storage::new_local_object_store(remote_dir).unwrap(),
+            )
+            .unwrap(),
+        );
+        let content = b"survive abrupt process exit";
+        stage_bytes(
+            &cache,
+            SliceKey::new(0xABCD_EF08, 0, content.len()),
+            content,
+        )
+        .await;
+        std::process::exit(0);
     }
 
     #[tokio::test]

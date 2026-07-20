@@ -412,6 +412,85 @@ fn txn_put_attr<DB>(txn: &rocksdb::Transaction<DB>, inode: Ino, attr: &InodeAttr
     Ok(())
 }
 
+fn stage_slice_commit(
+    txn: &rocksdb::Transaction<rocksdb::OptimisticTransactionDB<MultiThreaded>>,
+    inode: Ino,
+    chunk_index: ChunkIndex,
+    slice: &Slice,
+) -> Result<SliceCommitResult> {
+    let attr_key = key::attr(inode);
+    let attr_buf = rocksdb_timed_op!(
+        db_gets_total,
+        db_get_duration_ms,
+        db_try!(txn.get_for_update(&attr_key, true))
+    )
+    .context(model_err::NotFoundSnafu {
+        kind: ModelKind::Attr,
+        key:  String::from_utf8_lossy(&attr_key).to_string(),
+    })
+    .context(ModelSnafu)?;
+    let mut attr: InodeAttr = model_try!(bincode::deserialize(&attr_buf).context(
+        model_err::CorruptionSnafu {
+            kind: ModelKind::Attr,
+            key:  String::from_utf8_lossy(&attr_key).to_string(),
+        }
+    ));
+    ensure!(attr.is_file(), LibcSnafu { errno: libc::EPERM });
+
+    let slices_key = key::chunk_slices(inode, chunk_index);
+    let mut slices_buf = rocksdb_timed_op!(
+        db_gets_total,
+        db_get_duration_ms,
+        db_try!(txn.get_for_update(&slices_key, true))
+    )
+    .unwrap_or_default();
+    if !slices_buf.len().is_multiple_of(SLICE_BYTES) {
+        return Err(model_err::Error::CorruptionString {
+            kind:   ModelKind::ChunkSlices,
+            key:    String::from_utf8_lossy(&slices_key).to_string(),
+            reason: format!("invalid encoded slice length {}", slices_buf.len()),
+        })
+        .context(ModelSnafu);
+    }
+    let encoded_slice = model_try!(
+        bincode::serialize(slice).context(model_err::CorruptionSnafu {
+            kind: ModelKind::ChunkSlices,
+            key:  String::from_utf8_lossy(&slices_key).to_string(),
+        })
+    );
+    let inserted = !slices_buf
+        .chunks_exact(SLICE_BYTES)
+        .any(|existing| existing == encoded_slice);
+    if inserted {
+        slices_buf.extend_from_slice(&encoded_slice);
+    }
+
+    let new_len = chunk_index as u64 * CHUNK_SIZE as u64
+        + slice.get_chunk_pos() as u64
+        + slice.get_size() as u64;
+    let grew_by = new_len.saturating_sub(attr.length);
+    if inserted || grew_by != 0 {
+        if grew_by != 0 {
+            attr.length = new_len;
+        }
+        attr.update_modification_time();
+        txn_put_attr(txn, inode, &attr)?;
+        if inserted {
+            rocksdb_timed_op!(
+                db_puts_total,
+                db_put_duration_ms,
+                db_try!(txn.put(&slices_key, &slices_buf))
+            );
+        }
+    }
+
+    Ok(SliceCommitResult {
+        grew_by,
+        slice_count: slices_buf.len() / SLICE_BYTES,
+        inserted,
+    })
+}
+
 fn set_dentry_in_write_batch<const TRANSACTION: bool>(
     batch: &mut rocksdb::WriteBatchWithTransaction<TRANSACTION>,
     parent: Ino,
@@ -866,82 +945,13 @@ impl Backend for RocksdbBackend {
             &write_options,
             &rocksdb::OptimisticTransactionOptions::default(),
         );
-        let attr_key = key::attr(inode);
-        let attr_buf = rocksdb_timed_op!(
-            db_gets_total,
-            db_get_duration_ms,
-            db_try!(txn.get_for_update(&attr_key, true))
-        )
-        .context(model_err::NotFoundSnafu {
-            kind: ModelKind::Attr,
-            key:  String::from_utf8_lossy(&attr_key).to_string(),
-        })
-        .context(ModelSnafu)?;
-        let mut attr: InodeAttr = model_try!(bincode::deserialize(&attr_buf).context(
-            model_err::CorruptionSnafu {
-                kind: ModelKind::Attr,
-                key:  String::from_utf8_lossy(&attr_key).to_string(),
-            }
-        ));
-        ensure!(attr.is_file(), LibcSnafu { errno: libc::EPERM });
-
-        let slices_key = key::chunk_slices(inode, chunk_index);
-        let mut slices_buf = rocksdb_timed_op!(
-            db_gets_total,
-            db_get_duration_ms,
-            db_try!(txn.get_for_update(&slices_key, true))
-        )
-        .unwrap_or_default();
-        if !slices_buf.len().is_multiple_of(SLICE_BYTES) {
-            return Err(model_err::Error::CorruptionString {
-                kind:   ModelKind::ChunkSlices,
-                key:    String::from_utf8_lossy(&slices_key).to_string(),
-                reason: format!("invalid encoded slice length {}", slices_buf.len()),
-            })
-            .context(ModelSnafu);
-        }
-        let encoded_slice = model_try!(bincode::serialize(slice).context(
-            model_err::CorruptionSnafu {
-                kind: ModelKind::ChunkSlices,
-                key:  String::from_utf8_lossy(&slices_key).to_string(),
-            }
-        ));
-        let inserted = !slices_buf
-            .chunks_exact(SLICE_BYTES)
-            .any(|existing| existing == encoded_slice);
-        if inserted {
-            slices_buf.extend_from_slice(&encoded_slice);
-        }
-
-        let new_len = chunk_index as u64 * CHUNK_SIZE as u64
-            + slice.get_chunk_pos() as u64
-            + slice.get_size() as u64;
-        let grew_by = new_len.saturating_sub(attr.length);
-        if inserted || grew_by != 0 {
-            if grew_by != 0 {
-                attr.length = new_len;
-            }
-            attr.update_modification_time();
-            txn_put_attr(&txn, inode, &attr)?;
-            if inserted {
-                rocksdb_timed_op!(
-                    db_puts_total,
-                    db_put_duration_ms,
-                    db_try!(txn.put(&slices_key, &slices_buf))
-                );
-            }
-            rocksdb_timed_op!(
-                db_transactions_total,
-                db_transaction_duration_ms,
-                db_try!(txn.commit())
-            );
-        }
-
-        Ok(SliceCommitResult {
-            grew_by,
-            slice_count: slices_buf.len() / SLICE_BYTES,
-            inserted,
-        })
+        let result = stage_slice_commit(&txn, inode, chunk_index, slice)?;
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            db_try!(txn.commit())
+        );
+        Ok(result)
     }
 
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()> {
@@ -2379,5 +2389,29 @@ mod tests {
         let slices = backend.get_chunk_slices(inode, 0).unwrap();
         assert_eq!(slices.0, vec![first, second]);
         assert_eq!(backend.get_attr(inode).unwrap().length, 12);
+    }
+
+    #[rstest]
+    fn aborted_slice_transaction_leaves_no_partial_publication(
+        test_backend: (RocksdbBackend, TempDir),
+    ) {
+        let (backend, _tempdir) = test_backend;
+        let inode = Ino(43);
+        backend
+            .set_attr(
+                inode,
+                &InodeAttr {
+                    kind: FileType::RegularFile,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let slice = Slice::new_owned(0, 200, 8);
+        let transaction = backend.db.transaction();
+        stage_slice_commit(&transaction, inode, 0, &slice).unwrap();
+        drop(transaction);
+
+        assert_eq!(backend.get_attr(inode).unwrap().length, 0);
+        assert!(backend.get_raw_chunk_slices(inode, 0).unwrap().is_none());
     }
 }

@@ -493,7 +493,7 @@ impl KisekiVFS {
                 .await
                 .context(LibcSnafu { errno: EINTR })?;
 
-            write_guard.flush().await?;
+            write_guard.sync_remote().await?;
             fh.remove_operation(&ctx).await;
         }
         Ok(())
