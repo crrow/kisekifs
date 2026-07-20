@@ -47,7 +47,7 @@ alias c := check
 
 alias t := test
 @test:
-    cargo nextest run --all-features
+    KISEKI_DISABLE_DISK_POOL=1 cargo nextest run --workspace --all-features
 
 alias b := bench
 @bench:

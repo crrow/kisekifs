@@ -37,7 +37,7 @@ jobs:
         id: rust-version
         run: |
           RUST_VERSION=$(grep 'channel = ' rust-toolchain.toml | cut -d '"' -f 2)
-          echo "version=$RUST_VERSION" >> $GITHUB_OUTPUT
+          echo "version=$RUST_VERSION" >> "$GITHUB_OUTPUT"
           echo "Rust version: $RUST_VERSION"
 
       - name: Install Rust toolchain

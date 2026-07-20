@@ -28,6 +28,11 @@ use tracing::{debug, instrument};
 use super::{KisekiVFS, Opened};
 use crate::err::{LibcSnafu, MetaSnafu, Result};
 
+#[cfg(target_os = "macos")]
+const UNLOCK_LOCK_TYPE: libc::c_int = libc::F_UNLCK as libc::c_int;
+#[cfg(not(target_os = "macos"))]
+const UNLOCK_LOCK_TYPE: libc::c_int = libc::F_UNLCK;
+
 impl KisekiVFS {
     /// Open a file for I/O operations.
     ///
@@ -400,7 +405,7 @@ impl KisekiVFS {
                     ino,
                     lock_owner,
                     false,
-                    libc::F_UNLCK.into(),
+                    UNLOCK_LOCK_TYPE,
                     0,
                     0x7FFFFFFFFFFFFFFF,
                 )
@@ -526,7 +531,7 @@ impl KisekiVFS {
                 let (locks, fowner, powner) = fh.get_posix_lock_info();
                 if locks & 1 != 0 {
                     self.meta
-                        .flock(ctx.clone(), inode, fowner, libc::F_UNLCK.into())
+                        .flock(ctx.clone(), inode, fowner, UNLOCK_LOCK_TYPE)
                         .await?;
                 }
                 if locks & 2 != 0 && powner != 0 {
@@ -536,7 +541,7 @@ impl KisekiVFS {
                             inode,
                             powner,
                             false,
-                            libc::F_UNLCK.into(),
+                            UNLOCK_LOCK_TYPE,
                             0,
                             0x7FFFFFFFFFFFFFFF,
                         )
