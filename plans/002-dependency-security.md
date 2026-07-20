@@ -10,6 +10,7 @@
 
 ## Status
 
+- **State**: DONE
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
@@ -142,13 +143,30 @@ the advisory job fail; restore the lockfile and it passes.
 
 ## Done criteria
 
-- [ ] `cargo deny check advisories` exits 0.
-- [ ] No vulnerability advisory is ignored.
-- [ ] `users` is absent from first-party dependencies.
-- [ ] Patched versions are present in `Cargo.lock`.
-- [ ] Check, lint, format, and full nextest pass.
-- [ ] Required remote advisory and CI jobs are green.
-- [ ] Only in-scope files and `plans/README.md` changed.
+- [x] `cargo deny check advisories` exits 0.
+- [x] No vulnerability advisory is ignored.
+- [x] `users` is absent from first-party dependencies.
+- [x] Patched versions are present in `Cargo.lock`.
+- [x] Check, lint, format, and full nextest pass.
+- [x] Required remote advisory and CI jobs are green.
+- [x] Scope expansion was limited to removing unused dependency paths and
+      adapting their first-party callers; no unrelated source was changed.
+
+## Completion evidence
+
+- Implemented by commits `40e0f84` and `8299287`.
+- CI run `29710854040` passed every required job, including dependency
+  advisories, tests, coverage, Clippy, documentation, and formatting.
+- CI is pinned to `cargo-deny` 0.20.2 and the local policy audits transitive
+  unsoundness. The second audit pass additionally upgraded `fuser`, `git2`,
+  `memmap2`, `rand`, and `serial_test` without adding advisory ignores.
+- The scope expanded after the current advisory database exposed stale
+  transitive paths through unused OpenDAL/TiKV integrations. Those unused
+  dependencies and their dead error variants were removed; object-store and
+  telemetry callers were migrated only as required by the patched releases.
+- The remaining `bincode` maintenance exception is narrowly documented in
+  `deny.toml`; it is not a vulnerability exception and preserves the current
+  durable RocksDB encoding pending a versioned migration.
 
 ## STOP conditions
 
