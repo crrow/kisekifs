@@ -17,10 +17,6 @@
 use std::{
     cmp::{max, min},
     io::Cursor,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
 };
 
 use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, PAGE_SIZE};
@@ -337,6 +333,9 @@ impl SliceBuffer {
         key_gen: F,
         object_storage: ObjectStorage,
     ) -> Result<usize> {
+        if self.length == 0 {
+            return Ok(0);
+        }
         self.flush_bulk_to(
             ((self.length - 1) / BLOCK_SIZE + 1) * BLOCK_SIZE,
             key_gen,
@@ -378,85 +377,22 @@ impl SliceBuffer {
             .map(|(idx, _)| idx)
             .collect::<Vec<_>>();
 
-        let total_released_page_cnt = Arc::new(AtomicUsize::new(0));
-        let handles = pending_block_idxes
-            .into_iter()
-            .map(|idx| {
-                let data_block = std::mem::take(&mut self.block_slots[idx]);
-                (idx, data_block.get_data_block())
-            })
-            .map(|(idx, data_block)| {
-                self.flushed_length += data_block.length;
-                let key = key_gen(idx, data_block.length);
-                let sto = object_storage.clone();
-                let total_released_page_cnt = total_released_page_cnt.clone();
-                let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
-                    let path = ObjectStoragePath::parse(&key)
-                        .map_err(kiseki_utils::object_storage::ObjectStorageError::from)
-                        .context(ObjectStorageSnafu)?;
-                    let mut writer = sto.writer(&path);
-                    // let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
-                    let total_flush_data = data_block.length;
-                    let mut current_flush_data = 0;
-                    // let mut object_block_buf = vec![0u8; total_flush_data];
-                    // let mut cursor = Cursor::new(&mut object_block_buf);
+        let mut total_released_page_cnt = 0;
+        for idx in pending_block_idxes {
+            let Block::Data(data_block) = &self.block_slots[idx] else {
+                continue;
+            };
+            let block_length = data_block.length;
+            let released_page_cnt = data_block.pages.iter().flatten().count();
+            let key = key_gen(idx, block_length);
+            copy_data_block_to_object_storage(data_block, &key, &object_storage).await?;
 
-                    while current_flush_data < total_flush_data {
-                        let page_idx = current_flush_data / PAGE_SIZE;
-                        let page_offset = current_flush_data % PAGE_SIZE;
-                        let to_flush_len = min(
-                            PAGE_SIZE - page_offset,
-                            total_flush_data - current_flush_data,
-                        );
-                        match &data_block.pages[page_idx] {
-                            None => {
-                                for _ in 0..to_flush_len {
-                                    writer.write_u8(0).await.context(UnknownIOSnafu)?;
-                                }
-                                // cursor.advance(to_flush_len);
-                                // writer
-                                //     .write_all(&vec![0u8; to_flush_len])
-                                //     .await
-                                //     .context(UnknownIOSnafu)?;
-                            }
-                            Some(page) => {
-                                total_released_page_cnt.fetch_add(1, Ordering::AcqRel);
-                                page.copy_to_writer(page_offset, to_flush_len, &mut writer)
-                                    .await?
-                            }
-                        }
-                        current_flush_data += to_flush_len;
-                    }
-                    // writer.close().await.context(OpenDalSnafu)?;
-                    // sto.write_with(&key, object_block_buf)
-                    //     .concurrent(2)
-                    //     .await
-                    //     .context(OpenDalSnafu)?;
-                    if let Err(e) = writer.flush().await {
-                        panic!(
-                            "close writer failed: {:?}, expect flush len: {}",
-                            e,
-                            ReadableSize(total_flush_data as u64)
-                        );
-                    }
-                    writer.shutdown().await.context(UnknownIOSnafu)?;
-                    debug!(
-                        "write object to {:?}, len: {:?}",
-                        key,
-                        ReadableSize(total_flush_data as u64).to_string()
-                    );
-                    Ok(())
-                });
-                handle
-            })
-            .collect::<Vec<_>>();
-
-        for r in futures::future::join_all(handles).await.into_iter() {
-            r.context(JoinErrSnafu)??;
+            self.block_slots[idx] = Block::Empty;
+            self.flushed_length = max(self.flushed_length, idx * BLOCK_SIZE + block_length);
+            self.total_page_cnt -= released_page_cnt;
+            total_released_page_cnt += released_page_cnt;
         }
 
-        let total_released_page_cnt = total_released_page_cnt.load(Ordering::Relaxed);
-        self.total_page_cnt -= total_released_page_cnt;
         debug!(
             "flushed length: {}, total_released_page: {}",
             self.flushed_length, total_released_page_cnt
@@ -471,6 +407,9 @@ impl SliceBuffer {
         sid: SliceID,
         cache: cache::file_cache::FileCacheRef,
     ) -> Result<usize> {
+        if self.length == 0 {
+            return Ok(0);
+        }
         self.stage(
             sid,
             ((self.length - 1) / BLOCK_SIZE + 1) * BLOCK_SIZE,
@@ -510,33 +449,21 @@ impl SliceBuffer {
             .map(|(idx, _)| idx)
             .collect::<Vec<_>>();
 
-        let total_released_page_cnt = Arc::new(AtomicUsize::new(0));
-        let handles = pending_block_idxes
-            .into_iter()
-            .map(|idx| {
-                let data_block = std::mem::take(&mut self.block_slots[idx]);
-                (idx, data_block.get_data_block())
-            })
-            .map(|(idx, data_block)| {
-                self.flushed_length += data_block.length;
-                let cache = cache.clone();
-                let total_released_page_cnt = total_released_page_cnt.clone();
-                let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
-                    let (_, total_free_page_cnt) = cache
-                        .stage(sid, idx, data_block.length, data_block.pages)
-                        .await?;
-                    total_released_page_cnt.fetch_add(total_free_page_cnt, Ordering::AcqRel);
-                    Ok(())
-                });
-                handle
-            })
-            .collect::<Vec<_>>();
+        let mut total_released_page_cnt = 0;
+        for idx in pending_block_idxes {
+            let Block::Data(data_block) = &self.block_slots[idx] else {
+                continue;
+            };
+            let block_length = data_block.length;
+            let (_, released_page_cnt) = cache
+                .stage(sid, idx, block_length, &data_block.pages)
+                .await?;
 
-        for r in futures::future::join_all(handles).await.into_iter() {
-            r.context(JoinErrSnafu)??;
+            self.block_slots[idx] = Block::Empty;
+            self.flushed_length = max(self.flushed_length, idx * BLOCK_SIZE + block_length);
+            total_released_page_cnt += released_page_cnt;
         }
 
-        let total_released_page_cnt = total_released_page_cnt.load(Ordering::Relaxed);
         self.total_page_cnt -= total_released_page_cnt;
         debug!(
             "slice_id({}), flushed length: {}, total_released_page: {}",
@@ -544,6 +471,46 @@ impl SliceBuffer {
         );
         Ok(total_released_page_cnt)
     }
+}
+
+async fn copy_data_block_to_object_storage(
+    data_block: &DataBlock,
+    key: &str,
+    object_storage: &ObjectStorage,
+) -> Result<()> {
+    let path = ObjectStoragePath::parse(key)
+        .map_err(kiseki_utils::object_storage::ObjectStorageError::from)
+        .context(ObjectStorageSnafu)?;
+    let mut writer = object_storage.writer(&path);
+    let mut current_flush_data = 0;
+
+    while current_flush_data < data_block.length {
+        let page_idx = current_flush_data / PAGE_SIZE;
+        let page_offset = current_flush_data % PAGE_SIZE;
+        let to_flush_len = min(
+            PAGE_SIZE - page_offset,
+            data_block.length - current_flush_data,
+        );
+        match &data_block.pages[page_idx] {
+            None => writer
+                .write_all(&vec![0u8; to_flush_len])
+                .await
+                .context(UnknownIOSnafu)?,
+            Some(page) => {
+                page.copy_to_writer(page_offset, to_flush_len, &mut writer)
+                    .await?
+            }
+        }
+        current_flush_data += to_flush_len;
+    }
+    writer.flush().await.context(UnknownIOSnafu)?;
+    writer.shutdown().await.context(UnknownIOSnafu)?;
+    debug!(
+        "write object to {:?}, len: {:?}",
+        key,
+        ReadableSize(data_block.length as u64).to_string()
+    );
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -589,14 +556,6 @@ impl Block {
             length: 0,
             pages:  (0..(BLOCK_SIZE / PAGE_SIZE)).map(|_| None).collect(),
         })
-    }
-
-    fn get_data_block(self) -> DataBlock {
-        if let Block::Data(db) = self {
-            db
-        } else {
-            panic!("Block is empty")
-        }
     }
 
     async fn get_page(&mut self, page_idx: usize) -> (&mut Page, bool) {
@@ -645,8 +604,13 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
     use futures::StreamExt;
-    use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
+    use kiseki_utils::{
+        logger::install_fmt_log,
+        object_storage::{new_local_object_store, new_memory_object_store},
+    };
     use tracing::info;
 
     use super::*;
@@ -713,6 +677,142 @@ mod tests {
         let read_len = slice_buffer.read_at(5, dst.as_mut_slice()).await.unwrap();
         assert_eq!(read_len, 5);
         assert_eq!(dst, vec![0u8; 5]);
+    }
+
+    #[tokio::test]
+    async fn failed_stage_keeps_buffered_pages_retryable() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let stage_dir = tempdir.path().join("stage");
+        let cache = Arc::new(
+            crate::cache::file_cache::FileCache::new(
+                crate::cache::file_cache::Config {
+                    stage_cache_dir: stage_dir.clone(),
+                    max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
+                    cache_ttl:       Duration::from_secs(3600),
+                },
+                new_memory_object_store(),
+            )
+            .unwrap(),
+        );
+        std::fs::remove_dir_all(&stage_dir).unwrap();
+        std::fs::write(&stage_dir, b"prevent local stage writes").unwrap();
+
+        let data = b"buffered bytes must survive a failed stage";
+        let mut slice_buffer = SliceBuffer::new();
+        slice_buffer.write_at(0, data).await.unwrap();
+        let page_count = slice_buffer.total_page_cnt;
+
+        assert!(
+            slice_buffer
+                .stage(0xABCD_EF03, BLOCK_SIZE, cache.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(slice_buffer.flushed_length(), 0);
+        assert_eq!(slice_buffer.total_page_cnt, page_count);
+        let mut actual = vec![0; data.len()];
+        slice_buffer.read_at(0, &mut actual).await.unwrap();
+        assert_eq!(actual, data);
+
+        std::fs::remove_file(&stage_dir).unwrap();
+        std::fs::create_dir(&stage_dir).unwrap();
+        assert_eq!(
+            slice_buffer
+                .stage(0xABCD_EF03, BLOCK_SIZE, cache)
+                .await
+                .unwrap(),
+            page_count
+        );
+        assert_eq!(slice_buffer.flushed_length(), data.len());
+        assert_eq!(slice_buffer.total_page_cnt, 0);
+    }
+
+    #[tokio::test]
+    async fn staging_sparse_data_advances_the_flushed_high_watermark() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            crate::cache::file_cache::FileCache::new(
+                crate::cache::file_cache::Config {
+                    stage_cache_dir: tempdir.path().join("stage"),
+                    max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
+                    cache_ttl:       Duration::from_secs(3600),
+                },
+                new_memory_object_store(),
+            )
+            .unwrap(),
+        );
+        let mut slice_buffer = SliceBuffer::new();
+        let write_offset = BLOCK_SIZE + 3;
+        let data = b"sparse";
+        slice_buffer.write_at(write_offset, data).await.unwrap();
+
+        slice_buffer.flush_v2(0xABCD_EF06, cache).await.unwrap();
+
+        assert_eq!(slice_buffer.flushed_length(), write_offset + data.len());
+        assert!(slice_buffer.write_at(write_offset, data).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_direct_flush_keeps_buffered_pages_retryable() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let remote_dir = tempdir.path().join("remote");
+        let object_storage = new_local_object_store(&remote_dir).unwrap();
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+        std::fs::write(&remote_dir, b"prevent remote writes").unwrap();
+
+        let data = b"buffered bytes must survive a failed direct flush";
+        let mut slice_buffer = SliceBuffer::new();
+        slice_buffer.write_at(0, data).await.unwrap();
+        let page_count = slice_buffer.total_page_cnt;
+        let key_gen = |_: BlockIndex, _: BlockSize| "block".to_string();
+
+        assert!(
+            slice_buffer
+                .flush(key_gen, object_storage.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(slice_buffer.flushed_length(), 0);
+        assert_eq!(slice_buffer.total_page_cnt, page_count);
+        let mut actual = vec![0; data.len()];
+        slice_buffer.read_at(0, &mut actual).await.unwrap();
+        assert_eq!(actual, data);
+
+        std::fs::remove_file(&remote_dir).unwrap();
+        std::fs::create_dir(&remote_dir).unwrap();
+        assert_eq!(
+            slice_buffer
+                .flush(key_gen, object_storage.clone())
+                .await
+                .unwrap(),
+            page_count
+        );
+        assert_eq!(slice_buffer.flushed_length(), data.len());
+        assert_eq!(slice_buffer.total_page_cnt, 0);
+        assert_eq!(
+            object_storage
+                .get(&ObjectStoragePath::parse("block").unwrap())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            data
+        );
+    }
+
+    #[tokio::test]
+    async fn flushing_an_empty_buffer_is_a_noop() {
+        let mut slice_buffer = SliceBuffer::new();
+        let object_storage = new_memory_object_store();
+        let key_gen = |_: BlockIndex, _: BlockSize| "unused".to_string();
+
+        assert_eq!(
+            slice_buffer.flush(key_gen, object_storage).await.unwrap(),
+            0
+        );
+        assert_eq!(slice_buffer.flushed_length(), 0);
     }
 
     #[tokio::test]

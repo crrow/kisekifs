@@ -12,13 +12,27 @@
 
 ## Status
 
-- **State**: TODO
+- **State**: IN PROGRESS
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
 - **Depends on**: `plans/005-fuse-boundary-hardening.md`
 - **Category**: bug / correctness
 - **Planned at**: commit `2fb2c95`, 2026-07-20
+
+### Progress at 2026-07-20
+
+Implemented the durable key parser, fsynced atomic local staging, authoritative
+restart-recovered stage index, retry-safe cache migration, rollback-safe
+`SliceBuffer` transitions, retryable writer failures, remote confirmation
+before metadata visibility, and atomic/idempotent synced RocksDB slice commits.
+The stage directory is now instance-configurable so independent mounts/tests do
+not share ownership accidentally.
+
+Still required before this plan is `DONE`: remove the fixed one-second writer
+timeouts and own/drain their tasks, distinguish local-durable `flush` from
+remote-durable `fsync`, add deterministic per-transition fault injection and
+subprocess crash/reopen coverage, and run the mounted crash matrix.
 
 ## Why this matters
 

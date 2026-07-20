@@ -304,28 +304,70 @@ impl FromStr for SliceKey {
     // Define the error type for parsing
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts = s
-            .strip_prefix("chunks/")
-            .unwrap_or(s) // Remove the "chunks-" prefix
-            .split('_')
-            .map(u64::from_str) // Parse hexadecimal parts
-            .collect::<Result<Vec<_>, _>>()
-            .context(ParseSliceKeyFailedSnafu { str: s.to_string() })?;
+        let Some(encoded) = s.strip_prefix("chunks") else {
+            return InvalidSliceKeyStrSnafu { str: s.to_string() }.fail();
+        };
+        let fields = encoded.split('_').collect::<Vec<_>>();
+        let [_, _, slice_id, block_idx, block_size] = fields.as_slice() else {
+            return InvalidSliceKeyStrSnafu { str: s.to_string() }.fail();
+        };
+        let parse_hex = |field: &str| {
+            u64::from_str_radix(field, 16).context(ParseSliceKeyFailedSnafu { str: s.to_string() })
+        };
+        let key = SliceKey {
+            slice_id:   parse_hex(slice_id)?,
+            block_idx:  usize::try_from(parse_hex(block_idx)?)
+                .map_err(|_| InvalidSliceKeyStrSnafu { str: s.to_string() }.build())?,
+            block_size: usize::try_from(parse_hex(block_size)?)
+                .map_err(|_| InvalidSliceKeyStrSnafu { str: s.to_string() }.build())?,
+        };
         ensure!(
-            parts.len() == 5,
+            key.gen_path_for_object_sto() == s,
             InvalidSliceKeyStrSnafu { str: s.to_string() }
         );
-        Ok(SliceKey {
-            slice_id:   parts[2],
-            block_idx:  parts[3] as usize,
-            block_size: parts[4] as usize,
-        })
+        Ok(key)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slice_key_object_path_round_trips_hex_fields() {
+        for key in [
+            SliceKey::new(0, 0, 0),
+            SliceKey::new(0x1234_5678, 0x0012_3456, 0x0040_0000),
+            SliceKey::new(0xABCD_EF12_3456_7890, 0x00FE_DCBA, 0x00A0_B0C0),
+            SliceKey::new(u64::MAX, usize::MAX, usize::MAX),
+        ] {
+            let path = key.gen_path_for_object_sto();
+            assert_eq!(path.parse::<SliceKey>().unwrap(), key, "path: {path}");
+        }
+    }
+
+    #[test]
+    fn slice_key_parser_rejects_non_canonical_paths() {
+        let key = SliceKey::new(0xABCD_EF12, 0xABCD, 0x400000);
+        let canonical = key.gen_path_for_object_sto();
+        let local_name = key.gen_path_for_local_sto();
+        let lower_case = canonical.to_ascii_lowercase();
+        let wrong_derived_prefix = format!("chunks00000001{}", &local_name[8..]);
+
+        for invalid in [
+            local_name.as_str(),
+            lower_case.as_str(),
+            wrong_derived_prefix.as_str(),
+            "chunks/00000000_00000000_00000000_00000000_00000000",
+            "chunks00000000_00000000_00000000_00000000",
+            "chunks00000000_00000000_00000000_00000000_00000000_extra",
+        ] {
+            assert!(
+                invalid.parse::<SliceKey>().is_err(),
+                "accepted non-canonical slice key: {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn slice_v2() {

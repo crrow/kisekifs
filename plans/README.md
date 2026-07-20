@@ -16,7 +16,7 @@ honor its STOP conditions, run every gate, and update the status here.
 | 003 | Make volume formatting safe and explicit | P1 | M | 001 | DONE |
 | 004 | Make object storage configurable and secret-safe | P1 | M | 001, 002 | DONE |
 | 005 | Make the FUSE request boundary panic-free and correct | P1 | M | 001 | DONE |
-| 006 | Make write publication crash-consistent and restart-recoverable | P1 | L | 005 | TODO |
+| 006 | Make write publication crash-consistent and restart-recoverable | P1 | L | 005 | IN PROGRESS |
 | 007 | Eliminate unsafe aliasing from the buffer data path | P1 | M | 006 | TODO |
 | 008 | Add a mounted Linux acceptance gate and supported-semantics contract | P1 | L | 006, 007 | TODO |
 | 009 | Make mount resources instance-scoped, observable, and gracefully drained | P1 | L | 006, 007, 008 | TODO |

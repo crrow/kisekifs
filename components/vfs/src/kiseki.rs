@@ -130,6 +130,10 @@ impl KisekiVFS {
             vfs_config.chunk_size,
             meta.clone(),
             object_storage,
+            kiseki_storage::cache::file_cache::Config {
+                stage_cache_dir: vfs_config.stage_cache_dir.clone(),
+                ..Default::default()
+            },
         )?);
 
         let vfs = Self {

@@ -34,7 +34,13 @@
 //! 5. Recover: when the system restarts, we will clean all cache and flush old
 //!    staged data to the remote storage.
 
-use std::{cmp::min, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    cmp::min,
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use kiseki_common::{BlockIndex, PAGE_SIZE};
@@ -43,13 +49,13 @@ use kiseki_utils::{
     object_storage::{LocalStorage, ObjectReader, ObjectStorage},
     readable_size::ReadableSize,
 };
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tracing::{debug, error, warn};
 
 use crate::{
-    err::{Error::CacheError, ObjectStorageSnafu, Result, UnknownIOSnafu},
+    err::{Error::CacheError, FlushBlockFailedSnafu, ObjectStorageSnafu, Result, UnknownIOSnafu},
     pool::Page,
 };
 
@@ -80,12 +86,12 @@ impl Default for Config {
 pub type FileCacheRef = Arc<FileCache>;
 
 pub struct FileCache {
-    // Kept for the pending flush/recover logic; not read yet.
-    #[allow(dead_code)]
-    stage_dir:      PathBuf,
+    /// Authoritative index for locally readable staged blocks. Unlike the
+    /// policy cache below, entries stay here until remote migration succeeds.
+    staged_index:   Arc<tokio::sync::RwLock<HashMap<SliceKey, CacheIndex>>>,
+    /// TTL/capacity policy only. Eviction schedules migration but does not own
+    /// the staged block's readable lifetime.
     index:          moka::future::Cache<SliceKey, CacheIndex>,
-    // Kept for the pending flush/recover logic; not read yet.
-    #[allow(dead_code)]
     remote_storage: ObjectStorage,
     local_storage:  LocalStorage,
 }
@@ -97,30 +103,26 @@ impl FileCache {
         let local_storage =
             kiseki_utils::object_storage::new_local_object_store(&config.stage_cache_dir)
                 .context(ObjectStorageSnafu)?;
+        let recovered = recover_stage_index(&config.stage_cache_dir)?;
+        let recovered_entries = recovered.values().cloned().collect::<Vec<_>>();
+        let staged_index = Arc::new(tokio::sync::RwLock::new(recovered));
 
         let local_storage_clone = local_storage.clone();
         let remote_storage_clone = remote_storage.clone();
+        let staged_index_clone = staged_index.clone();
         let eviction_listener =
             move |k: Arc<SliceKey>, v: CacheIndex, cause| -> moka::notification::ListenerFuture {
                 debug!("evicting block from the stage cache: {k:?}, reason: {cause:?}");
                 let local_storage = local_storage_clone.clone();
                 let remote_storage = remote_storage_clone.clone();
+                let staged_index = staged_index_clone.clone();
                 // Create a Future that removes the block from the local storage and
                 // flushes it to the remote storage.
                 //
                 // Convert the regular Future into ListenerFuture. This method is
                 // provided by moka::future::FutureExt trait.
                 moka::future::FutureExt::boxed(async move {
-                    if let Err(e) = migrate_from_local_to_remote(
-                        local_storage,
-                        remote_storage,
-                        v.slice_key.block_size,
-                        &k,
-                    )
-                    .await
-                    {
-                        error!("Failed to flush the block to the remote storage: {e:?}");
-                    }
+                    migrate_with_retry(local_storage, remote_storage, staged_index, v).await;
                 })
             };
 
@@ -139,8 +141,20 @@ impl FileCache {
             .async_eviction_listener(eviction_listener)
             .build();
 
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| CacheError {
+            error: format!("file cache requires a Tokio runtime: {error}"),
+        })?;
+        for entry in recovered_entries {
+            let local_storage = local_storage.clone();
+            let remote_storage = remote_storage.clone();
+            let staged_index = staged_index.clone();
+            runtime.spawn(async move {
+                migrate_with_retry(local_storage, remote_storage, staged_index, entry).await;
+            });
+        }
+
         Ok(Self {
-            stage_dir: config.stage_cache_dir,
+            staged_index,
             index,
             remote_storage,
             local_storage,
@@ -148,17 +162,21 @@ impl FileCache {
     }
 
     pub async fn get(self: &Arc<Self>, slice_key: &SliceKey) -> Result<Option<ObjectReader>> {
-        match self.index.get(slice_key).await {
-            None => Ok(None),
-            Some(_) => {
-                let path = slice_key.make_object_storage_path();
-                let reader = self
-                    .local_storage
-                    .get(&path)
-                    .await
-                    .context(ObjectStorageSnafu)?;
-                Ok(Some(reader))
+        if !self.staged_index.read().await.contains_key(slice_key) {
+            return Ok(None);
+        }
+        let path = slice_key.make_object_storage_path();
+        match self.local_storage.get(&path).await {
+            Ok(reader) => Ok(Some(reader)),
+            Err(error) if kiseki_utils::object_storage::is_not_found_error(&error) => {
+                if self.remote_block_is_confirmed(slice_key).await? {
+                    self.staged_index.write().await.remove(slice_key);
+                    Ok(None)
+                } else {
+                    FlushBlockFailedSnafu.fail()
+                }
             }
+            Err(error) => Err(error).context(ObjectStorageSnafu),
         }
     }
 
@@ -168,24 +186,30 @@ impl FileCache {
         offset: usize,
         length: usize,
     ) -> Result<Option<Bytes>> {
-        match self.index.get(slice_key).await {
-            None => {
-                warn!("block not found in the stage cache: {slice_key:?}");
-                Ok(None)
+        if !self.staged_index.read().await.contains_key(slice_key) {
+            warn!("block not found in the stage cache: {slice_key:?}");
+            return Ok(None);
+        }
+        let path = slice_key.make_object_storage_path();
+        debug!(
+            "find block in the stage cache: {:?}, try to use path: {:?} to load",
+            slice_key, &path
+        );
+        match self
+            .local_storage
+            .get_range(&path, offset..offset + length)
+            .await
+        {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if kiseki_utils::object_storage::is_not_found_error(&error) => {
+                if self.remote_block_is_confirmed(slice_key).await? {
+                    self.staged_index.write().await.remove(slice_key);
+                    Ok(None)
+                } else {
+                    FlushBlockFailedSnafu.fail()
+                }
             }
-            Some(_) => {
-                let path = slice_key.make_object_storage_path();
-                debug!(
-                    "find block in the stage cache: {:?}, try to use path: {:?} to load",
-                    slice_key, &path
-                );
-                let bytes = self
-                    .local_storage
-                    .get_range(&path, offset..offset + length)
-                    .await
-                    .context(ObjectStorageSnafu)?;
-                Ok(Some(bytes))
-            }
+            Err(error) => Err(error).context(ObjectStorageSnafu),
         }
     }
 
@@ -194,35 +218,196 @@ impl FileCache {
         sid: SliceID,
         block_index: BlockIndex,
         block_length: usize,
-        pages: Box<[Option<Page>]>,
+        pages: &[Option<Page>],
     ) -> Result<(usize, usize)> {
         let key = SliceKey::new(sid, block_index, block_length);
         debug!("staging block: {key:?}");
-        let mut total_flush_len = 0;
-        let mut total_release_page_cnt = 0;
-        let _ = self
+        let total_release_page_cnt = pages.iter().filter(|page| page.is_some()).count();
+        let cache_index = self
             .index
             .try_get_with(key, async {
                 let mut writer = self.local_storage.writer(&key.make_object_storage_path());
-                let (tfl, trc) =
-                    copy_from_buffer_to_local(block_length, pages, &mut writer).await?;
-                total_flush_len = tfl;
-                total_release_page_cnt = trc;
-                let idx = CacheIndex { slice_key: key };
+                copy_from_buffer_to_local(block_length, pages, &mut writer).await?;
+                let idx = CacheIndex::new(key);
                 Ok(idx) as Result<CacheIndex>
             })
             .await
             .map_err(|e| CacheError {
                 error: e.to_string(),
             })?;
+        self.staged_index.write().await.insert(key, cache_index);
 
-        Ok((total_flush_len, total_release_page_cnt))
+        Ok((block_length, total_release_page_cnt))
     }
+
+    pub async fn flush_key(self: &Arc<Self>, slice_key: &SliceKey) -> Result<()> {
+        let Some(entry) = self.staged_index.read().await.get(slice_key).cloned() else {
+            self.index.invalidate(slice_key).await;
+            return Ok(());
+        };
+
+        migrate_once(
+            self.local_storage.clone(),
+            self.remote_storage.clone(),
+            self.staged_index.clone(),
+            &entry,
+        )
+        .await?;
+        self.index.invalidate(slice_key).await;
+        Ok(())
+    }
+
+    /// Flush every locally staged block for a slice to remote storage.
+    ///
+    /// This is the durability barrier used before publishing slice metadata.
+    /// A missing staged entry is already remote-confirmed (or the slice has no
+    /// data blocks), so it is safe to treat it as complete.
+    pub async fn flush_slice(self: &Arc<Self>, slice_id: SliceID) -> Result<()> {
+        let mut keys = self
+            .staged_index
+            .read()
+            .await
+            .keys()
+            .filter(|key| key.slice_id == slice_id)
+            .copied()
+            .collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|key| key.block_idx);
+        for key in keys {
+            self.flush_key(&key).await?;
+        }
+        Ok(())
+    }
+
+    async fn remote_block_is_confirmed(&self, slice_key: &SliceKey) -> Result<bool> {
+        match self
+            .remote_storage
+            .get(&slice_key.make_object_storage_path())
+            .await
+        {
+            Ok(object) => Ok(object.meta.size == slice_key.block_size as u64),
+            Err(error) if kiseki_utils::object_storage::is_not_found_error(&error) => Ok(false),
+            Err(error) => Err(error).context(ObjectStorageSnafu),
+        }
+    }
+}
+
+fn recover_stage_index(stage_dir: &Path) -> Result<HashMap<SliceKey, CacheIndex>> {
+    let mut recovered = HashMap::new();
+    for entry in std::fs::read_dir(stage_dir).context(UnknownIOSnafu)? {
+        let entry = entry.context(UnknownIOSnafu)?;
+        let file_type = entry.file_type().context(UnknownIOSnafu)?;
+        if !file_type.is_file() {
+            return Err(CacheError {
+                error: format!("unexpected non-file stage entry: {:?}", entry.file_name()),
+            });
+        }
+        let file_name = entry.file_name();
+        let file_name = file_name.to_str().ok_or_else(|| CacheError {
+            error: "stage entry name is not valid UTF-8".to_string(),
+        })?;
+        if is_incomplete_stage_file(file_name) {
+            std::fs::remove_file(entry.path()).context(UnknownIOSnafu)?;
+            continue;
+        }
+        let slice_key = file_name.parse::<SliceKey>().map_err(|error| CacheError {
+            error: format!("invalid stage entry {file_name:?}: {error}"),
+        })?;
+        let actual_len = entry.metadata().context(UnknownIOSnafu)?.len();
+        if actual_len != slice_key.block_size as u64 {
+            return Err(CacheError {
+                error: format!(
+                    "stage entry {file_name:?} has length {actual_len}, expected {}",
+                    slice_key.block_size
+                ),
+            });
+        }
+        recovered.insert(slice_key, CacheIndex::new(slice_key));
+    }
+    Ok(recovered)
+}
+
+fn is_incomplete_stage_file(file_name: &str) -> bool {
+    let Some(rest) = file_name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((canonical, suffix)) = rest.rsplit_once(".tmp-") else {
+        return false;
+    };
+    canonical.parse::<SliceKey>().is_ok()
+        && suffix.split('-').count() == 2
+        && suffix
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+async fn migrate_with_retry(
+    local_storage: LocalStorage,
+    remote_storage: ObjectStorage,
+    staged_index: Arc<tokio::sync::RwLock<HashMap<SliceKey, CacheIndex>>>,
+    entry: CacheIndex,
+) {
+    let mut retry_delay = Duration::from_millis(20);
+    loop {
+        match migrate_once(
+            local_storage.clone(),
+            remote_storage.clone(),
+            staged_index.clone(),
+            &entry,
+        )
+        .await
+        {
+            Ok(()) => break,
+            Err(error) => {
+                error!(
+                    slice_key = %entry.slice_key,
+                    ?retry_delay,
+                    %error,
+                    "failed to migrate staged block; retrying"
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = min(retry_delay * 2, Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+async fn migrate_once(
+    local_storage: LocalStorage,
+    remote_storage: ObjectStorage,
+    staged_index: Arc<tokio::sync::RwLock<HashMap<SliceKey, CacheIndex>>>,
+    entry: &CacheIndex,
+) -> Result<()> {
+    let _migration_guard = entry.migration_lock.lock().await;
+    let is_current = staged_index
+        .read()
+        .await
+        .get(&entry.slice_key)
+        .is_some_and(|current| current.same_generation(entry));
+    if !is_current {
+        return Ok(());
+    }
+
+    migrate_from_local_to_remote(
+        local_storage,
+        remote_storage,
+        entry.slice_key.block_size,
+        &entry.slice_key,
+    )
+    .await?;
+
+    let mut staged_index = staged_index.write().await;
+    if staged_index
+        .get(&entry.slice_key)
+        .is_some_and(|current| current.same_generation(entry))
+    {
+        staged_index.remove(&entry.slice_key);
+    }
+    Ok(())
 }
 
 async fn copy_from_buffer_to_local(
     block_length: usize,
-    pages: Box<[Option<Page>]>,
+    pages: &[Option<Page>],
     writer: &mut Box<dyn AsyncWrite + Unpin + Send>,
 ) -> Result<(usize, usize)> {
     let mut total_released_page_cnt = 0;
@@ -248,13 +433,7 @@ async fn copy_from_buffer_to_local(
         }
         current_flush_length += to_flush_len;
     }
-    if let Err(e) = writer.flush().await {
-        panic!(
-            "close writer failed: {:?}, expect flush len: {}",
-            e,
-            ReadableSize(block_length as u64)
-        );
-    }
+    writer.flush().await.context(UnknownIOSnafu)?;
     writer.shutdown().await.context(UnknownIOSnafu)?;
     Ok((block_length, total_released_page_cnt))
 }
@@ -276,7 +455,15 @@ async fn migrate_from_local_to_remote(
         .context(UnknownIOSnafu)?;
     writer.flush().await.context(UnknownIOSnafu)?;
     writer.shutdown().await.context(UnknownIOSnafu)?;
-    assert_eq!(copy_len, expect_copy_len as u64);
+    ensure!(copy_len == expect_copy_len as u64, FlushBlockFailedSnafu);
+    let remote = remote_storage
+        .get(&path)
+        .await
+        .context(ObjectStorageSnafu)?;
+    ensure!(
+        remote.meta.size == expect_copy_len as u64,
+        FlushBlockFailedSnafu
+    );
 
     local_storage
         .delete(&path)
@@ -288,7 +475,21 @@ async fn migrate_from_local_to_remote(
 
 #[derive(Clone, Debug)]
 struct CacheIndex {
-    slice_key: SliceKey,
+    slice_key:      SliceKey,
+    migration_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl CacheIndex {
+    fn new(slice_key: SliceKey) -> Self {
+        Self {
+            slice_key,
+            migration_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.migration_lock, &other.migration_lock)
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +498,253 @@ mod tests {
 
     use super::*;
     use crate::pool;
+
+    fn test_config(stage_cache_dir: PathBuf, cache_ttl: Duration) -> Config {
+        Config {
+            stage_cache_dir,
+            max_stage_size: ReadableSize(30 << 20),
+            cache_ttl,
+        }
+    }
+
+    async fn stage_bytes(cache: &Arc<FileCache>, slice_key: SliceKey, content: &[u8]) {
+        let memory_pool = pool::memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_SIZE * 2);
+        let mut pages: Box<[Option<Page>]> = (0..(BLOCK_SIZE / PAGE_SIZE)).map(|_| None).collect();
+        let mem_page = memory_pool.acquire_page().await;
+        let mut reader = std::io::Cursor::new(content);
+        mem_page
+            .copy_from_reader(0, content.len(), &mut reader)
+            .await
+            .unwrap();
+        pages[0] = Some(Page::Memory(mem_page));
+
+        cache
+            .stage(
+                slice_key.slice_id,
+                slice_key.block_idx,
+                slice_key.block_size,
+                &pages,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_remote_migration_keeps_staged_block_readable() {
+        kiseki_utils::logger::install_fmt_log();
+        let tempdir = tempfile::tempdir().unwrap();
+        let stage_dir = tempdir.path().join("stage");
+        let remote_dir = tempdir.path().join("remote");
+        let remote_storage =
+            kiseki_utils::object_storage::new_local_object_store(&remote_dir).unwrap();
+        let remote_probe = remote_storage.clone();
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+        std::fs::write(&remote_dir, b"block remote directory recreation").unwrap();
+        let cache = Arc::new(
+            FileCache::new(
+                test_config(stage_dir, Duration::from_millis(10)),
+                remote_storage,
+            )
+            .unwrap(),
+        );
+        let content = b"must remain readable after migration failure";
+        let slice_key = SliceKey::new(0xABCD_EF01, 0, content.len());
+        stage_bytes(&cache, slice_key, content).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = cache.index.get(&slice_key).await;
+        let policy_cache = cache.index.clone();
+        let migration = tokio::spawn(async move {
+            policy_cache.run_pending_tasks().await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let bytes = cache
+            .get_range(&slice_key, 0, content.len())
+            .await
+            .unwrap()
+            .expect("staged block must remain indexed after failed migration");
+        assert_eq!(bytes.as_ref(), content);
+
+        std::fs::remove_file(&remote_dir).unwrap();
+        std::fs::create_dir(&remote_dir).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if remote_probe
+                    .get(&slice_key.make_object_storage_path())
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("failed migration must be retried");
+        migration.await.unwrap();
+        assert!(
+            cache
+                .get_range(&slice_key, 0, content.len())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_flush_is_retryable_and_removes_local_only_after_remote_confirmation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let stage_dir = tempdir.path().join("stage");
+        let remote_dir = tempdir.path().join("remote");
+        let remote_storage =
+            kiseki_utils::object_storage::new_local_object_store(&remote_dir).unwrap();
+        let remote_probe = remote_storage.clone();
+        let cache = Arc::new(
+            FileCache::new(
+                test_config(stage_dir, Duration::from_secs(3600)),
+                remote_storage,
+            )
+            .unwrap(),
+        );
+        let content = b"explicit flush must confirm remote durability";
+        let slice_key = SliceKey::new(0xABCD_EF05, 0, content.len());
+        stage_bytes(&cache, slice_key, content).await;
+
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+        std::fs::write(&remote_dir, b"remote unavailable").unwrap();
+        assert!(cache.flush_key(&slice_key).await.is_err());
+        assert_eq!(
+            cache
+                .get_range(&slice_key, 0, content.len())
+                .await
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            content
+        );
+
+        std::fs::remove_file(&remote_dir).unwrap();
+        std::fs::create_dir(&remote_dir).unwrap();
+        cache.flush_key(&slice_key).await.unwrap();
+        assert!(
+            cache
+                .get_range(&slice_key, 0, content.len())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            remote_probe
+                .get(&slice_key.make_object_storage_path())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_local_stage_is_not_mistaken_for_remote_durability() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            FileCache::new(
+                test_config(tempdir.path().join("stage"), Duration::from_secs(3600)),
+                kiseki_utils::object_storage::new_local_object_store(tempdir.path().join("remote"))
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        let content = b"a vanished stage is data loss, not success";
+        let slice_key = SliceKey::new(0xABCD_EF07, 0, content.len());
+        stage_bytes(&cache, slice_key, content).await;
+        cache
+            .local_storage
+            .delete(&slice_key.make_object_storage_path())
+            .await
+            .unwrap();
+
+        assert!(cache.get_range(&slice_key, 0, content.len()).await.is_err());
+        assert!(cache.flush_key(&slice_key).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_recovers_staged_block_index() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let stage_dir = tempdir.path().join("stage");
+        let remote_dir = tempdir.path().join("remote");
+        let remote_storage =
+            kiseki_utils::object_storage::new_local_object_store(&remote_dir).unwrap();
+        let remote_probe = remote_storage.clone();
+        let content = b"recover me after restart";
+        let slice_key = SliceKey::new(0xABCD_EF02, 1, content.len());
+
+        let cache = Arc::new(
+            FileCache::new(
+                test_config(stage_dir.clone(), Duration::from_secs(3600)),
+                remote_storage.clone(),
+            )
+            .unwrap(),
+        );
+        stage_bytes(&cache, slice_key, content).await;
+        drop(cache);
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+        std::fs::write(&remote_dir, b"keep recovered data local first").unwrap();
+
+        let recovered = Arc::new(
+            FileCache::new(
+                test_config(stage_dir, Duration::from_secs(3600)),
+                remote_storage,
+            )
+            .unwrap(),
+        );
+        let bytes = recovered
+            .get_range(&slice_key, 0, content.len())
+            .await
+            .unwrap()
+            .expect("restart must rebuild the stage index");
+        assert_eq!(bytes.as_ref(), content);
+
+        std::fs::remove_file(&remote_dir).unwrap();
+        std::fs::create_dir(&remote_dir).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if remote_probe
+                    .get(&slice_key.make_object_storage_path())
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("recovered stage entry must be scheduled for migration");
+    }
+
+    #[tokio::test]
+    async fn restart_discards_only_recognizable_incomplete_stage_files() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let stage_dir = tempdir.path().join("stage");
+        std::fs::create_dir(&stage_dir).unwrap();
+        let key = SliceKey::new(0xABCD_EF04, 0, 16);
+        let temp_name = format!(".{}.tmp-123-456", key.gen_path_for_object_sto());
+        let temp_path = stage_dir.join(temp_name);
+        std::fs::write(&temp_path, b"partial").unwrap();
+
+        let cache = FileCache::new(
+            test_config(stage_dir, Duration::from_secs(3600)),
+            kiseki_utils::object_storage::new_memory_object_store(),
+        )
+        .unwrap();
+
+        assert!(!temp_path.exists());
+        assert!(cache.staged_index.read().await.is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {
@@ -338,7 +786,7 @@ mod tests {
                 slice_key.slice_id,
                 slice_key.block_idx,
                 slice_key.block_size,
-                pages,
+                &pages,
             )
             .await
             .unwrap();

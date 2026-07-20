@@ -261,6 +261,13 @@ impl FileWriter {
             .take()
     }
 
+    fn has_flush_error(&self) -> bool {
+        self.flush_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
     /// Write data to the file.
     ///
     /// 1. calculate the location
@@ -412,6 +419,12 @@ impl FileWriter {
             self.flush_done_notify.notify_waiters();
         });
 
+        // A previous attempt left the writer state intact for retry. Report
+        // that failure once; the next finish call will retry the same slices.
+        if let Some(e) = self.take_flush_error() {
+            return Err(e);
+        }
+
         let read_guard = self.chunk_writers.read().await;
         debug!(
             "Ino({}) flush is waiting for all chunk writer finish, cnt: {}",
@@ -435,14 +448,16 @@ impl FileWriter {
         futures::future::try_join_all(handles)
             .await
             .context(JoinErrSnafu)?;
-        let mut write_guard = self.chunk_writers.write().await;
-        write_guard.clear();
 
         // surface errors recorded by the background flush tasks that this
-        // flush (or an earlier one) triggered, fsync-style.
+        // flush triggered, fsync-style. Keep the chunk writers so a later
+        // finish can retry the exact same slice id and metadata publication.
         if let Some(e) = self.take_flush_error() {
             return Err(e);
         }
+
+        let mut write_guard = self.chunk_writers.write().await;
+        write_guard.clear();
         Ok(())
     }
 
@@ -538,12 +553,8 @@ impl FileWriterFlusher {
                                     tokio::select! {
                                         r = sw.flush_and_commit(ino, me) => {
                                             if let Err(e) = r {
-                                                // mark the slice writer as failed so
-                                                // ChunkWriter::finish does not wait on it
-                                                // forever, and surface the error at the
-                                                // next write/flush.
-                                                sw.mark_flush_failed();
                                                 fw.record_flush_error(e);
+                                                sw.reset_after_flush_failure();
                                             }
                                         }
                                         _ = tokio::time::sleep(Duration::from_secs(1)) => {
@@ -551,8 +562,8 @@ impl FileWriterFlusher {
                                             // buffered data may be lost, record EIO so the
                                             // caller learns about it at the next write/flush.
                                             error!("{ino} flush full timed out");
-                                            sw.mark_flush_failed();
                                             fw.record_flush_error(LibcSnafu { errno: libc::EIO }.build());
+                                            sw.reset_after_flush_failure();
                                         }
                                         _ = cancel_token.cancelled() => {
                                             debug!("{ino} flush full is cancelled");
@@ -566,9 +577,8 @@ impl FileWriterFlusher {
                                 // just commit the idle slice writer.
                                 tokio::spawn(async move {
                                     if let Err(e) = sw.commit_partial(ino, me).await {
-                                        // commit_partial's defer already marks the
-                                        // slice writer Done; just record the error.
                                         fw.record_flush_error(e);
+                                        sw.reset_after_commit_failure();
                                     }
                                 });
                             },
@@ -664,6 +674,9 @@ impl ChunkWriter {
     async fn finish(self: &Arc<Self>) {
         let fw = self.fw.upgrade().expect("file writer is dropped");
         loop {
+            if fw.has_flush_error() {
+                return;
+            }
             let read_guard = self.slice_writers.read().await;
             let len = read_guard.len();
             if len == 0 {
@@ -887,21 +900,39 @@ impl SliceWriter {
         Ok(())
     }
 
-    /// Mark this slice writer as terminally failed after a background flush
-    /// error or timeout: force it to Done so [ChunkWriter::finish] does not
-    /// wait on it forever. The buffered data is lost; the caller must record
-    /// the error on the [FileWriter] so it is surfaced at the next
-    /// write/flush.
-    fn mark_flush_failed(self: &Arc<Self>) {
-        let prev = self
-            .state
-            .swap(SliceWriterState::Done as u8, Ordering::AcqRel);
+    /// Return a failed full flush to Dirty after the owning FileWriter has
+    /// recorded the error. The buffer may now contain pages, durable staged
+    /// blocks, or both; retrying with the same slice id handles every case.
+    fn reset_after_flush_failure(self: &Arc<Self>) {
+        if let Err(state) = self.state.compare_exchange(
+            SliceWriterState::Flushing as u8,
+            SliceWriterState::Dirty as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            error!(
+                "{self} cannot reset failed flush from {:?}",
+                SliceWriterState::from(state)
+            );
+        }
         if let Some(cw) = self.chunk_writer.upgrade() {
-            if SliceWriterState::from(prev) != SliceWriterState::Done {
-                // the successful flush path already decrements the counter
-                // when it reaches Done; only decrement for a real failure.
-                cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
-            }
+            cw.slice_done_notify.notify_waiters();
+        }
+    }
+
+    fn reset_after_commit_failure(self: &Arc<Self>) {
+        if let Err(state) = self.state.compare_exchange(
+            SliceWriterState::Committing as u8,
+            SliceWriterState::Idle as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            error!(
+                "{self} cannot reset failed metadata commit from {:?}",
+                SliceWriterState::from(state)
+            );
+        }
+        if let Some(cw) = self.chunk_writer.upgrade() {
             cw.slice_done_notify.notify_waiters();
         }
     }
@@ -923,6 +954,15 @@ impl SliceWriter {
 
         let len = write_guard.length();
         drop(write_guard);
+
+        // Metadata must never make a slice visible before every referenced
+        // object block has been confirmed in remote storage.
+        self.data_manager
+            .upgrade()
+            .unwrap()
+            .file_cache
+            .flush_slice(slice_id)
+            .await?;
 
         // then the sw is done.
         // write the meta info of this slice.
@@ -1100,48 +1140,49 @@ impl SliceWriter {
         meta_engine_ref: MetaEngineRef,
     ) -> Result<()> {
         let cw = self.chunk_writer.upgrade().unwrap();
-        defer!({
-            cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
-            if let Err(e) = self.state.compare_exchange(
-                SliceWriterState::Committing as u8,
-                SliceWriterState::Done as u8,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                // no Result channel inside a scopeguard; log and degrade.
-                // only this task transitions out of Committing, so this
-                // should be unreachable.
-                error!(
-                    "{self} failed to change state from committing to done, current state: {:?}",
-                    SliceWriterState::from(e)
-                );
-            }
-            cw.slice_done_notify.notify_waiters();
-        });
 
         // write slice meta info to meta engine.
         let slice_id = self.slice_id.load(Ordering::Acquire);
         let len = self.slice_buffer.read().await.length();
-        if len == 0 {
-            return Ok(());
+        if len != 0 {
+            self.data_manager
+                .upgrade()
+                .unwrap()
+                .file_cache
+                .flush_slice(slice_id)
+                .await?;
+
+            // then the sw is done.
+            // write the meta info of this slice.
+            meta_engine_ref
+                .write_slice(
+                    inode,
+                    self.chunk_index,
+                    self.offset_of_chunk,
+                    kiseki_types::slice::Slice::Owned {
+                        chunk_pos: self.offset_of_chunk as u32,
+                        id:        slice_id,
+                        size:      len as u32,
+                        _padding:  0,
+                    },
+                    self.last_modified.load(),
+                )
+                .await?;
         }
 
-        // then the sw is done.
-        // write the meta info of this slice.
-        meta_engine_ref
-            .write_slice(
-                inode,
-                self.chunk_index,
-                self.offset_of_chunk,
-                kiseki_types::slice::Slice::Owned {
-                    chunk_pos: self.offset_of_chunk as u32,
-                    id:        slice_id,
-                    size:      len as u32,
-                    _padding:  0,
-                },
-                self.last_modified.load(),
-            )
-            .await?;
+        cw.total_slice_count.fetch_sub(1, Ordering::AcqRel);
+        if let Err(e) = self.state.compare_exchange(
+            SliceWriterState::Committing as u8,
+            SliceWriterState::Done as u8,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            error!(
+                "{self} failed to change state from committing to done, current state: {:?}",
+                SliceWriterState::from(e)
+            );
+        }
+        cw.slice_done_notify.notify_waiters();
 
         Ok(())
     }
@@ -1204,4 +1245,114 @@ fn locate_chunk(chunk_size: usize, offset: usize, expect_write_len: usize) -> Ve
             ctx
         })
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use futures::StreamExt;
+    use kiseki_meta::{MetaConfig, context::FuseContext};
+    use kiseki_storage::cache::{
+        file_cache::{Config as FileCacheConfig, FileCache},
+        mem_cache::{Config as MemCacheConfig, MemCache},
+    };
+    use kiseki_types::{ino::ROOT_INO, setting::Format};
+    use kiseki_utils::{object_storage::new_local_object_store, readable_size::ReadableSize};
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_finish_keeps_writer_retryable_and_metadata_unpublished() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut meta_config = MetaConfig::default();
+        meta_config.with_dsn(&format!(
+            "rocksdb://:{}",
+            tempdir.path().join("meta").to_str().unwrap()
+        ));
+        let format = Format::default();
+        kiseki_meta::update_format(&meta_config.dsn, format.clone(), true).unwrap();
+        let meta_engine = kiseki_meta::open(meta_config).unwrap();
+        let (inode, _) = meta_engine
+            .create(
+                Arc::new(FuseContext::background()),
+                ROOT_INO,
+                "retryable",
+                0o600,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let remote_dir = tempdir.path().join("remote");
+        let remote_storage = new_local_object_store(&remote_dir).unwrap();
+        let file_cache = Arc::new(
+            FileCache::new(
+                FileCacheConfig {
+                    stage_cache_dir: tempdir.path().join("stage"),
+                    max_stage_size:  ReadableSize((BLOCK_SIZE * 2) as u64),
+                    cache_ttl:       Duration::from_secs(3600),
+                },
+                remote_storage.clone(),
+            )
+            .unwrap(),
+        );
+        let data_manager = Arc::new(DataManager {
+            chunk_size: format.chunk_size,
+            file_writers: Arc::new(Default::default()),
+            file_readers: Default::default(),
+            id_generator: Arc::new(sonyflake::Sonyflake::new().unwrap()),
+            meta_engine: meta_engine.clone(),
+            file_cache,
+            mem_cache: Arc::new(MemCache::new(
+                MemCacheConfig::default(),
+                remote_storage.clone(),
+            )),
+        });
+        let writer = data_manager.open_file_writer(inode, 0);
+        let data = b"failed fsync must remain retryable";
+        writer.write(0, data).await.unwrap();
+
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+        std::fs::write(&remote_dir, b"remote unavailable").unwrap();
+        let first_finish = tokio::time::timeout(Duration::from_secs(3), writer.finish())
+            .await
+            .expect("failed finish must not hang");
+        assert!(first_finish.is_err());
+        assert!(!writer.chunk_writers.read().await.is_empty());
+        assert!(meta_engine.read_slice(inode, 0).await.is_err());
+
+        std::fs::remove_file(&remote_dir).unwrap();
+        std::fs::create_dir(&remote_dir).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), writer.finish())
+            .await
+            .expect("retry must not hang")
+            .unwrap();
+        assert!(writer.chunk_writers.read().await.is_empty());
+        assert_eq!(
+            meta_engine
+                .read_slice(inode, 0)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut objects = remote_storage.list(None);
+        let object = objects.next().await.unwrap().unwrap();
+        assert!(objects.next().await.is_none());
+        assert_eq!(
+            remote_storage
+                .get(&object.location)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            data
+        );
+    }
 }

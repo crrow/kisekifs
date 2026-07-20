@@ -390,7 +390,7 @@ pub fn new_local_object_store<P: AsRef<Path>>(
         source: Box::new(source),
     })?;
     Ok(ObjectStorage::new(
-        object_store::local::LocalFileSystem::new_with_prefix(path)?,
+        object_store::local::LocalFileSystem::new_with_prefix(path)?.with_fsync(true),
     ))
 }
 

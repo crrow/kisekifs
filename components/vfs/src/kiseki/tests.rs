@@ -48,7 +48,10 @@ mod test_utils {
         kiseki_meta::update_format(&meta_config.dsn, format, true).unwrap();
 
         let meta_engine = kiseki_meta::open(meta_config).unwrap();
-        let vfs_config = Config::default();
+        let vfs_config = Config {
+            stage_cache_dir: tempdir.path().join("stage"),
+            ..Config::default()
+        };
         KisekiVFS::new(vfs_config, meta_engine).unwrap()
     }
 
@@ -63,7 +66,10 @@ mod test_utils {
         kiseki_meta::update_format(&meta_config.dsn, format, true).unwrap();
 
         let meta_engine = kiseki_meta::open(meta_config).unwrap();
-        let vfs_config = Config::default();
+        let vfs_config = Config {
+            stage_cache_dir: tempdir.path().join("stage"),
+            ..Config::default()
+        };
         let vfs = Arc::new(KisekiVFS::new(vfs_config, meta_engine).unwrap());
         let ctx = Arc::new(FuseContext::background());
 

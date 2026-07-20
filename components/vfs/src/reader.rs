@@ -494,8 +494,18 @@ mod tests {
             .await
             .unwrap();
 
+        let stage_dir = tempfile::tempdir().unwrap();
         let data_manager = Arc::new(
-            DataManager::new(format.chunk_size, meta_engine, new_memory_object_store()).unwrap(),
+            DataManager::new(
+                format.chunk_size,
+                meta_engine,
+                new_memory_object_store(),
+                kiseki_storage::cache::file_cache::Config {
+                    stage_cache_dir: stage_dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
         );
 
         data_manager.open_file_writer(inode, 0);
@@ -565,7 +575,16 @@ mod tests {
             .unwrap();
 
         let data_manager = Arc::new(
-            DataManager::new(format.chunk_size, meta_engine, new_memory_object_store()).unwrap(),
+            DataManager::new(
+                format.chunk_size,
+                meta_engine,
+                new_memory_object_store(),
+                kiseki_storage::cache::file_cache::Config {
+                    stage_cache_dir: tempdir.path().join("stage"),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
         );
 
         data_manager.open_file_writer(inode, 0);

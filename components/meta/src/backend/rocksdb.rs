@@ -22,14 +22,14 @@ use std::{
 };
 
 use bytes::Bytes;
-use kiseki_common::ChunkIndex;
+use kiseki_common::{CHUNK_SIZE, ChunkIndex};
 use kiseki_types::{
     FileType,
     attr::InodeAttr,
     entry::DEntry,
     ino::{Ino, ROOT_INO, ZERO_INO},
     setting::Format,
-    slice::Slices,
+    slice::{SLICE_BYTES, Slice, Slices},
     stat::DirStat,
 };
 use rocksdb::{DBAccess, MultiThreaded};
@@ -41,7 +41,9 @@ use tracing::{debug, error};
 use super::rocksdb_metrics::{
     rocksdb_counter, rocksdb_delete, rocksdb_error, rocksdb_histogram, rocksdb_timed_op,
 };
-use super::{Backend, RenameResult, UnlinkResult, key, key::Counter as BackendCounter};
+use super::{
+    Backend, RenameResult, SliceCommitResult, UnlinkResult, key, key::Counter as BackendCounter,
+};
 use crate::{
     context::FuseContext,
     engine::RenameFlags,
@@ -850,6 +852,96 @@ impl Backend for RocksdbBackend {
             debug!("get_chunk_slices: slice: {:?}", slice);
         }
         Ok(slices)
+    }
+
+    fn commit_slice(
+        &self,
+        inode: Ino,
+        chunk_index: ChunkIndex,
+        slice: &Slice,
+    ) -> Result<SliceCommitResult> {
+        let mut write_options = rocksdb::WriteOptions::default();
+        write_options.set_sync(true);
+        let txn = self.db.transaction_opt(
+            &write_options,
+            &rocksdb::OptimisticTransactionOptions::default(),
+        );
+        let attr_key = key::attr(inode);
+        let attr_buf = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(txn.get_for_update(&attr_key, true))
+        )
+        .context(model_err::NotFoundSnafu {
+            kind: ModelKind::Attr,
+            key:  String::from_utf8_lossy(&attr_key).to_string(),
+        })
+        .context(ModelSnafu)?;
+        let mut attr: InodeAttr = model_try!(bincode::deserialize(&attr_buf).context(
+            model_err::CorruptionSnafu {
+                kind: ModelKind::Attr,
+                key:  String::from_utf8_lossy(&attr_key).to_string(),
+            }
+        ));
+        ensure!(attr.is_file(), LibcSnafu { errno: libc::EPERM });
+
+        let slices_key = key::chunk_slices(inode, chunk_index);
+        let mut slices_buf = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(txn.get_for_update(&slices_key, true))
+        )
+        .unwrap_or_default();
+        if !slices_buf.len().is_multiple_of(SLICE_BYTES) {
+            return Err(model_err::Error::CorruptionString {
+                kind:   ModelKind::ChunkSlices,
+                key:    String::from_utf8_lossy(&slices_key).to_string(),
+                reason: format!("invalid encoded slice length {}", slices_buf.len()),
+            })
+            .context(ModelSnafu);
+        }
+        let encoded_slice = model_try!(bincode::serialize(slice).context(
+            model_err::CorruptionSnafu {
+                kind: ModelKind::ChunkSlices,
+                key:  String::from_utf8_lossy(&slices_key).to_string(),
+            }
+        ));
+        let inserted = !slices_buf
+            .chunks_exact(SLICE_BYTES)
+            .any(|existing| existing == encoded_slice);
+        if inserted {
+            slices_buf.extend_from_slice(&encoded_slice);
+        }
+
+        let new_len = chunk_index as u64 * CHUNK_SIZE as u64
+            + slice.get_chunk_pos() as u64
+            + slice.get_size() as u64;
+        let grew_by = new_len.saturating_sub(attr.length);
+        if inserted || grew_by != 0 {
+            if grew_by != 0 {
+                attr.length = new_len;
+            }
+            attr.update_modification_time();
+            txn_put_attr(&txn, inode, &attr)?;
+            if inserted {
+                rocksdb_timed_op!(
+                    db_puts_total,
+                    db_put_duration_ms,
+                    db_try!(txn.put(&slices_key, &slices_buf))
+                );
+            }
+            rocksdb_timed_op!(
+                db_transactions_total,
+                db_transaction_duration_ms,
+                db_try!(txn.commit())
+            );
+        }
+
+        Ok(SliceCommitResult {
+            grew_by,
+            slice_count: slices_buf.len() / SLICE_BYTES,
+            inserted,
+        })
     }
 
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()> {
@@ -2266,5 +2358,26 @@ mod tests {
 
         let dentry = backend.get_dentry(parent, "child").unwrap();
         assert_eq!(dentry.inode, child);
+    }
+
+    #[rstest]
+    fn committing_a_slice_is_atomic_and_idempotent(test_backend: (RocksdbBackend, TempDir)) {
+        let (backend, _tempdir) = test_backend;
+        let inode = Ino(42);
+        let attr = InodeAttr {
+            kind: FileType::RegularFile,
+            ..Default::default()
+        };
+        backend.set_attr(inode, &attr).unwrap();
+        let first = kiseki_types::slice::Slice::new_owned(0, 100, 4);
+        let second = kiseki_types::slice::Slice::new_owned(8, 101, 4);
+
+        backend.commit_slice(inode, 0, &first).unwrap();
+        backend.commit_slice(inode, 0, &second).unwrap();
+        backend.commit_slice(inode, 0, &first).unwrap();
+
+        let slices = backend.get_chunk_slices(inode, 0).unwrap();
+        assert_eq!(slices.0, vec![first, second]);
+        assert_eq!(backend.get_attr(inode).unwrap().length, 12);
     }
 }

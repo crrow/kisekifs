@@ -73,6 +73,13 @@ impl BackendKinds {
 
 pub type BackendRef = Arc<dyn Backend>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SliceCommitResult {
+    pub grew_by:     u64,
+    pub slice_count: usize,
+    pub inserted:    bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync {
@@ -98,6 +105,12 @@ pub trait Backend: Send + Sync {
     -> Result<()>;
     fn get_raw_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Option<Vec<u8>>>;
     fn get_chunk_slices(&self, inode: Ino, chunk_index: ChunkIndex) -> Result<Slices>;
+    fn commit_slice(
+        &self,
+        inode: Ino,
+        chunk_index: ChunkIndex,
+        slice: &kiseki_types::slice::Slice,
+    ) -> Result<SliceCommitResult>;
 
     fn set_dir_stat(&self, inode: Ino, dir_stat: DirStat) -> Result<()>;
     fn get_dir_stat(&self, inode: Ino) -> Result<DirStat>;

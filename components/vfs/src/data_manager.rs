@@ -57,11 +57,9 @@ impl DataManager {
         chunk_size: usize,
         meta_engine_ref: MetaEngineRef,
         object_storage: ObjectStorage,
+        file_cache_config: cache::file_cache::Config,
     ) -> Result<Self> {
-        let file_cache = Arc::new(FileCache::new(
-            cache::file_cache::Config::default(),
-            object_storage.clone(),
-        )?);
+        let file_cache = Arc::new(FileCache::new(file_cache_config, object_storage.clone())?);
         let mem_cache = Arc::new(MemCache::new(
             cache::mem_cache::Config::default(),
             object_storage,

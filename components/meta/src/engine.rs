@@ -27,14 +27,14 @@ use std::{
 
 use bitflags::bitflags;
 use bytes::Bytes;
-use kiseki_common::{CHUNK_SIZE, ChunkIndex, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
+use kiseki_common::{ChunkIndex, DOT, DOT_DOT, MODE_MASK_R, MODE_MASK_W, MODE_MASK_X};
 use kiseki_types::{
     FileType,
     attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
     ino::{Ino, ROOT_INO},
     setting::Format,
-    slice::{SLICE_BYTES, Slice, SliceID, Slices},
+    slice::{Slice, SliceID, Slices},
     stat::FSStat,
 };
 use scopeguard::defer;
@@ -791,57 +791,26 @@ impl MetaEngine {
             inode, chunk_idx, chunk_pos, slice, mtime
         );
 
-        // check if the inode is a file
-        let mut attr = self.backend.get_attr(inode)?;
-        ensure!(attr.is_file(), LibcSnafu { errno: libc::EPERM });
-
-        let mut slices_buf = self
-            .backend
-            .get_raw_chunk_slices(inode, chunk_idx)?
-            .unwrap_or_default();
-
-        let new_len =
-            chunk_idx as u64 * CHUNK_SIZE as u64 + chunk_pos as u64 + slice.get_size() as u64;
-        let grow_len = if new_len > attr.length {
-            debug!(
-                "update inode: {} old_length: {} new_length: {}",
-                inode, attr.length, new_len
-            );
-            let v = new_len - attr.length;
-            attr.length = new_len;
-            v
-        } else {
-            0
-        };
-        attr.update_modification_time();
-        let val = match bincode::serialize(&slice) {
-            Ok(value) => value,
-            Err(error) => {
-                warn!(%error, "failed to serialize chunk slice");
-                return LibcSnafu { errno: libc::EIO }.fail();
+        ensure!(
+            slice.get_chunk_pos() == chunk_pos,
+            LibcSnafu {
+                errno: libc::EINVAL,
             }
-        };
-        if slices_buf == val {
-            warn!(
-                "{inode} try to write the same slice {:?} at {chunk_idx}",
-                slice
-            );
-            return Ok(());
+        );
+        let commit = self.backend.commit_slice(inode, chunk_idx, &slice)?;
+        if !commit.inserted {
+            debug!("{inode} ignored duplicate slice {slice:?} at chunk {chunk_idx}");
         }
-        slices_buf.extend_from_slice(&val);
-        self.backend.set_attr(inode, &attr)?;
-        let slice_cnt = slices_buf.len() / SLICE_BYTES; // number of slices
-        self.backend
-            .set_raw_chunk_slices(inode, chunk_idx, slices_buf)?;
 
-        if slice_cnt > 350 || slice_cnt % 100 == 99 {
+        if commit.slice_count > 350 || commit.slice_count % 100 == 99 {
             // start a background task to compact these slices
             // TODO: we need to do compaction
         }
 
         // update the used size
-        if grow_len > 0 {
-            self.fs_stat_used_size.fetch_add(grow_len, Ordering::AcqRel);
+        if commit.grew_by > 0 {
+            self.fs_stat_used_size
+                .fetch_add(commit.grew_by, Ordering::AcqRel);
         }
 
         // TODO: update the cache

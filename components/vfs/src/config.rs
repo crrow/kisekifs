@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, PAGE_BUFFER_SIZE, PAGE_SIZE};
 use kiseki_utils::object_storage::ObjectStorageConfig;
@@ -37,7 +37,8 @@ pub struct Config {
     pub object_storage: ObjectStorageConfig,
 
     // ========Cache Configs ===>
-    pub capacity: usize,
+    pub capacity:        usize,
+    pub stage_cache_dir: PathBuf,
 
     // ========Buffer configs ===>
     /// The total memory size for the write/read buffer.
@@ -70,6 +71,8 @@ impl Default for Config {
             file_entry_timeout:    Duration::from_secs(1),
             object_storage:        ObjectStorageConfig::Memory,
             capacity:              100 << 10,
+            stage_cache_dir:       kiseki_storage::cache::file_cache::Config::default()
+                .stage_cache_dir,
             total_buffer_capacity: PAGE_BUFFER_SIZE, // 300MB
             chunk_size:            CHUNK_SIZE,       // 64MB
             block_size:            BLOCK_SIZE,       // 4MB
