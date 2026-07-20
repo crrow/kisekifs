@@ -91,9 +91,6 @@ pub struct FileCache {
 }
 
 impl FileCache {
-    // The large `Err` variant comes from `opendal::Error`; boxing the error
-    // type is deferred to avoid touching the object storage facade.
-    #[allow(clippy::result_large_err)]
     pub fn new(config: Config, remote_storage: ObjectStorage) -> Result<Self> {
         // TODO: flush all the staged data to the remote storage at the beginning.
 
@@ -206,11 +203,7 @@ impl FileCache {
         let _ = self
             .index
             .try_get_with(key, async {
-                let (_, mut writer) = self
-                    .local_storage
-                    .put_multipart(&key.make_object_storage_path())
-                    .await
-                    .context(ObjectStorageSnafu)?;
+                let mut writer = self.local_storage.writer(&key.make_object_storage_path());
                 let (tfl, trc) =
                     copy_from_buffer_to_local(block_length, pages, &mut writer).await?;
                 total_flush_len = tfl;
@@ -277,10 +270,7 @@ async fn migrate_from_local_to_remote(
     let reader_stream = reader.into_stream();
     let mut reader = StreamReader::new(reader_stream);
     // let mut reader = reader_stream.into_async_read();
-    let (_id, mut writer) = remote_storage
-        .put_multipart(&path)
-        .await
-        .context(ObjectStorageSnafu)?;
+    let mut writer = remote_storage.writer(&path);
     let copy_len = tokio::io::copy(&mut reader, &mut writer)
         .await
         .context(UnknownIOSnafu)?;

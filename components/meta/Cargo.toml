@@ -7,7 +7,6 @@ edition = "2024"
 
 [features]
 # Public features
-meta-tikv = ["dep:tikv-client"]
 meta-rocksdb = ["dep:rocksdb"]
 
 [dependencies]
@@ -20,7 +19,6 @@ crossbeam.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 libc.workspace = true
-opendal.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -30,7 +28,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 opentelemetry.workspace = true
-opentelemetry_api.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-prometheus.workspace = true
 prometheus.workspace = true
@@ -44,7 +41,6 @@ kiseki-utils = { path = "../../components/utils" }
 
 log = "0.4.27"
 rocksdb = { version = "0.22.0", features = ["lz4", "snappy"], optional = true }
-tikv-client = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

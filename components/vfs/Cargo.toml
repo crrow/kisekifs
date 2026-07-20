@@ -20,7 +20,6 @@ dashmap.workspace = true
 fuser.workspace = true
 futures.workspace = true
 libc.workspace = true
-opendal.workspace = true
 rangemap.workspace = true
 scopeguard.workspace = true
 serde.workspace = true

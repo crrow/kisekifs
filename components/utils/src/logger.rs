@@ -14,10 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use opentelemetry::{KeyValue, global};
+use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::Sampler};
-use opentelemetry_semantic_conventions::resource;
+use opentelemetry_semantic_conventions::{attribute, resource};
 use sentry::ClientInitGuard;
 use serde::{Deserialize, Serialize};
 use tracing_appender::{
@@ -203,25 +203,25 @@ pub fn init_global_logging(
             .map(|e| format!("http://{}", e))
             .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string());
         println!("find otlp tracing config: {}", endpoint);
-        // otlp exporter
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(
-                opentelemetry_otlp::new_exporter()
-                    .tonic()
-                    .with_endpoint(endpoint),
-            )
-            .with_trace_config(
-                opentelemetry_sdk::trace::config()
-                    .with_sampler(sampler)
-                    .with_resource(opentelemetry_sdk::Resource::new(vec![
-                        KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                        KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-                        KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-                    ])),
-            )
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
             .expect("otlp tracer install failed");
+        let resource = opentelemetry_sdk::Resource::builder_empty()
+            .with_attributes([
+                KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+                KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+                KeyValue::new(attribute::PROCESS_PID, std::process::id().to_string()),
+            ])
+            .build();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_sampler(sampler)
+            .with_resource(resource)
+            .build();
+        let tracer = provider.tracer(app_name.to_string());
+        global::set_tracer_provider(provider);
         let tracing_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
         let subscriber = subscriber.with(tracing_layer);
         tracing::subscriber::set_global_default(subscriber)

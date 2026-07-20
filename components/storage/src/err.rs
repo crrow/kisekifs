@@ -19,14 +19,6 @@ use snafu::{Location, Snafu};
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("OpenDAL operator failed"))]
-    OpenDal {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error:    opendal::Error,
-    },
-
     ObjectStorageError {
         #[snafu(implicit)]
         location: Location,

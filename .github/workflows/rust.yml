@@ -152,17 +152,39 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  advisories:
+    name: Dependency Advisories
+    runs-on: ubuntu-latest
+    needs: rust-version
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.rust-version.outputs.version }}
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check dependency advisories
+        run: cargo deny check advisories
+
   # Aggregator job to ensure all Rust checks pass
   rust-success:
     name: Rust Success
     runs-on: ubuntu-latest
-    needs: [clippy, docs, coverage]
+    needs: [clippy, docs, coverage, advisories]
     if: always()
     steps:
       - name: Check all Rust jobs status
         run: |
           if [[ "${{ needs.clippy.result }}" != "success" || \
                 "${{ needs.docs.result }}" != "success" || \
+                "${{ needs.advisories.result }}" != "success" || \
                 ("${{ needs.coverage.result }}" != "success" && \
                  "${{ needs.coverage.result }}" != "skipped") ]]; then
             echo "One or more Rust jobs failed"

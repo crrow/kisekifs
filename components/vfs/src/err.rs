@@ -26,12 +26,6 @@ pub enum Error {
         location: Location,
         source:   tokio::task::JoinError,
     },
-    OpenDal {
-        #[snafu(implicit)]
-        location: Location,
-        source:   opendal::Error,
-    },
-
     ObjectStorage {
         #[snafu(implicit)]
         location: Location,

@@ -10,7 +10,6 @@ description = "The core storage implementation"
 bytes.workspace = true
 crossbeam-queue.workspace = true
 futures.workspace = true
-opendal.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

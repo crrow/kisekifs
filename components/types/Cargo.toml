@@ -11,7 +11,6 @@ bitflags.workspace = true
 byteorder.workspace = true
 fuser.workspace = true
 libc.workspace = true
-opendal.workspace = true
 rangemap.workspace = true
 serde.workspace = true
 snafu.workspace = true

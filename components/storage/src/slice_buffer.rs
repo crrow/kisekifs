@@ -394,8 +394,7 @@ impl SliceBuffer {
                     let path = ObjectStoragePath::parse(&key)
                         .map_err(kiseki_utils::object_storage::ObjectStorageError::from)
                         .context(ObjectStorageSnafu)?;
-                    let (_id, mut writer) =
-                        sto.put_multipart(&path).await.context(ObjectStorageSnafu)?;
+                    let mut writer = sto.writer(&path);
                     // let mut writer = sto.writer(&key).await.context(OpenDalSnafu)?;
                     let total_flush_data = data_block.length;
                     let mut current_flush_data = 0;

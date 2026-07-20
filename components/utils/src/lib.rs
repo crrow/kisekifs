@@ -30,9 +30,9 @@ pub static RANDOM_ID_GENERATOR: LazyLock<sonyflake::Sonyflake> =
     LazyLock::new(|| sonyflake::Sonyflake::new().expect("failed to create id generator"));
 
 /// the user ID for the user running the process.
-static UID: LazyLock<u32> = LazyLock::new(users::get_current_uid);
+static UID: LazyLock<u32> = LazyLock::new(|| rustix::process::getuid().as_raw());
 /// the group ID for the user running the process.
-static GID: LazyLock<u32> = LazyLock::new(users::get_current_gid);
+static GID: LazyLock<u32> = LazyLock::new(|| rustix::process::getgid().as_raw());
 
 /// the number of available CPUs(number of logical cores.) of the current
 /// system.
