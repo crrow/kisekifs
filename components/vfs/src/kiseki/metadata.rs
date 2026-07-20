@@ -222,6 +222,7 @@ impl KisekiVFS {
     ///         SetAttrFlags::MODE.bits(),
     ///         None,
     ///         None,
+    ///         None,
     ///         Some(0o644), // new permissions
     ///         None,
     ///         None,
@@ -242,6 +243,7 @@ impl KisekiVFS {
     ///         None,
     ///         None,
     ///         Some(1024), // new size
+    ///         None,
     ///         None,
     ///     )
     ///     .await?;
@@ -266,6 +268,7 @@ impl KisekiVFS {
         gid: Option<u32>,
         size: Option<u64>,
         fh: Option<u64>,
+        file_flags: Option<u32>,
     ) -> Result<InodeAttr> {
         info!(
             "fs:setattr with ino {:?} flags {:?} atime {:?} mtime {:?}",
@@ -281,12 +284,14 @@ impl KisekiVFS {
         }
 
         let mut new_attr = InodeAttr::default();
-        let flags = SetAttrFlags::from_bits(flags).expect("invalid set attr flags");
+        let Some(flags) = SetAttrFlags::from_bits(flags) else {
+            return LibcSnafu { errno: EINVAL }.fail();
+        };
         if flags.contains(SetAttrFlags::SIZE) {
             if let Some(size) = size {
                 new_attr = self.truncate(ctx.clone(), ino, size, fh).await?;
             } else {
-                return LibcSnafu { errno: EPERM }.fail()?;
+                return LibcSnafu { errno: EINVAL }.fail()?;
             }
         }
         if flags.contains(SetAttrFlags::MODE) {
@@ -310,46 +315,56 @@ impl KisekiVFS {
                 return LibcSnafu { errno: EINVAL }.fail()?;
             }
         }
-        let mut need_update = false;
+        if flags.contains(SetAttrFlags::FLAG) {
+            if let Some(file_flags) = file_flags {
+                new_attr.flags = file_flags;
+            } else {
+                return LibcSnafu { errno: EINVAL }.fail()?;
+            }
+        }
+        let mut needs_time_permission_check = false;
         if flags.contains(SetAttrFlags::ATIME) {
             if let Some(atime) = atime {
                 new_attr.atime = match atime {
                     TimeOrNow::SpecificTime(st) => st,
                     TimeOrNow::Now => SystemTime::now(),
                 };
-                need_update = true;
+                needs_time_permission_check = true;
             } else {
                 return LibcSnafu { errno: EINVAL }.fail()?;
             }
         }
+        if flags.contains(SetAttrFlags::ATIME_NOW) {
+            new_attr.atime = SystemTime::now();
+            needs_time_permission_check = true;
+        }
+        let mut data_mtime = None;
         if flags.contains(SetAttrFlags::MTIME) {
             if let Some(mtime) = mtime {
                 new_attr.mtime = match mtime {
                     TimeOrNow::SpecificTime(st) => st,
-                    TimeOrNow::Now => {
-                        need_update = true;
-                        SystemTime::now()
-                    }
+                    TimeOrNow::Now => SystemTime::now(),
                 };
+                data_mtime = Some(new_attr.mtime);
+                needs_time_permission_check = true;
             } else {
                 return LibcSnafu { errno: EINVAL }.fail()?;
             }
         }
-        if need_update {
-            if ctx.check_permission {
-                self.meta
-                    .check_set_attr(&ctx, ino, flags, &mut new_attr)
-                    .await
-                    .context(MetaSnafu)?;
-            }
-            let mtime = match mtime.unwrap() {
-                TimeOrNow::SpecificTime(st) => st,
-                TimeOrNow::Now => SystemTime::now(),
-            };
-            if flags.contains(SetAttrFlags::MTIME) || flags.contains(SetAttrFlags::MTIME_NOW) {
-                // TODO: whats wrong with this?
-                self.data_manager.update_mtime(ino, mtime)?;
-            }
+        if flags.contains(SetAttrFlags::MTIME_NOW) {
+            let now = SystemTime::now();
+            new_attr.mtime = now;
+            data_mtime = Some(now);
+            needs_time_permission_check = true;
+        }
+        if needs_time_permission_check && ctx.check_permission {
+            self.meta
+                .check_set_attr(&ctx, ino, flags, &mut new_attr)
+                .await
+                .context(MetaSnafu)?;
+        }
+        if let Some(mtime) = data_mtime {
+            self.data_manager.update_mtime(ino, mtime)?;
         }
 
         self.meta

@@ -18,7 +18,7 @@ use std::{path::Path, time::SystemTime};
 
 use fuser::TimeOrNow;
 use kiseki_common::{FH, MAX_NAME_LENGTH};
-use kiseki_types::{ToErrno, attr::SetAttrFlags, entry::FullEntry};
+use kiseki_types::{ToErrno, attr::SetAttrFlags, entry::FullEntry, ino::CONFIG_INODE};
 use proptest::prelude::*;
 use rstest::rstest;
 use serial_test::serial;
@@ -222,6 +222,49 @@ mod file_operations {
         // 清理资源
         env.vfs.release(env.ctx, entry.inode, fh).await?;
 
+        Ok(())
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_returns_only_bytes_before_eof(
+        #[future] vfs_env: test_utils::VfsTestEnv,
+    ) -> Result<()> {
+        let env = vfs_env.await;
+        let (entry, fh) = test_utils::create_test_file(
+            &env.vfs,
+            env.ctx.clone(),
+            ROOT_INO,
+            "partial_eof_read",
+            0o644,
+        )
+        .await?;
+        let contents = b"hello";
+        env.vfs
+            .write(env.ctx.clone(), entry.inode, fh, 0, contents, 0, 0, None)
+            .await?;
+
+        let crossing_eof = env
+            .vfs
+            .read(env.ctx.clone(), entry.inode, fh, 0, 16, 0, None)
+            .await?;
+        assert_eq!(crossing_eof.as_ref(), contents);
+
+        let at_eof = env
+            .vfs
+            .read(
+                env.ctx.clone(),
+                entry.inode,
+                fh,
+                contents.len() as i64,
+                16,
+                0,
+                None,
+            )
+            .await?;
+        assert!(at_eof.is_empty());
+
+        env.vfs.release(env.ctx, entry.inode, fh).await?;
         Ok(())
     }
 
@@ -666,6 +709,19 @@ mod link_operations {
 
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_rename_flags_return_einval() -> Result<()> {
+        let vfs = Arc::new(test_utils::make_vfs().await);
+        let ctx = Arc::new(FuseContext::background());
+
+        let error = vfs
+            .rename(ctx, ROOT_INO, "source", ROOT_INO, "target", u32::MAX)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_errno(), libc::EINVAL);
+        Ok(())
+    }
 }
 
 /// 错误处理测试模块
@@ -780,6 +836,129 @@ mod error_handling {
             .await;
         assert!(mkdir_result.is_err(), "创建具有无效名称的目录应该失败");
 
+        Ok(())
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_io_ranges_return_stable_errno(
+        #[future] vfs_env: test_utils::VfsTestEnv,
+    ) -> Result<()> {
+        let env = vfs_env.await;
+        let (entry, fh) = test_utils::create_test_file(
+            &env.vfs,
+            env.ctx.clone(),
+            ROOT_INO,
+            "invalid_io_ranges",
+            0o644,
+        )
+        .await?;
+
+        let read_error = env
+            .vfs
+            .read(env.ctx.clone(), entry.inode, fh, -1, 1, 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(read_error.to_errno(), libc::EINVAL);
+
+        let write_error = env
+            .vfs
+            .write(env.ctx.clone(), entry.inode, fh, -1, b"x", 0, 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(write_error.to_errno(), libc::EINVAL);
+
+        let large_offset_error = env
+            .vfs
+            .read(env.ctx.clone(), entry.inode, fh, i64::MAX, 1, 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(large_offset_error.to_errno(), libc::EFBIG);
+
+        env.vfs.release(env.ctx, entry.inode, fh).await?;
+        Ok(())
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallocate_is_nonfatal_and_honest(
+        #[future] vfs_env: test_utils::VfsTestEnv,
+    ) -> Result<()> {
+        let env = vfs_env.await;
+        let (entry, fh) = test_utils::create_test_file(
+            &env.vfs,
+            env.ctx.clone(),
+            ROOT_INO,
+            "unsupported_fallocate",
+            0o644,
+        )
+        .await?;
+
+        let unsupported = env
+            .vfs
+            .fallocate(env.ctx.clone(), entry.inode, fh, 0, 1, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(unsupported.to_errno(), libc::ENOTSUP);
+
+        let invalid = env
+            .vfs
+            .fallocate(env.ctx.clone(), entry.inode, fh, 0, 1, 0x80)
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.to_errno(), libc::EINVAL);
+
+        let root_attr = env.vfs.get_attr(ROOT_INO).await?;
+        assert!(root_attr.is_dir());
+        env.vfs.release(env.ctx, entry.inode, fh).await?;
+        Ok(())
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synthetic_inode_io_is_unsupported_and_release_is_idempotent(
+        #[future] vfs_env: test_utils::VfsTestEnv,
+    ) -> Result<()> {
+        let env = vfs_env.await;
+        let opened = env.vfs.open(&env.ctx, CONFIG_INODE, libc::O_RDONLY).await?;
+
+        let read_error = env
+            .vfs
+            .read(env.ctx.clone(), CONFIG_INODE, opened.fh, 0, 16, 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(read_error.to_errno(), libc::ENOTSUP);
+
+        let write_error = env
+            .vfs
+            .write(
+                env.ctx.clone(),
+                CONFIG_INODE,
+                opened.fh,
+                0,
+                b"x",
+                0,
+                0,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(write_error.to_errno(), libc::ENOTSUP);
+
+        env.vfs
+            .release(env.ctx.clone(), CONFIG_INODE, opened.fh)
+            .await?;
+        env.vfs
+            .release(env.ctx.clone(), CONFIG_INODE, opened.fh)
+            .await?;
+
+        let stale_handle = env
+            .vfs
+            .read(env.ctx.clone(), CONFIG_INODE, opened.fh, 0, 1, 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(stale_handle.to_errno(), libc::EBADF);
+        assert!(env.vfs.get_attr(ROOT_INO).await?.is_dir());
         Ok(())
     }
 }
@@ -1026,6 +1205,7 @@ mod attribute_operations {
                 None, // 不设置GID，避免权限问题
                 Some(2048),
                 None,
+                None,
             )
             .await?;
 
@@ -1039,6 +1219,64 @@ mod attribute_operations {
         // 清理
         vfs.unlink(ctx, ROOT_INO, &file.name).await?;
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atime_only_setattr_does_not_require_mtime() -> Result<()> {
+        let vfs = Arc::new(test_utils::make_vfs().await);
+        let ctx = Arc::new(FuseContext::background());
+        let (file, fh) =
+            test_utils::create_test_file(&vfs, ctx.clone(), ROOT_INO, "atime_only", 0o644).await?;
+        let atime = SystemTime::now();
+
+        let attr = vfs
+            .set_attr(
+                ctx.clone(),
+                file.inode,
+                SetAttrFlags::ATIME.bits(),
+                Some(TimeOrNow::SpecificTime(atime)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(fh),
+                None,
+            )
+            .await?;
+        assert_eq!(attr.atime, atime);
+
+        vfs.release(ctx, file.inode, fh).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_setattr_flags_return_einval() -> Result<()> {
+        let vfs = Arc::new(test_utils::make_vfs().await);
+        let ctx = Arc::new(FuseContext::background());
+        let (file, fh) =
+            test_utils::create_test_file(&vfs, ctx.clone(), ROOT_INO, "bad_setattr", 0o644).await?;
+
+        let error = vfs
+            .set_attr(
+                ctx.clone(),
+                file.inode,
+                u32::MAX,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(fh),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_errno(), libc::EINVAL);
+
+        vfs.release(ctx, file.inode, fh).await?;
         Ok(())
     }
 
@@ -1075,6 +1313,7 @@ mod attribute_operations {
                 None,
                 Some(1001), // 设置UID
                 Some(1002), // 设置GID
+                None,
                 None,
                 None,
             )

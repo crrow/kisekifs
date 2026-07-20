@@ -38,20 +38,27 @@ pub struct FuseContext {
 
 impl<'a> From<&'a kiseki_types::Request<'a>> for FuseContext {
     fn from(req: &'a kiseki_types::Request) -> Self {
-        Self {
-            unique:             req.unique(),
-            gid:                req.gid(),
-            gid_list:           vec![],
-            uid:                req.uid(),
-            pid:                req.pid(),
-            check_permission:   true,
-            start_at:           Instant::now(),
-            cancellation_token: CancellationToken::new(),
-        }
+        Self::from_identity(req.unique(), req.uid(), req.gid(), req.pid())
     }
 }
 
 impl FuseContext {
+    fn from_identity(unique: u64, uid: u32, gid: u32, pid: u32) -> Self {
+        Self {
+            unique,
+            gid,
+            // FUSE supplies the request's primary gid. Supplementary groups are
+            // not available here, so permission checks deliberately use the
+            // primary group instead of silently falling back to "other" bits.
+            gid_list: vec![gid],
+            uid,
+            pid,
+            check_permission: true,
+            start_at: Instant::now(),
+            cancellation_token: CancellationToken::new(),
+        }
+    }
+
     // Access checks the access permission on given inode.
     pub fn check_access(&self, attr: &InodeAttr, perm_mask: u8) -> Result<()> {
         if self.uid == 0 {
@@ -96,4 +103,25 @@ impl FuseContext {
     }
 
     pub fn contains_gid(&self, gid: u32) -> bool { self.gid_list.contains(&gid) }
+}
+
+#[cfg(test)]
+mod tests {
+    use kiseki_types::attr::InodeAttr;
+
+    use super::FuseContext;
+
+    #[test]
+    fn primary_gid_participates_in_access_checks() {
+        let ctx = FuseContext::from_identity(1, 1000, 2000, 42);
+        let attr = InodeAttr {
+            uid: 3000,
+            gid: 2000,
+            mode: 0o040,
+            ..InodeAttr::default()
+        };
+
+        assert!(ctx.check_access(&attr, 0o4).is_ok());
+        assert!(ctx.contains_gid(2000));
+    }
 }

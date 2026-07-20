@@ -26,7 +26,7 @@ use kiseki_common::{BLOCK_SIZE, MAX_NAME_LENGTH};
 use kiseki_meta::context::{EMPTY_CONTEXT, FuseContext};
 use kiseki_types::{
     ToErrno,
-    attr::InodeAttr,
+    attr::{InodeAttr, SetAttrFlags},
     entry::{Entry, FullEntry},
     ino::Ino,
     stat::FSStat,
@@ -40,6 +40,49 @@ use tracing::{Instrument, debug, error, field, info, instrument};
 
 mod config;
 pub mod null;
+
+fn map_init_result<E: ToErrno>(result: std::result::Result<(), E>) -> Result<(), c_int> {
+    result.map_err(|error| error.to_errno())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn setattr_request_flags(
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    size: Option<u64>,
+    atime: Option<&TimeOrNow>,
+    mtime: Option<&TimeOrNow>,
+    file_flags: Option<u32>,
+) -> SetAttrFlags {
+    let mut flags = SetAttrFlags::empty();
+    if mode.is_some() {
+        flags.insert(SetAttrFlags::MODE);
+    }
+    if uid.is_some() {
+        flags.insert(SetAttrFlags::UID);
+    }
+    if gid.is_some() {
+        flags.insert(SetAttrFlags::GID);
+    }
+    if size.is_some() {
+        flags.insert(SetAttrFlags::SIZE);
+    }
+    match atime {
+        Some(TimeOrNow::SpecificTime(_)) => flags.insert(SetAttrFlags::ATIME),
+        Some(TimeOrNow::Now) => flags.insert(SetAttrFlags::ATIME_NOW),
+        None => {}
+    }
+    match mtime {
+        Some(TimeOrNow::SpecificTime(_)) => flags.insert(SetAttrFlags::MTIME),
+        Some(TimeOrNow::Now) => flags.insert(SetAttrFlags::MTIME_NOW),
+        None => {}
+    }
+    if file_flags.is_some() {
+        flags.insert(SetAttrFlags::FLAG);
+    }
+    flags
+}
 
 #[derive(Debug)]
 pub struct KisekiFuse {
@@ -147,15 +190,11 @@ impl Filesystem for KisekiFuse {
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
         debug!("init kiseki...");
         let ctx = FuseContext::from(_req);
-        match self.runtime.block_on(self.vfs.init(&ctx).in_current_span()) {
-            Ok(_) => {
-                // TODO
-            }
-            Err(_) => {
-                // TODO
-            }
+        let result = self.runtime.block_on(self.vfs.init(&ctx).in_current_span());
+        if let Err(error) = &result {
+            error!(%error, "failed to initialize KisekiFS");
         }
-        Ok(())
+        map_init_result(result)
     }
 
     #[instrument(level = "info", skip_all, fields(req = _req.unique(), ino = parent, name = ? name))]
@@ -224,12 +263,14 @@ impl Filesystem for KisekiFuse {
         reply: ReplyAttr,
     ) {
         let ctx = Arc::new(FuseContext::from(_req));
+        let set_attr_flags =
+            setattr_request_flags(mode, uid, gid, size, atime.as_ref(), mtime.as_ref(), flags);
         match self.runtime.block_on(
             self.vfs
                 .set_attr(
                     ctx.clone(),
                     Ino(ino),
-                    flags.unwrap_or(0),
+                    set_attr_flags.bits(),
                     atime,
                     mtime,
                     mode,
@@ -237,6 +278,7 @@ impl Filesystem for KisekiFuse {
                     gid,
                     size,
                     fh,
+                    flags,
                 )
                 .in_current_span(),
         ) {
@@ -751,11 +793,52 @@ impl Filesystem for KisekiFuse {
         let ctx = Arc::new(FuseContext::from(req));
         match self.runtime.block_on(
             self.vfs
-                .fallocate(ctx, Ino(ino), fh, offset, length, mode as u8)
+                .fallocate(ctx, Ino(ino), fh, offset, length, mode)
                 .in_current_span(),
         ) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e.to_errno()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fuser::TimeOrNow;
+    use kiseki_types::{ToErrno, attr::SetAttrFlags};
+
+    use super::{map_init_result, setattr_request_flags};
+
+    #[derive(Debug)]
+    struct InitError;
+
+    impl ToErrno for InitError {
+        fn to_errno(&self) -> libc::c_int { libc::ENOTDIR }
+    }
+
+    #[test]
+    fn init_errors_prevent_mount_completion() {
+        assert_eq!(map_init_result(Err(InitError)), Err(libc::ENOTDIR));
+    }
+
+    #[test]
+    fn setattr_options_are_converted_to_internal_presence_flags() {
+        let flags = setattr_request_flags(
+            Some(0o644),
+            None,
+            Some(1000),
+            Some(42),
+            Some(&TimeOrNow::Now),
+            Some(&TimeOrNow::SpecificTime(std::time::SystemTime::UNIX_EPOCH)),
+            None,
+        );
+        assert_eq!(
+            flags,
+            SetAttrFlags::MODE
+                | SetAttrFlags::GID
+                | SetAttrFlags::SIZE
+                | SetAttrFlags::ATIME_NOW
+                | SetAttrFlags::MTIME
+        );
     }
 }

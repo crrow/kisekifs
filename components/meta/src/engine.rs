@@ -707,8 +707,8 @@ impl MetaEngine {
             dirty_attr.mtime = new_attr.mtime;
             changed = true;
         }
-        if flags.contains(SetAttrFlags::FLAG) {
-            dirty_attr.flags = flags.0;
+        if flags.contains(SetAttrFlags::FLAG) && dirty_attr.flags != new_attr.flags {
+            dirty_attr.flags = new_attr.flags;
             changed = true;
         }
         if !changed {
@@ -746,7 +746,13 @@ impl MetaEngine {
 
         ctx.check_access(&attr, mask)?;
 
-        let attr_flags = kiseki_types::attr::Flags::from_bits(attr.flags as u8).unwrap();
+        let attr_flags = match u8::try_from(attr.flags)
+            .ok()
+            .and_then(kiseki_types::attr::Flags::from_bits)
+        {
+            Some(flags) => flags,
+            None => return LibcSnafu { errno: libc::EIO }.fail(),
+        };
         if (attr_flags.contains(kiseki_types::attr::Flags::IMMUTABLE))
             && flags & (libc::O_WRONLY | libc::O_RDWR) != 0
         {
@@ -808,7 +814,13 @@ impl MetaEngine {
             0
         };
         attr.update_modification_time();
-        let val = bincode::serialize(&slice).unwrap();
+        let val = match bincode::serialize(&slice) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(%error, "failed to serialize chunk slice");
+                return LibcSnafu { errno: libc::EIO }.fail();
+            }
+        };
         if slices_buf == val {
             warn!(
                 "{inode} try to write the same slice {:?} at {chunk_idx}",
@@ -901,33 +913,7 @@ impl MetaEngine {
         _length: usize,
         mode: u8,
     ) -> Result<()> {
-        let mode = FallocateMode::from_bits(mode).expect("invalid fallocate mode");
-        if mode.contains(FallocateMode::COLLAPSE_RANGE) && mode != FallocateMode::COLLAPSE_RANGE {
-            LibcSnafu {
-                errno: libc::EINVAL,
-            }
-            .fail()?;
-        }
-        if mode.contains(FallocateMode::INSERT_RANGE) && mode != FallocateMode::INSERT_RANGE {
-            LibcSnafu {
-                errno: libc::EINVAL,
-            }
-            .fail()?;
-        }
-        if mode == FallocateMode::INSERT_RANGE || mode == FallocateMode::COLLAPSE_RANGE {
-            LibcSnafu {
-                errno: libc::ENOTSUP,
-            }
-            .fail()?;
-        }
-        if mode.contains(FallocateMode::PUNCH_HOLE) && mode.contains(FallocateMode::KEEP_SIZE) {
-            LibcSnafu {
-                errno: libc::EINVAL,
-            }
-            .fail()?;
-        }
-
-        todo!()
+        validate_fallocate_mode(mode)
     }
 
     pub async fn flock(
@@ -1094,7 +1080,9 @@ impl MetaEngine {
             // spawn task here since we use semaphore to limit the concurrent
             tokio::spawn(async move {
                 // Safety: the semaphore's lifetime is binding to the MetaEngine.
-                let _permit = sem.acquire().await.unwrap();
+                let Ok(_permit) = sem.acquire().await else {
+                    return;
+                };
                 backend.do_delete_chunks(inode);
             });
         }
@@ -1114,16 +1102,7 @@ impl MetaEngine {
         new_name: &str,
         flags: u32,
     ) -> Result<()> {
-        let rename_flags = RenameFlags::from_bits(flags).expect("invalid rename flags");
-        ensure!(
-            matches!(
-                rename_flags,
-                RenameFlags::NOREPLACE | RenameFlags::EXCHANGE | RenameFlags::ZERO
-            ),
-            LibcSnafu {
-                errno: libc::ENOTSUP,
-            }
-        );
+        let rename_flags = validate_rename_flags(flags)?;
 
         let open_files = self.open_files.clone();
         let rename_result = self
@@ -1166,6 +1145,38 @@ bitflags! {
     }
 }
 
+fn validate_fallocate_mode(mode: u8) -> Result<()> {
+    let Some(mode) = FallocateMode::from_bits(mode) else {
+        return LibcSnafu {
+            errno: libc::EINVAL,
+        }
+        .fail();
+    };
+    if mode.contains(FallocateMode::COLLAPSE_RANGE) && mode != FallocateMode::COLLAPSE_RANGE {
+        return LibcSnafu {
+            errno: libc::EINVAL,
+        }
+        .fail();
+    }
+    if mode.contains(FallocateMode::INSERT_RANGE) && mode != FallocateMode::INSERT_RANGE {
+        return LibcSnafu {
+            errno: libc::EINVAL,
+        }
+        .fail();
+    }
+    if mode.contains(FallocateMode::PUNCH_HOLE) && !mode.contains(FallocateMode::KEEP_SIZE) {
+        return LibcSnafu {
+            errno: libc::EINVAL,
+        }
+        .fail();
+    }
+
+    LibcSnafu {
+        errno: libc::ENOTSUP,
+    }
+    .fail()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenameFlags(pub u32);
 
@@ -1175,6 +1186,80 @@ bitflags! {
         const NOREPLACE = 1;
         const EXCHANGE = 2;
         const WHITEOUT = 4;
+    }
+}
+
+fn validate_rename_flags(flags: u32) -> Result<RenameFlags> {
+    let Some(flags) = RenameFlags::from_bits(flags) else {
+        return LibcSnafu {
+            errno: libc::EINVAL,
+        }
+        .fail();
+    };
+    if flags.contains(RenameFlags::NOREPLACE) && flags.contains(RenameFlags::EXCHANGE) {
+        return LibcSnafu {
+            errno: libc::EINVAL,
+        }
+        .fail();
+    }
+    if flags.contains(RenameFlags::WHITEOUT) {
+        return LibcSnafu {
+            errno: libc::ENOTSUP,
+        }
+        .fail();
+    }
+    Ok(flags)
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use kiseki_types::ToErrno;
+
+    use super::{RenameFlags, validate_fallocate_mode, validate_rename_flags};
+
+    #[test]
+    fn invalid_fallocate_flags_are_rejected_without_panicking() {
+        assert_eq!(
+            validate_fallocate_mode(0x80).unwrap_err().to_errno(),
+            libc::EINVAL
+        );
+        assert_eq!(
+            validate_fallocate_mode(0x02).unwrap_err().to_errno(),
+            libc::EINVAL
+        );
+    }
+
+    #[test]
+    fn recognized_fallocate_modes_are_honestly_unsupported() {
+        assert_eq!(
+            validate_fallocate_mode(0).unwrap_err().to_errno(),
+            libc::ENOTSUP
+        );
+        assert_eq!(
+            validate_fallocate_mode(0x03).unwrap_err().to_errno(),
+            libc::ENOTSUP
+        );
+    }
+
+    #[test]
+    fn rename_flag_validation_distinguishes_invalid_and_unsupported() {
+        assert_eq!(
+            validate_rename_flags(u32::MAX).unwrap_err().to_errno(),
+            libc::EINVAL
+        );
+        assert_eq!(
+            validate_rename_flags((RenameFlags::NOREPLACE | RenameFlags::EXCHANGE).bits())
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        assert_eq!(
+            validate_rename_flags(RenameFlags::WHITEOUT.bits())
+                .unwrap_err()
+                .to_errno(),
+            libc::ENOTSUP
+        );
+        assert_eq!(validate_rename_flags(0).unwrap(), RenameFlags::ZERO);
     }
 }
 

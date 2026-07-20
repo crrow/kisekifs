@@ -19,8 +19,8 @@ use std::sync::{Arc, atomic::Ordering};
 use bytes::Bytes;
 use kiseki_common::{FH, MAX_FILE_SIZE};
 use kiseki_meta::context::FuseContext;
-use kiseki_types::ino::{CONTROL_INODE, Ino};
-use libc::{EBADF, EFBIG, EINTR, EINVAL, ENOENT, EPERM};
+use kiseki_types::ino::Ino;
+use libc::{EBADF, EFBIG, EINTR, EINVAL, ENOENT, ENOTSUP};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::task::JoinHandle;
 use tracing::{debug, instrument};
@@ -32,6 +32,18 @@ use crate::err::{LibcSnafu, MetaSnafu, Result};
 const UNLOCK_LOCK_TYPE: libc::c_int = libc::F_UNLCK as libc::c_int;
 #[cfg(not(target_os = "macos"))]
 const UNLOCK_LOCK_TYPE: libc::c_int = libc::F_UNLCK;
+
+fn checked_io_range(offset: i64, length: usize) -> Result<(usize, usize)> {
+    ensure!(offset >= 0, LibcSnafu { errno: EINVAL });
+    let offset = usize::try_from(offset)
+        .ok()
+        .context(LibcSnafu { errno: EFBIG })?;
+    let end = offset
+        .checked_add(length)
+        .context(LibcSnafu { errno: EFBIG })?;
+    ensure!(end <= MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+    Ok((offset, end))
+}
 
 impl KisekiVFS {
     /// Open a file for I/O operations.
@@ -83,11 +95,17 @@ impl KisekiVFS {
             inode, flags, ctx.pid
         );
 
-        let mut attr = self
-            .meta
-            .open_inode(ctx, inode, flags)
-            .await
-            .context(MetaSnafu)?;
+        let mut attr = if inode.is_special() {
+            self.internal_nodes
+                .get_internal_node(inode)
+                .map(|node| node.get_attr())
+                .context(LibcSnafu { errno: ENOENT })?
+        } else {
+            self.meta
+                .open_inode(ctx, inode, flags)
+                .await
+                .context(MetaSnafu)?
+        };
         self.try_update_file_reader_length(inode, &mut attr).await;
         let opened_fh = self
             .handle_table
@@ -141,7 +159,7 @@ impl KisekiVFS {
     /// - I/O error occurred during read (`EIO`)
     ///
     /// # Behavior
-    /// - Special inodes are handled separately (TODO: not yet implemented)
+    /// - Special inode reads return `ENOTSUP`
     /// - Flushes any pending writes before reading to ensure consistency
     /// - Uses file handle locking to coordinate with concurrent operations
     /// - Reads through the data manager for caching and buffering
@@ -172,18 +190,8 @@ impl KisekiVFS {
             ino, fh, offset, size
         );
 
-        if ino.is_special() {
-            todo!()
-        }
-
-        // just convert it.
-        // TODO: review me, is it correct? it may be negative.
-        let offset = offset as u64;
-        let size = size as u64;
-        ensure!(
-            offset + size < MAX_FILE_SIZE as u64,
-            LibcSnafu { errno: EFBIG }
-        );
+        let size = size as usize;
+        let (offset, _) = checked_io_range(offset, size)?;
 
         let handle = self
             .handle_table
@@ -193,8 +201,11 @@ impl KisekiVFS {
         let file_handle = handle
             .as_file_handle()
             .context(LibcSnafu { errno: EBADF })?;
+        if ino.is_special() {
+            return LibcSnafu { errno: ENOTSUP }.fail();
+        }
 
-        let mut buf = vec![0u8; size as usize];
+        let mut buf = vec![0u8; size];
         let read_guard = file_handle
             .read_lock(ctx.clone())
             .await
@@ -202,12 +213,14 @@ impl KisekiVFS {
 
         self.data_manager.direct_flush(ino).await?;
 
-        let _read_len = read_guard.read(offset as usize, buf.as_mut_slice()).await?;
+        let read_result = read_guard.read(offset, buf.as_mut_slice()).await;
         file_handle.remove_operation(&ctx).await;
+        let read_len = read_result?;
+        buf.truncate(read_len);
         debug!(
             "vfs:read with ino {:?} fh {:?} offset {:?} expected_read_size {:?} actual_read_len: \
              {:?}",
-            ino, fh, offset, size, _read_len
+            ino, fh, offset, size, read_len
         );
         Ok(Bytes::from(buf))
     }
@@ -244,7 +257,7 @@ impl KisekiVFS {
     /// - I/O error occurred during write (`EIO`)
     ///
     /// # Behavior
-    /// - Control inode writes are handled specially (TODO: not yet implemented)
+    /// - Special inode writes return `ENOTSUP`
     /// - Uses file handle write locking to coordinate with concurrent
     ///   operations
     /// - Writes through the data manager for buffering and caching
@@ -282,19 +295,18 @@ impl KisekiVFS {
             ino, fh, offset, size
         );
 
-        let offset = offset as usize;
-        ensure!(offset + size < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+        let (offset, _) = checked_io_range(offset, size)?;
 
-        let _handle = self
+        let handle = self
             .handle_table
             .find_handle(ino, fh)
             .await
             .context(LibcSnafu { errno: EBADF })?;
-        if ino == CONTROL_INODE {
-            todo!()
+        if ino.is_special() {
+            return LibcSnafu { errno: ENOTSUP }.fail();
         }
 
-        let handle = _handle
+        let handle = handle
             .as_file_handle()
             .context(LibcSnafu { errno: EBADF })?;
 
@@ -302,8 +314,9 @@ impl KisekiVFS {
             .write_lock(ctx.clone())
             .await
             .context(LibcSnafu { errno: EINTR })?;
-        let write_len = write_guard.write(offset, data).await?;
+        let write_result = write_guard.write(offset, data).await;
         handle.remove_operation(&ctx).await;
+        let write_len = write_result?;
 
         self.data_manager
             .truncate_reader(ino, write_guard.get_length() as u64)
@@ -494,22 +507,27 @@ impl KisekiVFS {
         fh: FH,
         offset: i64,
         length: i64,
-        mode: u8,
+        mode: i32,
     ) -> Result<()> {
         ensure!(offset >= 0 && length > 0, LibcSnafu { errno: EINVAL });
-        ensure!(!inode.is_special(), LibcSnafu { errno: EPERM });
-        let offset = offset as usize;
-        let length = length as usize;
-        ensure!(offset + length < MAX_FILE_SIZE, LibcSnafu { errno: EFBIG });
+        let length = usize::try_from(length)
+            .ok()
+            .context(LibcSnafu { errno: EFBIG })?;
+        let (offset, _) = checked_io_range(offset, length)?;
+        let mode = u8::try_from(mode)
+            .ok()
+            .context(LibcSnafu { errno: EINVAL })?;
         let h = self
             .handle_table
             .find_handle(inode, fh)
             .await
             .context(LibcSnafu { errno: EBADF })?;
         let _ = h.as_file_handle().context(LibcSnafu { errno: EBADF })?;
+        if inode.is_special() {
+            return LibcSnafu { errno: ENOTSUP }.fail();
+        }
         self.meta.fallocate(inode, offset, length, mode).await?;
-
-        todo!()
+        Ok(())
     }
 
     pub async fn release(
@@ -519,7 +537,8 @@ impl KisekiVFS {
         fh: FH,
     ) -> Result<JoinHandle<()>> {
         if inode.is_special() {
-            todo!()
+            self.handle_table.release_file_handle(inode, fh).await;
+            return Ok(tokio::spawn(async {}));
         }
         if let Some(handle) = self.handle_table.find_handle(inode, fh).await {
             handle.wait_all_operations_done(ctx.clone()).await?;
@@ -554,5 +573,30 @@ impl KisekiVFS {
         Ok(tokio::spawn(async move {
             ht.release_file_handle(inode, fh).await;
         }))
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use kiseki_types::ToErrno;
+
+    use super::checked_io_range;
+
+    #[test]
+    fn checked_io_range_rejects_negative_offsets() {
+        assert_eq!(
+            checked_io_range(-1, 1).unwrap_err().to_errno(),
+            libc::EINVAL
+        );
+    }
+
+    #[test]
+    fn checked_io_range_rejects_addition_overflow() {
+        assert_eq!(
+            checked_io_range(i64::MAX, usize::MAX)
+                .unwrap_err()
+                .to_errno(),
+            libc::EFBIG
+        );
     }
 }
