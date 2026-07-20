@@ -168,7 +168,7 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
 
       - name: Check dependency advisories
         run: cargo deny check advisories

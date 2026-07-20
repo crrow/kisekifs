@@ -32,5 +32,5 @@ regex = "1.11.2"
 procfs = "0.16.0"
 
 [build-dependencies]
-built = { version = "0.7.7", features = ["git2"] }
+built = { version = "0.8.1", features = ["git2"] }
 const_format = "0.2.34"

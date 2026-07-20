@@ -31,10 +31,9 @@ crossbeam-channel = "0.5.15"
 crossbeam-queue = "0.3.12"
 dashmap = "5.5.3"
 features = { version = "0.10.0" }
-fuser = { version = "0.15.1", features = ["libfuse", "serializable"] }
+fuser = { version = "0.16.0", features = ["libfuse", "serializable"] }
 futures = "0.3.31"
 libc = "0.2.175"
-rand = "0.8.5"
 rangemap = "1.6.0"
 rustix = { version = "0.38.44", features = ["mount"] }
 scopeguard = "1.2.0"
@@ -68,7 +67,7 @@ bon = "3.7.2"
 rstest = "0.19"
 tokio-test = "0.4"
 proptest = "1.4"
-serial_test = "3.1"
+serial_test = "3.5"
 
 [profile.release]
 debug = true
