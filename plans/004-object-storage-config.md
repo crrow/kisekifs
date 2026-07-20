@@ -11,6 +11,7 @@
 
 ## Status
 
+- **State**: DONE
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
@@ -157,12 +158,29 @@ the same option and schemes.
 
 ## Done criteria
 
-- [ ] Production mount explicitly selects its object store.
-- [ ] `KisekiVFS::new` no longer ignores `object_storage_dsn`.
-- [ ] No credential value is embedded or printed.
-- [ ] Invalid/unreachable storage fails before mount.
-- [ ] Memory/local tests and all quality gates pass.
-- [ ] Only in-scope files and `plans/README.md` changed.
+- [x] Production mount explicitly selects its object store.
+- [x] VFS construction uses the parsed object-storage configuration.
+- [x] No credential value is embedded or printed.
+- [x] Invalid/unreachable storage fails before mount.
+- [x] Memory/local tests and all quality gates pass.
+- [x] Only in-scope files and `plans/README.md` changed.
+
+## Completion evidence
+
+- Implemented by commit `295dff3`.
+- CI run `29711949709` and its companion Web run passed every job.
+- The typed configuration accepts test-only memory, absolute local paths, and
+  S3 bucket/prefix DSNs. It rejects relative paths, unknown schemes, embedded
+  userinfo, credential-like parameters, unsafe HTTP endpoints, and malformed
+  options without echoing their values.
+- Production mount requires `--object-storage`; its raw value has redacted
+  `Debug`, is validated before any FUSE probe, and cannot select memory storage.
+- VFS startup builds the selected backend, performs a non-mutating list probe,
+  and logs only provider, bucket, and prefix. Tests cover successful memory and
+  local round trips plus authentication/connectivity-style probe failures.
+- Local verification passed `just check`, `just lint`, nightly format checking,
+  advisory scanning, CLI help/propagation checks, and the full workspace suite
+  (`97/97`).
 
 ## STOP conditions
 
