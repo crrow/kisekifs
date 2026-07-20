@@ -55,12 +55,6 @@ jobs:
           toolchain: ${{ needs.rust-version.outputs.version }}
           components: clippy
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -88,12 +82,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ needs.rust-version.outputs.version }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install system dependencies
         run: |
@@ -125,12 +113,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ needs.rust-version.outputs.version }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install system dependencies
         run: |
