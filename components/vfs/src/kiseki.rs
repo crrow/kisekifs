@@ -31,6 +31,7 @@ use kiseki_types::{
     ino::{CONTROL_INODE, Ino, ROOT_INO},
     internal_nodes::{CONFIG_INODE_NAME, InternalNodeTable},
 };
+use kiseki_utils::object_storage::ObjectStorage;
 use libc::{EACCES, EBADF, EFBIG, EPERM, mode_t};
 use snafu::{ResultExt, ensure};
 use tracing::{debug, info, trace};
@@ -38,7 +39,7 @@ use tracing::{debug, info, trace};
 use crate::{
     config::Config,
     data_manager::{DataManager, DataManagerRef},
-    err::{LibcSnafu, MetaSnafu, ObjectStorageSnafu, Result},
+    err::{LibcSnafu, MetaSnafu, ObjectStorageConfigSnafu, ObjectStorageSnafu, Result},
     handle::{HandleTable, HandleTableRef},
 };
 
@@ -81,7 +82,35 @@ impl KisekiVFS {
         Ok(())
     }
 
-    pub fn new(vfs_config: Config, meta: MetaEngineRef) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn new(vfs_config: Config, meta: MetaEngineRef) -> Result<Self> {
+        let object_storage = vfs_config
+            .object_storage
+            .build()
+            .context(ObjectStorageConfigSnafu)?;
+        Self::new_with_object_storage(vfs_config, meta, object_storage)
+    }
+
+    pub async fn new_checked(vfs_config: Config, meta: MetaEngineRef) -> Result<Self> {
+        let object_storage = vfs_config
+            .object_storage
+            .build()
+            .context(ObjectStorageConfigSnafu)?;
+        object_storage.probe().await.context(ObjectStorageSnafu)?;
+        info!(
+            provider = vfs_config.object_storage.provider(),
+            bucket = ?vfs_config.object_storage.bucket(),
+            prefix = ?vfs_config.object_storage.prefix(),
+            "object storage is ready"
+        );
+        Self::new_with_object_storage(vfs_config, meta, object_storage)
+    }
+
+    fn new_with_object_storage(
+        vfs_config: Config,
+        meta: MetaEngineRef,
+        object_storage: ObjectStorage,
+    ) -> Result<Self> {
         let mut internal_nodes =
             InternalNodeTable::new((vfs_config.file_entry_timeout, vfs_config.dir_entry_timeout));
         let config_inode = internal_nodes
@@ -96,17 +125,6 @@ impl KisekiVFS {
         if vfs_config.prefix_internal {
             internal_nodes.add_prefix();
         }
-
-        // let object_storage =
-        //     kiseki_utils::object_storage::new_sled_store(&vfs_config.
-        // object_storage_dsn)         .context(OpenDalSnafu)?;
-        let object_storage =
-            kiseki_utils::object_storage::new_minio_store().context(ObjectStorageSnafu)?;
-
-        // let object_storage = kiseki_utils::object_storage::new_memory_object_store();
-        // let object_storage =
-        //     kiseki_utils::object_storage::new_local_object_store(&vfs_config.
-        // object_storage_dsn)         .context(ObjectStorageSnafu)?;
 
         let data_manager = Arc::new(DataManager::new(
             vfs_config.chunk_size,
@@ -419,3 +437,32 @@ fn get_file_type(mode: mode_t) -> Result<FileType> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod object_storage_tests {
+    use kiseki_types::setting::Format;
+    use kiseki_utils::object_storage::ObjectStorageConfig;
+
+    use super::KisekiVFS;
+    use crate::{Config, err::Error};
+
+    #[tokio::test]
+    async fn checked_constructor_uses_configured_store_before_mounting() {
+        let meta_dir = tempfile::tempdir().unwrap();
+        let mut meta_config = kiseki_meta::MetaConfig::default();
+        meta_config.with_dsn(&format!("rocksdb://:{}", meta_dir.path().display()));
+        kiseki_meta::update_format(&meta_config.dsn, Format::default(), false).unwrap();
+        let meta = kiseki_meta::open(meta_config).unwrap();
+
+        let storage_dir = tempfile::tempdir().unwrap();
+        let invalid_root = storage_dir.path().join("regular-file");
+        std::fs::write(&invalid_root, b"not a directory").unwrap();
+        let config = Config {
+            object_storage: ObjectStorageConfig::File { root: invalid_root },
+            ..Config::default()
+        };
+
+        let result = KisekiVFS::new_checked(config, meta).await;
+        assert!(matches!(result, Err(Error::ObjectStorageConfig { .. })));
+    }
+}

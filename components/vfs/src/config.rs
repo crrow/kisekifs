@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use kiseki_common::{BLOCK_SIZE, CHUNK_SIZE, PAGE_BUFFER_SIZE, PAGE_SIZE};
+use kiseki_utils::object_storage::ObjectStorageConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +34,7 @@ pub struct Config {
     pub file_entry_timeout: Duration,
 
     // ========Object Storage Configs ===>
-    pub object_storage_dsn: String,
+    pub object_storage: ObjectStorageConfig,
 
     // ========Cache Configs ===>
     pub capacity: usize,
@@ -67,7 +68,7 @@ impl Default for Config {
             attr_timeout:          Duration::from_secs(1),
             dir_entry_timeout:     Duration::from_secs(1),
             file_entry_timeout:    Duration::from_secs(1),
-            object_storage_dsn:    kiseki_common::KISEKI_DEBUG_OBJECT_STORAGE.to_string(),
+            object_storage:        ObjectStorageConfig::Memory,
             capacity:              100 << 10,
             total_buffer_capacity: PAGE_BUFFER_SIZE, // 300MB
             chunk_size:            CHUNK_SIZE,       // 64MB

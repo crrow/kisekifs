@@ -12,14 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::{Path, PathBuf};
+use std::{
+    convert::Infallible,
+    fmt::{Debug, Formatter},
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use clap::Args;
 use fuser::MountOption;
 use kiseki_common::KISEKI;
 use kiseki_fuse::{FuseConfig, null};
 use kiseki_meta::MetaConfig;
-use kiseki_utils::logger::LoggingOptions;
+use kiseki_utils::{logger::LoggingOptions, object_storage::ObjectStorageConfig};
 use kiseki_vfs::{Config as VFSConfig, KisekiVFS};
 use snafu::{ResultExt, Whatever, whatever};
 use tracing::info;
@@ -29,6 +34,22 @@ use crate::build_info;
 const MOUNT_OPTIONS_HEADER: &str = "Mount options";
 const LOGGING_OPTIONS_HEADER: &str = "Logging options";
 const META_OPTIONS_HEADER: &str = "Meta options";
+const STORAGE_OPTIONS_HEADER: &str = "Object storage options";
+
+#[derive(Clone)]
+pub struct ObjectStorageDsn(String);
+
+impl Debug for ObjectStorageDsn {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ObjectStorageDsn(<redacted>)")
+    }
+}
+
+impl FromStr for ObjectStorageDsn {
+    type Err = Infallible;
+
+    fn from_str(dsn: &str) -> Result<Self, Self::Err> { Ok(Self(dsn.to_string())) }
+}
 
 #[derive(Debug, Clone, Args)]
 #[command(flatten_help = true)]
@@ -159,6 +180,18 @@ pub struct MountArgs {
     default_value = kiseki_common::KISEKI_DEBUG_META_ADDR,
     )]
     pub meta_dsn: String,
+
+    #[arg(
+        long,
+        value_name = "DSN",
+        help = "Object store: file:///absolute/path or s3://bucket[/prefix]",
+        long_help = "Object store DSN. Use file:///absolute/path for local storage or \
+                     s3://bucket[/prefix] for S3. S3 credentials are loaded from the standard \
+                     AWS environment or identity chain; credentials in the DSN are rejected.",
+        help_heading = STORAGE_OPTIONS_HEADER,
+        required = true,
+    )]
+    pub object_storage: ObjectStorageDsn,
 }
 
 impl MountArgs {
@@ -211,7 +244,22 @@ impl MountArgs {
         Some(opts)
     }
 
-    fn vfs_config(&self) -> VFSConfig { VFSConfig::default() }
+    fn vfs_config(&self) -> Result<VFSConfig, Whatever> {
+        let object_storage = self
+            .object_storage
+            .0
+            .parse::<ObjectStorageConfig>()
+            .with_whatever_context(|error| {
+                format!("invalid object storage configuration: {error}")
+            })?;
+        if matches!(object_storage, ObjectStorageConfig::Memory) {
+            whatever!("memory object storage is available only in tests");
+        }
+        Ok(VFSConfig {
+            object_storage,
+            ..VFSConfig::default()
+        })
+    }
 
     pub fn run(self) -> Result<(), Whatever> {
         // the `setup_panic!` expansion still uses the deprecated
@@ -253,37 +301,34 @@ pub fn print_versions() {
     //     .with_label_values(&[short_version(), full_version()])
     //     .inc();
 
-    // Log version and argument flags.
+    // Report the build version without dumping process arguments.
     println!(
         "PKG_VERSION: {}, FULL_VERSION: {}",
         build_info::PKG_VERSION,
         build_info::FULL_VERSION,
     );
-
-    print_args();
-}
-
-fn print_args() {
-    println!("command line arguments");
-    for argument in std::env::args() {
-        println!("argument: {}", argument);
-    }
 }
 
 fn mount(args: MountArgs) -> Result<(), Whatever> {
     info!("try to mount kiseki on {:?}", &args.mount_point);
     print_versions();
 
-    validate_mount_point(&args.mount_point)?;
-
     let fuse_config = args.fuse_config();
     let meta_config = args.meta_config()?;
-    let vfs_config = args.vfs_config();
+    let vfs_config = args.vfs_config()?;
+
+    validate_mount_point(&args.mount_point)?;
 
     let meta = kiseki_meta::open(meta_config)
         .with_whatever_context(|e| format!("failed to open meta, {:?}", e))?;
-    let file_system = KisekiVFS::new(vfs_config, meta)
+    let startup_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .with_whatever_context(|error| format!("failed to build startup runtime: {error}"))?;
+    let file_system = startup_runtime
+        .block_on(KisekiVFS::new_checked(vfs_config, meta))
         .with_whatever_context(|e| format!("failed to create file system, {:?}", e))?;
+    drop(startup_runtime);
 
     let fs = kiseki_fuse::KisekiFuse::create(fuse_config.clone(), file_system)?;
     fuser::mount2(fs, &args.mount_point, &fuse_config.mount_options).with_whatever_context(
@@ -297,6 +342,7 @@ fn mount(args: MountArgs) -> Result<(), Whatever> {
     )?;
     Ok(())
 }
+
 fn validate_mount_point(path: impl AsRef<Path>) -> Result<(), Whatever> {
     let mount_point = path.as_ref();
     if !mount_point.exists() {
@@ -334,4 +380,69 @@ fn validate_mount_point(path: impl AsRef<Path>) -> Result<(), Whatever> {
     null::mount_check(path)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        mount: MountArgs,
+    }
+
+    #[test]
+    fn object_storage_cli_value_reaches_vfs_config() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "--object-storage",
+            "s3://volume-bucket/tenant/volume?region=test-region",
+            "/tmp/kiseki",
+        ])
+        .expect("parse mount arguments");
+
+        assert_eq!(
+            cli.mount.vfs_config().unwrap().object_storage,
+            ObjectStorageConfig::S3 {
+                bucket:     "volume-bucket".to_string(),
+                prefix:     Some("tenant/volume".to_string()),
+                region:     Some("test-region".to_string()),
+                endpoint:   None,
+                allow_http: false,
+            }
+        );
+    }
+
+    #[test]
+    fn object_storage_is_required_and_invalid_dsns_fail_before_mounting() {
+        assert!(TestCli::try_parse_from(["test", "/tmp/kiseki"]).is_err());
+        let invalid = TestCli::try_parse_from([
+            "test",
+            "--object-storage",
+            "file://relative/path",
+            "/tmp/kiseki",
+        ])
+        .unwrap();
+        assert!(invalid.mount.vfs_config().is_err());
+
+        let memory =
+            TestCli::try_parse_from(["test", "--object-storage", "memory://", "/tmp/kiseki"])
+                .unwrap();
+        assert!(memory.mount.vfs_config().is_err());
+    }
+
+    #[test]
+    fn mount_argument_debug_never_contains_storage_dsn_values() {
+        let secret_marker = "do-not-echo-this-value";
+        let dsn = format!("s3://user:{secret_marker}@volume-bucket/prefix");
+        let cli =
+            TestCli::try_parse_from(["test", "--object-storage", &dsn, "/tmp/kiseki"]).unwrap();
+
+        assert!(!format!("{:?}", cli.mount).contains(secret_marker));
+        let error = cli.mount.vfs_config().unwrap_err();
+        assert!(!error.to_string().contains(secret_marker));
+    }
 }

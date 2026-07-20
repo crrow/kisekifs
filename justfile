@@ -8,6 +8,7 @@ DISTRI_PLATFORM := "ubuntu"
 HOME_DIR := env_var('HOME')
 CARGO_REGISTRY_CACHE := HOME_DIR + "/.cargo/registry"
 PWD := invocation_directory()
+OBJECT_STORAGE_DSN := env_var_or_default("KISEKI_OBJECT_STORAGE_DSN", "file:///tmp/kiseki.data")
 
 @env:
     echo "RUST_TOOLCHAIN: {{RUST_TOOLCHAIN}}"
@@ -80,17 +81,17 @@ alias sh-m := help-mount
 @mount:
     just clean
     just prepare
-    cargo run --color=always --package kiseki-binary mount --level debug
+    cargo run --color=always --package kiseki-binary mount --level debug --object-storage "{{OBJECT_STORAGE_DSN}}"
 
 @release-mount:
     just clean
     just prepare
-    cargo run --release --color=always --package kiseki-binary mount --no-log
+    cargo run --release --color=always --package kiseki-binary mount --no-log --object-storage "{{OBJECT_STORAGE_DSN}}"
 
 @profile-mount:
     just clean
     just prepare
-    cargo flamegraph --package kiseki-binary -- mount --no-log
+    cargo flamegraph --package kiseki-binary -- mount --no-log --object-storage "{{OBJECT_STORAGE_DSN}}"
 
 # ==================================================== umount
 
@@ -107,7 +108,7 @@ alias sh-um := help-umount
     cargo run --color=always --package kiseki-binary format
 
 @prepare:
-    mkdir -p /tmp/kiseki /tmp/kiseki.meta/
+    mkdir -p /tmp/kiseki /tmp/kiseki.meta/ /tmp/kiseki.data/
     just format
 
 alias sh-f := help-format

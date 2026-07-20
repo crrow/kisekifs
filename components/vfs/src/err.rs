@@ -31,6 +31,11 @@ pub enum Error {
         location: Location,
         source:   kiseki_utils::object_storage::ObjectStorageError,
     },
+    ObjectStorageConfig {
+        #[snafu(implicit)]
+        location: Location,
+        source:   kiseki_utils::object_storage::ObjectStorageConfigError,
+    },
 
     ObjectBlockNotFound {
         #[snafu(implicit)]

@@ -45,9 +45,25 @@ echo 'export PATH=$HOME/.cargo/bin/:$PATH' >> $HOME/.bashrc
 just build
 ```
 
-6. Run 
+6. Run with local object storage
 
 ```shell
-# command [just mount] will mount kisekifs on /tmp/kiseki
-just minio && just mount
+# `just mount` explicitly uses file:///tmp/kiseki.data and mounts on /tmp/kiseki
+just mount
 ```
+
+To use S3, pass the same bucket and prefix on every mount of the volume:
+
+```shell
+KISEKI_OBJECT_STORAGE_DSN='s3://my-volume-bucket/kisekifs' just mount
+```
+
+The S3 client uses the standard AWS environment and workload-identity chain.
+Configure credentials through the standard AWS credential environment
+variables, an ECS task role, an EC2 instance role, or web identity. Never add
+credentials to the DSN. Non-secret options may be supplied as query parameters,
+for example `?region=us-east-1`; a custom HTTP endpoint must also set
+`allow_http=true`.
+
+Supported DSNs are `file:///absolute/path` and `s3://bucket[/prefix]`.
+`memory://` exists only for tests and does not persist data.
