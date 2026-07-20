@@ -27,7 +27,7 @@ use kiseki_types::{
     FileType,
     attr::InodeAttr,
     entry::DEntry,
-    ino::{Ino, ZERO_INO},
+    ino::{Ino, ROOT_INO, ZERO_INO},
     setting::Format,
     slice::Slices,
     stat::DirStat,
@@ -46,8 +46,8 @@ use crate::{
     context::FuseContext,
     engine::RenameFlags,
     err::{
-        LibcSnafu, ModelSnafu, Result, RocksdbSnafu, UninitializedEngineSnafu, model_err,
-        model_err::ModelKind,
+        AlreadyInitializedSnafu, LibcSnafu, ModelSnafu, Result, RocksdbSnafu,
+        UninitializedEngineSnafu, model_err, model_err::ModelKind,
     },
     open_files::OpenFilesRef,
 };
@@ -527,9 +527,61 @@ fn delete_prefix_in_txn_write_batch(
     }
 }
 
+fn stage_initial_state(
+    txn: &rocksdb::Transaction<rocksdb::OptimisticTransactionDB<MultiThreaded>>,
+    format: &Format,
+    root: &InodeAttr,
+) -> Result<()> {
+    let format_buf = model_try!(
+        bincode::serialize(format).context(model_err::CorruptionSnafu {
+            kind: ModelKind::Setting,
+            key:  key::CURRENT_FORMAT.to_string(),
+        })
+    );
+    let root_key = key::attr(ROOT_INO);
+    let root_buf = model_try!(
+        bincode::serialize(root).context(model_err::CorruptionSnafu {
+            kind: ModelKind::Attr,
+            key:  String::from_utf8_lossy(&root_key).to_string(),
+        })
+    );
+    let counter_key: Vec<u8> = BackendCounter::NextInode.into();
+    let counter_buf = model_try!(
+        bincode::serialize(&2u64).context(model_err::CorruptionSnafu {
+            kind: ModelKind::Counter,
+            key:  String::from_utf8_lossy(&counter_key).to_string(),
+        })
+    );
+
+    db_try!(txn.put(key::CURRENT_FORMAT, format_buf));
+    db_try!(txn.put(root_key, root_buf));
+    db_try!(txn.put(counter_key, counter_buf));
+    rocksdb_counter!(db_puts_total);
+    rocksdb_counter!(db_puts_total);
+    rocksdb_counter!(db_puts_total);
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl Backend for RocksdbBackend {
-    // TODO: merge the exists format
+    fn initialize_volume(&self, format: &Format, root: &InodeAttr) -> Result<()> {
+        let transaction = self.db.transaction();
+        let current = rocksdb_timed_op!(
+            db_gets_total,
+            db_get_duration_ms,
+            db_try!(transaction.get_for_update(key::CURRENT_FORMAT, true))
+        );
+        ensure!(current.is_none(), AlreadyInitializedSnafu);
+
+        stage_initial_state(&transaction, format, root)?;
+        rocksdb_timed_op!(
+            db_transactions_total,
+            db_transaction_duration_ms,
+            db_try!(transaction.commit())
+        );
+        Ok(())
+    }
+
     fn set_format(&self, format: &Format) -> Result<()> {
         let setting_buf = model_try!(bincode::serialize(format).context(
             model_err::CorruptionSnafu {
@@ -1958,6 +2010,23 @@ mod tests {
         assert_eq!(loaded_format.name, sample_format.name);
         assert_eq!(loaded_format.chunk_size, sample_format.chunk_size);
         assert_eq!(loaded_format.block_size, sample_format.block_size);
+    }
+
+    #[rstest]
+    fn test_aborted_initialization_leaves_no_partial_state(
+        test_backend: (RocksdbBackend, TempDir),
+        sample_format: Format,
+    ) {
+        let (backend, _tempdir) = test_backend;
+        let root = InodeAttr::hard_code_inode_attr(false);
+
+        let transaction = backend.db.transaction();
+        stage_initial_state(&transaction, &sample_format, &root).unwrap();
+        drop(transaction);
+
+        assert!(backend.load_format().is_err());
+        assert!(backend.get_attr(ROOT_INO).is_err());
+        assert!(backend.load_count(BackendCounter::NextInode).is_err());
     }
 
     #[rstest]

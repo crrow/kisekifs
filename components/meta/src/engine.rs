@@ -49,7 +49,10 @@ use crate::{
     backend::{BackendRef, key::Counter, open_backend},
     config::MetaConfig,
     context::FuseContext,
-    err::{Error, Error::LibcError, LibcSnafu, Result, TokioJoinSnafu},
+    err::{
+        AlreadyInitializedSnafu, Error, Error::LibcError, IncompatibleFormatSnafu, LibcSnafu,
+        Result, TokioJoinSnafu,
+    },
     id_table::IdTable,
     open_files::{InvalidReq, OpenFiles, OpenFilesRef},
 };
@@ -85,42 +88,43 @@ pub fn open(config: MetaConfig) -> Result<MetaEngineRef> {
 }
 
 // update_format is used to change the file system's setting.
-pub fn update_format(dsn: &str, format: Format, _force: bool) -> Result<()> {
+pub fn update_format(dsn: &str, format: Format, force: bool) -> Result<()> {
     let backend = open_backend(dsn, Duration::from_millis(100))?;
 
-    let mut need_init_root = false;
     match backend.load_format() {
-        Ok(_old_format) => {
-            debug!("found exists format, need to update");
-            // TODO: update the old format
+        Ok(stored) => {
+            ensure!(force, AlreadyInitializedSnafu);
+            if let Some(mismatch) = stored.layout_mismatch(&format) {
+                return IncompatibleFormatSnafu {
+                    field:     mismatch.field,
+                    stored:    mismatch.stored,
+                    requested: mismatch.requested,
+                }
+                .fail();
+            }
+
+            debug!("updating mutable fields on existing format");
+            backend.set_format(&stored.merge_mutable_from(format))?;
+            Ok(())
         }
         Err(e) => {
-            if matches!(e, Error::UninitializedEngine { .. }) {
-                // we need to initialize the engine
-                debug!("cannot found format, need to initialize the engine");
-                need_init_root = true;
-            } else {
-                debug!("cannot found format, but got error: {:?}", e);
+            if !matches!(e, Error::UninitializedEngine { .. }) {
+                debug!("failed to load format: {:?}", e);
                 return Err(e);
             }
+
+            debug!("initializing format, root inode, and counters");
+            let mut root = InodeAttr::default()
+                .set_kind(FileType::Directory)
+                .set_nlink(2)
+                .set_length(4 << 10)
+                .set_parent(ROOT_INO)
+                .to_owned();
+            root.set_mode(0o777);
+
+            backend.initialize_volume(&format, &root)
         }
     }
-
-    let mut basic_attr = InodeAttr::default()
-        .set_kind(FileType::Directory)
-        .set_nlink(2)
-        .set_length(4 << 10)
-        .set_parent(ROOT_INO)
-        .to_owned();
-
-    backend.set_format(&format)?;
-    if need_init_root {
-        basic_attr.set_mode(0o777);
-        backend.set_attr(ROOT_INO, &basic_attr)?;
-        backend.increase_count_by(Counter::NextInode, 2)?;
-    }
-
-    Ok(())
 }
 
 pub struct MetaEngine {
@@ -1171,5 +1175,153 @@ bitflags! {
         const NOREPLACE = 1;
         const EXCHANGE = 2;
         const WHITEOUT = 4;
+    }
+}
+
+#[cfg(all(test, feature = "meta-rocksdb"))]
+mod format_tests {
+    use std::time::Duration;
+
+    use kiseki_types::{ino::ROOT_INO, setting::Format};
+    use tempfile::TempDir;
+
+    use super::update_format;
+    use crate::{
+        Error,
+        backend::{BackendRef, key::Counter, open_backend},
+    };
+
+    fn test_store() -> (TempDir, String) {
+        let tempdir = tempfile::tempdir().expect("create metadata test directory");
+        let dsn = format!("rocksdb://:{}", tempdir.path().display());
+        (tempdir, dsn)
+    }
+
+    fn open_test_backend(dsn: &str) -> BackendRef {
+        open_backend(dsn, Duration::from_millis(100)).expect("open metadata test backend")
+    }
+
+    #[test]
+    fn initializes_format_root_and_inode_counter() {
+        let (_tempdir, dsn) = test_store();
+        let format = Format {
+            name: "new-volume".to_string(),
+            max_capacity: Some(1024),
+            max_inodes: Some(128),
+            ..Format::default()
+        };
+
+        update_format(&dsn, format.clone(), false).expect("initialize volume");
+
+        let backend = open_test_backend(&dsn);
+        let stored = backend.load_format().expect("load initialized format");
+        assert_eq!(stored.name, format.name);
+        assert_eq!(stored.max_capacity, format.max_capacity);
+        assert_eq!(stored.max_inodes, format.max_inodes);
+        let root = backend.get_attr(ROOT_INO).expect("load initialized root");
+        assert!(root.is_dir());
+        assert_eq!(root.mode, 0o777);
+        assert_eq!(
+            backend
+                .load_count(Counter::NextInode)
+                .expect("load initialized inode counter"),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_existing_volume_without_force_and_preserves_format() {
+        let (_tempdir, dsn) = test_store();
+        let initial = Format {
+            name: "initial-volume".to_string(),
+            max_capacity: Some(1024),
+            max_inodes: Some(128),
+            ..Format::default()
+        };
+        update_format(&dsn, initial.clone(), false).expect("initialize volume");
+
+        let requested = Format {
+            name: "replacement-volume".to_string(),
+            max_capacity: Some(2048),
+            max_inodes: Some(256),
+            ..initial.clone()
+        };
+        let result = update_format(&dsn, requested, false);
+
+        assert!(
+            matches!(result, Err(Error::AlreadyInitialized { .. })),
+            "existing volume must return AlreadyInitialized"
+        );
+        let stored = open_test_backend(&dsn)
+            .load_format()
+            .expect("reload original format");
+        assert_eq!(stored.name, initial.name);
+        assert_eq!(stored.max_capacity, initial.max_capacity);
+        assert_eq!(stored.max_inodes, initial.max_inodes);
+    }
+
+    #[test]
+    fn force_updates_only_mutable_format_fields() {
+        let (_tempdir, dsn) = test_store();
+        let initial = Format {
+            name: "initial-volume".to_string(),
+            max_capacity: Some(1024),
+            max_inodes: Some(128),
+            ..Format::default()
+        };
+        update_format(&dsn, initial.clone(), false).expect("initialize volume");
+
+        let requested = Format {
+            name: "renamed-volume".to_string(),
+            max_capacity: Some(2048),
+            max_inodes: None,
+            ..initial.clone()
+        };
+        update_format(&dsn, requested.clone(), true).expect("force mutable update");
+
+        let stored = open_test_backend(&dsn)
+            .load_format()
+            .expect("load updated format");
+        assert_eq!(stored.name, requested.name);
+        assert_eq!(stored.max_capacity, requested.max_capacity);
+        assert_eq!(stored.max_inodes, requested.max_inodes);
+        assert_eq!(stored.chunk_size, initial.chunk_size);
+        assert_eq!(stored.block_size, initial.block_size);
+        assert_eq!(stored.page_size, initial.page_size);
+    }
+
+    #[test]
+    fn rejects_forced_layout_change_and_preserves_format() {
+        let (_tempdir, dsn) = test_store();
+        let initial = Format {
+            name: "initial-volume".to_string(),
+            ..Format::default()
+        };
+        update_format(&dsn, initial.clone(), false).expect("initialize volume");
+
+        let requested = Format {
+            name: "renamed-volume".to_string(),
+            block_size: initial.block_size * 2,
+            ..initial.clone()
+        };
+        let result = update_format(&dsn, requested, true);
+
+        assert!(
+            matches!(
+                result,
+                Err(Error::IncompatibleFormat {
+                    field: kiseki_types::setting::FormatLayoutField::BlockSize,
+                    ..
+                })
+            ),
+            "force must return IncompatibleFormat for a layout change"
+        );
+        let stored = open_test_backend(&dsn)
+            .load_format()
+            .expect("reload original format");
+        assert_eq!(stored.name, initial.name);
+        assert_eq!(stored.chunk_size, initial.chunk_size);
+        assert_eq!(stored.block_size, initial.block_size);
+        assert_eq!(stored.page_size, initial.page_size);
     }
 }

@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use kiseki_types::ToErrno;
+use kiseki_types::{ToErrno, setting::FormatLayoutField};
 use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -59,6 +59,24 @@ pub enum Error {
     UninitializedEngine {
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("FileSystem has already been initialized. Location: {}", location))]
+    AlreadyInitialized {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Cannot change immutable format field {field} from {stored} to {requested}. Location: \
+         {location}"
+    ))]
+    IncompatibleFormat {
+        #[snafu(implicit)]
+        location:  Location,
+        field:     FormatLayoutField,
+        stored:    usize,
+        requested: usize,
     },
 
     #[snafu(display("Invalid setting: {:?}, {:?}", String::from_utf8_lossy(key.as_slice()).to_string(), location))]
@@ -138,6 +156,8 @@ impl ToErrno for Error {
                 }
             }
             Error::UninitializedEngine { .. } => libc::EINTR,
+            Error::AlreadyInitialized { .. } => libc::EEXIST,
+            Error::IncompatibleFormat { .. } => libc::EINVAL,
             Error::InvalidSetting { .. } => libc::EINTR,
             Error::LibcError { errno, .. } => *errno,
         }

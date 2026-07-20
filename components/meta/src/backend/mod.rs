@@ -76,6 +76,7 @@ pub type BackendRef = Arc<dyn Backend>;
 #[allow(clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync {
+    fn initialize_volume(&self, format: &Format, root: &InodeAttr) -> Result<()>;
     fn set_format(&self, format: &Format) -> Result<()>;
     fn load_format(&self) -> Result<Format>;
 

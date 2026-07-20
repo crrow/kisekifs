@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
+use std::{str::FromStr, sync::LazyLock};
 
 use clap::Args;
 use kiseki_types::setting::Format;
@@ -23,7 +23,7 @@ use kiseki_utils::{
     readable_size::ReadableSize,
 };
 use regex::Regex;
-use snafu::Whatever;
+use snafu::{OptionExt, ResultExt, Whatever};
 use tracing::info;
 
 const FORMAT_OPTIONS_HEADER: &str = "DATA FORMAT";
@@ -105,16 +105,19 @@ impl FormatArgs {
         kiseki_utils::logger::install_fmt_log();
         let dsn = self
             .meta_dsn
-            .clone()
-            .expect("meta_dsn should be validated in the argument parser");
+            .as_deref()
+            .whatever_context("metadata DSN is required")?;
         let format = self.generate_format();
-        kiseki_meta::update_format(&dsn, format, true).unwrap();
+        kiseki_meta::update_format(dsn, format, self.force)
+            .with_whatever_context(|error| format!("failed to format metadata store: {error}"))?;
         info!("format file system {:?} success", self.name);
         Ok(())
     }
 }
 
-const NAME_REGEX: &str = r"^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$";
+const NAME_PATTERN: &str = r"^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$";
+static NAME_REGEX: LazyLock<Result<Regex, regex::Error>> =
+    LazyLock::new(|| Regex::new(NAME_PATTERN));
 
 // Validation function for file system names
 fn validate_name(name: &str) -> Result<String, String> {
@@ -124,7 +127,9 @@ fn validate_name(name: &str) -> Result<String, String> {
     if name.len() >= 30 {
         return Err(format!("File system name {:?} is too long", name));
     }
-    let reg = Regex::new(NAME_REGEX).unwrap();
+    let reg = NAME_REGEX
+        .as_ref()
+        .map_err(|error| format!("invalid built-in name pattern: {error}"))?;
     if !reg.is_match(name) {
         return Err(format!("File system name {:?} is invalid", name));
     }
@@ -150,4 +155,86 @@ fn validate_capacity(s: &str) -> Result<ReadableSize, String> {
     let n = n.as_bytes() as usize;
 
     Ok(ReadableSize(align4k(n as u64) as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::*;
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestStore(PathBuf);
+
+    impl TestStore {
+        fn new() -> Self {
+            let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+            Self(
+                std::env::temp_dir()
+                    .join(format!("kisekifs-format-test-{}-{id}", std::process::id())),
+            )
+        }
+
+        fn dsn(&self) -> String { format!("rocksdb://:{}", self.0.display()) }
+    }
+
+    impl Drop for TestStore {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                panic!("remove metadata test directory: {error}");
+            }
+        }
+    }
+
+    fn args(store: &TestStore, name: &str, force: bool, block_size: usize) -> FormatArgs {
+        FormatArgs {
+            name: name.to_string(),
+            meta_dsn: Some(store.dsn()),
+            force,
+            block_size: ReadableSize(block_size as u64),
+            capacity: None,
+            inodes: None,
+        }
+    }
+
+    #[test]
+    fn run_propagates_lifecycle_errors_and_honors_force() {
+        let store = TestStore::new();
+        let initial = args(&store, "initial-volume", false, kiseki_common::BLOCK_SIZE);
+        initial.run().expect("initialize volume");
+
+        let repeated = args(&store, "repeated-volume", false, kiseki_common::BLOCK_SIZE);
+        assert!(repeated.run().is_err());
+
+        let forced = args(&store, "renamed-volume", true, kiseki_common::BLOCK_SIZE);
+        forced.run().expect("force mutable update");
+
+        let incompatible = args(
+            &store,
+            "renamed-volume",
+            true,
+            kiseki_common::BLOCK_SIZE * 2,
+        );
+        assert!(incompatible.run().is_err());
+    }
+
+    #[test]
+    fn run_reports_missing_metadata_dsn() {
+        let mut args = args(
+            &TestStore::new(),
+            "missing-meta-dsn",
+            false,
+            kiseki_common::BLOCK_SIZE,
+        );
+        args.meta_dsn = None;
+
+        assert!(args.run().is_err());
+    }
 }
