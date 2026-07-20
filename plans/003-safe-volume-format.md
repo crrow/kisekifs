@@ -10,6 +10,7 @@
 
 ## Status
 
+- **State**: DONE
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
@@ -138,13 +139,27 @@ force and for incompatible forced layout; no panic occurs.
 
 ## Done criteria
 
-- [ ] `self.force` reaches metadata unchanged.
-- [ ] Existing volume without force is unchanged and returns a typed error.
-- [ ] Forced layout changes are rejected and unchanged.
-- [ ] Initial root/format/counter creation is atomic.
-- [ ] No production `unwrap`/`expect` remains in the format command path.
-- [ ] Targeted tests and all quality gates pass.
-- [ ] Only in-scope files and `plans/README.md` changed.
+- [x] `self.force` reaches metadata unchanged.
+- [x] Existing volume without force is unchanged and returns a typed error.
+- [x] Forced layout changes are rejected and unchanged.
+- [x] Initial root/format/counter creation is atomic.
+- [x] No production `unwrap`/`expect` remains in the format command path.
+- [x] Targeted tests and all quality gates pass.
+- [x] Only in-scope files and `plans/README.md` changed.
+
+## Completion evidence
+
+- Implemented by commit `9191b2d`.
+- CI run `29711296054` and its companion Web run passed every job.
+- The initial format, root inode, and next-inode counter now commit in one
+  optimistic RocksDB transaction; an aborted-transaction test proves no staged
+  key survives before commit.
+- Engine tests cover first initialization, typed rejection without force,
+  forced mutable updates, and typed rejection of immutable layout changes.
+  Type-level tests cover every immutable field, and CLI tests prove `force`
+  propagation plus non-panicking error returns.
+- Local verification passed `just check`, `just lint`, nightly format checking,
+  targeted type/meta/binary tests, and the full workspace suite (`89/89`).
 
 ## STOP conditions
 
