@@ -15,10 +15,9 @@
 // limitations under the License.
 
 use std::{
-    cell::UnsafeCell,
     fmt::{Display, Formatter},
     io::Cursor,
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use crossbeam_queue::ArrayQueue;
@@ -27,68 +26,27 @@ use snafu::ResultExt;
 use tokio::{sync::Notify, time::Instant};
 use tracing::debug;
 
-use crate::err::UnknownIOSnafu;
+use crate::err::{
+    InvalidPagePoolConfigSnafu, InvalidRangeSnafu, UnexpectedLengthSnafu, UnknownIOSnafu,
+};
 
 pub struct MemoryPagePool {
     page_size: usize,
     capacity:  usize,
-    queue:     ArrayQueue<u64>,
-    raw_pages: Box<[Slot]>,
+    queue:     ArrayQueue<Box<[u8]>>,
     notify:    Notify,
 }
 
-struct Slot {
-    inner:     UnsafeCell<&'static mut [u8]>,
-    page_size: usize,
-}
-
-unsafe impl Send for Slot {}
-
-unsafe impl Sync for Slot {}
-
-impl Slot {
-    fn get_inner_slice(&self, offset: usize, len: usize) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                ((*self.inner.get()).as_ptr() as usize + offset) as *const u8,
-                len,
-            )
-        }
-    }
-
-    // SAFETY: each page id is handed out to at most one `Page` at a time by the
-    // pool's queue, so the caller has exclusive access to this slot's buffer.
-    #[allow(clippy::mut_from_ref)]
-    fn get_mut_inner_slice(&self, offset: usize, len: usize) -> &mut [u8] {
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                ((*self.inner.get()).as_mut_ptr() as usize + offset) as *mut u8,
-                len,
-            )
-        }
-    }
-
-    fn clear(&self) {
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(
-                ((*self.inner.get()).as_mut_ptr() as usize) as *mut u8,
-                self.page_size,
-            );
-            slice.fill(0);
-        };
-    }
-}
-
 impl MemoryPagePool {
-    pub fn new(page_size: usize, capacity: usize) -> Arc<Self> {
+    pub fn new(page_size: usize, capacity: usize) -> crate::err::Result<Arc<Self>> {
         let start_at = Instant::now();
-        debug_assert!(
-            page_size > 0
-                && capacity > 0
-                && capacity.is_multiple_of(page_size)
-                && capacity > page_size,
-            "invalid page pool"
-        );
+        if page_size == 0 || capacity == 0 || !capacity.is_multiple_of(page_size) {
+            return InvalidPagePoolConfigSnafu {
+                page_size,
+                capacity,
+            }
+            .fail();
+        }
 
         debug!(
             "page pool: page_size: {}, capacity: {}",
@@ -97,64 +55,51 @@ impl MemoryPagePool {
         );
         let page_cnt = capacity / page_size;
 
-        let page_buffer = Box::leak(vec![0u8; page_cnt * page_size].into_boxed_slice());
-        let slots = page_buffer
-            .chunks_exact_mut(page_size)
-            .map(|chunk| {
-                let buf: &mut [u8] = chunk;
-                Slot {
-                    inner: UnsafeCell::new(buf),
-                    page_size,
-                }
-            })
-            .collect();
-
         let pool = Arc::new(Self {
             page_size,
             capacity,
             queue: ArrayQueue::new(page_cnt),
-            raw_pages: slots,
             notify: Default::default(),
         });
 
-        (0..page_cnt as u64).for_each(|page_id| {
-            pool.queue.push(page_id).unwrap();
-        });
+        for _ in 0..page_cnt {
+            pool.queue
+                .push(vec![0u8; page_size].into_boxed_slice())
+                .expect("new page queue has exactly page_cnt slots");
+        }
 
         debug!(
             "{} initialize finished, cost: {:?}",
             &pool,
             start_at.elapsed(),
         );
-        pool
+        Ok(pool)
     }
 
     pub fn try_acquire_page(self: &Arc<Self>) -> Option<Page> {
         Some(Page {
-            page_id: self.queue.pop()?,
-            _pool:   self.clone(),
+            buffer: Some(self.queue.pop()?),
+            pool:   Arc::downgrade(self),
         })
     }
 
     pub async fn acquire_page(self: &Arc<Self>) -> Page {
         loop {
-            if let Some(page_id) = self.queue.pop() {
+            if let Some(buffer) = self.queue.pop() {
                 return Page {
-                    page_id,
-                    _pool: self.clone(),
+                    buffer: Some(buffer),
+                    pool:   Arc::downgrade(self),
                 };
             }
             self.notify.notified().await;
         }
     }
 
-    fn notify_page_ready(self: &Arc<Self>) { self.notify.notify_one(); }
-
-    fn recycle(self: &Arc<Self>, page_id: u64) {
-        let slot = &self.raw_pages[page_id as usize];
-        slot.clear();
-        self.queue.push(page_id).unwrap();
-        self.notify_page_ready();
+    fn recycle(&self, mut buffer: Box<[u8]>) {
+        buffer.fill(0);
+        if self.queue.push(buffer).is_ok() {
+            self.notify.notify_one();
+        }
     }
 
     pub fn remain_page_cnt(&self) -> usize { self.queue.len() }
@@ -180,15 +125,34 @@ impl Display for MemoryPagePool {
     }
 }
 
-/// The value returned by an allocation of the pool.
-/// When it is dropped the memory gets returned into the pool, and is not
-/// zeroed. If that is a concern, you must clear the data yourself.
+/// An exclusively owned page returned by the pool.
+///
+/// Dropping it clears and returns the buffer while the pool is alive. If the
+/// pool has already been dropped, the buffer allocation is reclaimed directly.
 pub struct Page {
-    page_id: u64,
-    _pool:   Arc<MemoryPagePool>,
+    buffer: Option<Box<[u8]>>,
+    pool:   Weak<MemoryPagePool>,
 }
 
 impl Page {
+    fn checked_range(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> crate::err::Result<std::ops::Range<usize>> {
+        let bound = self.size();
+        let Some(end) = offset.checked_add(length).filter(|end| *end <= bound) else {
+            return InvalidRangeSnafu {
+                subject: "memory page",
+                offset,
+                length,
+                bound,
+            }
+            .fail();
+        };
+        Ok(offset..end)
+    }
+
     pub(crate) async fn copy_to_writer<W>(
         &self,
         offset: usize,
@@ -198,18 +162,25 @@ impl Page {
     where
         W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
-        let slot = &self._pool.raw_pages[self.page_id as usize];
-        let slice = slot.get_inner_slice(offset, length);
+        let range = self.checked_range(offset, length)?;
+        let slice = &self.buffer.as_deref().expect("page buffer is present")[range];
         let mut cursor = Cursor::new(slice);
         let copy_len = tokio::io::copy(&mut cursor, writer)
             .await
             .context(UnknownIOSnafu)?;
-        debug_assert_eq!(copy_len as usize, length);
+        if copy_len as usize != length {
+            return UnexpectedLengthSnafu {
+                subject:  "memory page write",
+                expected: length,
+                actual:   copy_len as usize,
+            }
+            .fail();
+        }
         Ok(())
     }
 
     pub(crate) async fn copy_from_reader<R>(
-        &self,
+        &mut self,
         offset: usize,
         length: usize,
         reader: &mut R,
@@ -217,99 +188,181 @@ impl Page {
     where
         R: tokio::io::AsyncRead + Unpin + ?Sized,
     {
-        let slot = &self._pool.raw_pages[self.page_id as usize];
-        let slice = slot.get_mut_inner_slice(offset, length);
+        let range = self.checked_range(offset, length)?;
+        let slice = &mut self.buffer.as_deref_mut().expect("page buffer is present")[range];
         let mut cursor = Cursor::new(slice);
         let copy_len = tokio::io::copy(reader, &mut cursor)
             .await
             .context(UnknownIOSnafu)?;
-        debug_assert_eq!(copy_len as usize, length);
+        if copy_len as usize != length {
+            return UnexpectedLengthSnafu {
+                subject:  "memory page read",
+                expected: length,
+                actual:   copy_len as usize,
+            }
+            .fail();
+        }
         Ok(())
     }
 
     #[allow(dead_code)] // only exercised by tests so far
-    pub(crate) fn size(&self) -> usize { self._pool.page_size }
+    pub(crate) fn size(&self) -> usize {
+        self.buffer
+            .as_deref()
+            .expect("page buffer is present")
+            .len()
+    }
 }
 
 impl Drop for Page {
-    fn drop(&mut self) { self._pool.recycle(self.page_id); }
+    fn drop(&mut self) {
+        let Some(buffer) = self.buffer.take() else {
+            return;
+        };
+        if let Some(pool) = self.pool.upgrade() {
+            pool.recycle(buffer);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write, time::Duration};
+    use std::sync::Arc;
 
     use kiseki_utils::logger::install_fmt_log;
-    use tracing::info;
+    use tokio::{sync::Barrier, time::Duration};
 
     use super::*;
 
     #[test]
-    fn slot() {
-        let page_size = 1024;
-        let page_cnt = 10;
-        let page_buffer = Box::leak(vec![0u8; page_cnt * page_size].into_boxed_slice());
-        let slots: Box<[Slot]> = page_buffer
-            .chunks_exact_mut(page_size)
-            .map(|chunk| {
-                let buf: &mut [u8] = chunk;
-                Slot {
-                    inner: UnsafeCell::new(buf),
-                    page_size,
-                }
-            })
-            .collect();
+    fn miri_owned_buffer_recycles_without_aliasing() {
+        let pool = MemoryPagePool::new(16, 16).unwrap();
+        let mut page = pool.try_acquire_page().unwrap();
+        page.buffer.as_deref_mut().unwrap()[3..8].copy_from_slice(b"hello");
+        assert_eq!(&page.buffer.as_deref().unwrap()[3..8], b"hello");
 
-        let slot = &slots[0];
-        let mut buf = slot.get_mut_inner_slice(0, 5);
-        buf.write_all(b"hello").unwrap();
-        let slice = slot.get_inner_slice(0, 5);
-        assert_eq!(slice, b"hello");
+        drop(page);
+
+        let page = pool.try_acquire_page().unwrap();
+        assert_eq!(page.buffer.as_deref().unwrap(), &[0; 16]);
+    }
+
+    #[test]
+    fn miri_outstanding_page_drops_after_its_pool() {
+        let pool = MemoryPagePool::new(16, 16).unwrap();
+        let weak = Arc::downgrade(&pool);
+        let page = pool.try_acquire_page().unwrap();
+
+        drop(pool);
+        assert!(weak.upgrade().is_none());
+        drop(page);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn basic() {
         install_fmt_log();
 
-        let pool = MemoryPagePool::new(128 << 10, 300 << 20);
+        let pool = MemoryPagePool::new(128, 128 * 3).unwrap();
         let page = pool.acquire_page().await;
-        assert_eq!(page.size(), 128 << 10);
+        assert_eq!(page.size(), 128);
         assert_eq!(pool.remain_page_cnt(), pool.total_page_cnt() - 1);
         drop(page);
         assert_eq!(pool.remain_page_cnt(), pool.total_page_cnt());
     }
 
     #[tokio::test]
-    async fn get_page_concurrently() {
-        install_fmt_log();
-        let pool = MemoryPagePool::new(128 << 10, 300 << 20);
-
-        let start = std::time::Instant::now();
-        let mut handles = vec![];
-        for _ in 0..pool.total_page_cnt() {
+    async fn exhausted_waiter_wakes_after_recycle() {
+        let pool = MemoryPagePool::new(32, 32).unwrap();
+        let page = pool.acquire_page().await;
+        let waiter = {
             let pool = pool.clone();
-            let handle = tokio::spawn(async move {
-                let _page2 = pool.acquire_page().await;
-                let page = pool.acquire_page().await;
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                let mut cursor = Cursor::new(b"hello");
-                page.copy_from_reader(0, 5, &mut cursor).await.unwrap();
-                // let mut buf = page.as_mut_slice();
-                // let write_len = buf.write(b"hello").unwrap();
-                // assert_eq!(write_len, 5);
-            });
-            handles.push(handle);
+            tokio::spawn(async move { pool.acquire_page().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(page);
+
+        let recycled = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(recycled);
+        assert_eq!(pool.remain_page_cnt(), 1);
+    }
+
+    #[tokio::test]
+    async fn recycled_page_is_zeroed() {
+        let pool = MemoryPagePool::new(16, 16).unwrap();
+        let mut page = pool.acquire_page().await;
+        let mut reader = Cursor::new(b"hello");
+        page.copy_from_reader(3, 5, &mut reader).await.unwrap();
+        drop(page);
+
+        let page = pool.acquire_page().await;
+        let mut actual = [0xA5; 8];
+        page.copy_to_writer(0, actual.len(), &mut Cursor::new(actual.as_mut_slice()))
+            .await
+            .unwrap();
+        assert_eq!(actual, [0; 8]);
+    }
+
+    #[tokio::test]
+    async fn rejects_out_of_range_page_access() {
+        let pool = MemoryPagePool::new(16, 16).unwrap();
+        let mut page = pool.acquire_page().await;
+
+        assert!(
+            page.copy_from_reader(15, 2, &mut Cursor::new([1, 2]))
+                .await
+                .is_err()
+        );
+        assert!(
+            page.copy_to_writer(usize::MAX, 1, &mut Cursor::new(Vec::new()))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_pages_can_be_used_concurrently() {
+        const PAGE_COUNT: usize = 4;
+        let pool = MemoryPagePool::new(32, 32 * PAGE_COUNT).unwrap();
+        let barrier = Arc::new(Barrier::new(PAGE_COUNT));
+        let mut handles = Vec::new();
+        for value in 0..PAGE_COUNT as u8 {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let mut page = pool.acquire_page().await;
+                page.copy_from_reader(7, 1, &mut Cursor::new([value]))
+                    .await
+                    .unwrap();
+                barrier.wait().await;
+                let mut actual = [0xFF];
+                page.copy_to_writer(7, 1, &mut Cursor::new(actual.as_mut_slice()))
+                    .await
+                    .unwrap();
+                assert_eq!(actual, [value]);
+            }));
         }
 
-        assert!(pool.remain_page_cnt() <= pool.total_page_cnt());
-        let _ = futures::future::join_all(handles).await;
-
-        info!(
-            "fill the whole pool {} cost: {:?}",
-            ReadableSize(pool.capacity() as u64),
-            start.elapsed(),
-        );
+        for handle in handles {
+            handle.await.unwrap();
+        }
 
         assert_eq!(pool.remain_page_cnt(), pool.total_page_cnt());
+    }
+
+    #[tokio::test]
+    async fn outstanding_page_does_not_keep_pool_alive() {
+        let pool = MemoryPagePool::new(16, 16).unwrap();
+        let weak = Arc::downgrade(&pool);
+        let page = pool.acquire_page().await;
+
+        drop(pool);
+
+        assert!(weak.upgrade().is_none());
+        drop(page);
     }
 }

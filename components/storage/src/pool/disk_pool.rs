@@ -30,7 +30,10 @@ use tokio::{
 };
 use tracing::debug;
 
-use crate::err::{DiskPoolMmapSnafu, Result, UnknownIOSnafu};
+use crate::err::{
+    DiskPoolMmapSnafu, InvalidPagePoolConfigSnafu, InvalidRangeSnafu, Result,
+    UnexpectedLengthSnafu, UnknownIOSnafu,
+};
 
 pub(crate) struct DiskPagePool {
     // the size of each page.
@@ -52,13 +55,13 @@ impl DiskPagePool {
         capacity: usize,
     ) -> Result<Arc<DiskPagePool>> {
         let start = Instant::now();
-        debug_assert!(
-            page_size > 0
-                && capacity > 0
-                && capacity.is_multiple_of(page_size)
-                && capacity > page_size,
-            "invalid page pool"
-        );
+        if page_size == 0 || capacity == 0 || !capacity.is_multiple_of(page_size) {
+            return InvalidPagePoolConfigSnafu {
+                page_size,
+                capacity,
+            }
+            .fail();
+        }
         let cnt = capacity / page_size;
         let mut file = AsyncOptions::new()
             .create(true)
@@ -131,6 +134,20 @@ pub struct Page {
 }
 
 impl Page {
+    fn checked_range(&self, offset: usize, length: usize) -> Result<std::ops::Range<usize>> {
+        let bound = self.pool.page_size;
+        let Some(end) = offset.checked_add(length).filter(|end| *end <= bound) else {
+            return InvalidRangeSnafu {
+                subject: "disk page",
+                offset,
+                length,
+                bound,
+            }
+            .fail();
+        };
+        Ok(offset..end)
+    }
+
     pub(crate) async fn copy_to_writer<W>(
         &self,
         offset: usize,
@@ -140,19 +157,27 @@ impl Page {
     where
         W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
+        let range = self.checked_range(offset, length)?;
         let guard = self.pool.file.read().await;
         let mut reader = guard
-            .range_reader(self.page_id as usize * self.pool.page_size + offset, length)
+            .range_reader(self.cal_offset() + range.start, range.len())
             .context(DiskPoolMmapSnafu)?;
         let copy_len = tokio::io::copy(&mut reader, writer)
             .await
             .context(UnknownIOSnafu)?;
-        debug_assert_eq!(copy_len as usize, length);
+        if copy_len as usize != length {
+            return UnexpectedLengthSnafu {
+                subject:  "disk page write",
+                expected: length,
+                actual:   copy_len as usize,
+            }
+            .fail();
+        }
         Ok(())
     }
 
     pub(crate) async fn copy_from_reader<R>(
-        &self,
+        &mut self,
         offset: usize,
         length: usize,
         reader: &mut R,
@@ -160,14 +185,22 @@ impl Page {
     where
         R: tokio::io::AsyncRead + Unpin + ?Sized,
     {
+        let range = self.checked_range(offset, length)?;
         let mut guard = self.pool.file.write().await;
         let mut writer = guard
-            .range_writer(self.cal_offset() + offset, length)
+            .range_writer(self.cal_offset() + range.start, range.len())
             .context(DiskPoolMmapSnafu)?;
         let copy_len = tokio::io::copy(reader, &mut writer)
             .await
             .context(UnknownIOSnafu)?;
-        assert_eq!(copy_len as usize, length);
+        if copy_len as usize != length {
+            return UnexpectedLengthSnafu {
+                subject:  "disk page read",
+                expected: length,
+                actual:   copy_len as usize,
+            }
+            .fail();
+        }
         Ok(())
     }
 
@@ -200,7 +233,7 @@ mod tests {
         let path = tempfile.path();
 
         let page_size = 128 << 10;
-        let cap = 300 << 20;
+        let cap = page_size * 3;
 
         let pool = DiskPagePool::new(path, page_size, cap).await.unwrap();
         let meta = fs::metadata(path).unwrap();
@@ -219,7 +252,7 @@ mod tests {
         let tempfile = tempfile::NamedTempFile::new().unwrap();
         let path = tempfile.path();
         let page_size = 128 << 10;
-        let cap = 300 << 20;
+        let cap = page_size * 3;
 
         let pool = DiskPagePool::new(path, page_size, cap).await.unwrap();
         let start = std::time::Instant::now();
@@ -227,23 +260,30 @@ mod tests {
         for _ in 0..pool.total_page_cnt() {
             let pool = pool.clone();
             let handle = tokio::spawn(async move {
-                let page = pool.acquire_page().await;
+                let mut page = pool.acquire_page().await;
                 // tokio::time::sleep(Duration::from_millis(1)).await;
                 let mut reader = StreamReader::new(tokio_stream::iter(vec![std::io::Result::Ok(
                     Bytes::from_static(b"hello"),
                 )]));
 
-                page.copy_from_reader(0, page_size, &mut reader)
-                    .await
-                    .unwrap();
-                let mut test = vec![0u8; 5];
-                page.copy_to_writer(0, 5, &mut test).await.unwrap();
+                page.copy_from_reader(0, 5, &mut reader).await.unwrap();
+                let mut actual = [0u8; 5];
+                page.copy_to_writer(
+                    0,
+                    actual.len(),
+                    &mut std::io::Cursor::new(actual.as_mut_slice()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(&actual, b"hello");
             });
             handles.push(handle);
         }
 
         assert!(pool.remain_page_cnt() <= pool.total_page_cnt());
-        let _ = futures::future::join_all(handles).await;
+        for result in futures::future::join_all(handles).await {
+            result.unwrap();
+        }
 
         info!(
             "fill the whole pool {} cost: {:?}",

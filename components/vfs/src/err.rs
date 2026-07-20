@@ -43,6 +43,27 @@ pub enum Error {
         key:      SliceKey,
     },
 
+    #[snafu(display(
+        "invalid {subject} range: offset {offset} + length {length} exceeds bound {bound}"
+    ))]
+    InvalidRange {
+        subject:  &'static str,
+        offset:   usize,
+        length:   usize,
+        bound:    usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("unexpected {subject} length: expected {expected}, got {actual}"))]
+    UnexpectedLength {
+        subject:  &'static str,
+        expected: usize,
+        actual:   usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     Storage {
         source: kiseki_storage::err::Error,
     },

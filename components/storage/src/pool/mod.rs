@@ -26,7 +26,7 @@ use kiseki_common::PAGE_SIZE;
 use kiseki_utils::readable_size::ReadableSize;
 use tracing::debug;
 
-use crate::err::Result;
+use crate::err::{InvalidPagePoolConfigSnafu, Result};
 
 pub static GLOBAL_HYBRID_PAGE_POOL: LazyLock<Arc<HybridPagePool>> = LazyLock::new(|| {
     std::thread::spawn(|| {
@@ -88,9 +88,11 @@ impl PagePoolBuilder {
     }
 
     pub async fn build(self) -> Result<HybridPagePool> {
+        validate_page_pool_config(self.page_size, self.memory_capacity)?;
         let mut total_page_cnt = self.memory_capacity / self.page_size;
-        let memory_pool = memory_pool::MemoryPagePool::new(self.page_size, self.memory_capacity);
+        let memory_pool = memory_pool::MemoryPagePool::new(self.page_size, self.memory_capacity)?;
         let (disk_pool, disk_capacity) = if let Some(disk_capacity) = self.disk_capacity {
+            validate_page_pool_config(self.page_size, disk_capacity)?;
             total_page_cnt += disk_capacity / self.page_size;
             let disk_pool_path = self
                 .disk_pool_path
@@ -112,6 +114,17 @@ impl PagePoolBuilder {
             disk_pool,
         })
     }
+}
+
+fn validate_page_pool_config(page_size: usize, capacity: usize) -> Result<()> {
+    if page_size == 0 || capacity == 0 || !capacity.is_multiple_of(page_size) {
+        return InvalidPagePoolConfigSnafu {
+            page_size,
+            capacity,
+        }
+        .fail();
+    }
+    Ok(())
 }
 
 /// HybridPagePool is a hybrid page pool that can store pages in memory and on
@@ -219,7 +232,7 @@ impl Page {
     }
 
     pub(crate) async fn copy_from_reader<R>(
-        &self,
+        &mut self,
         offset: usize,
         length: usize,
         reader: &mut R,
@@ -245,6 +258,43 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn rejects_invalid_pool_configuration() {
+        assert!(
+            PagePoolBuilder::default()
+                .with_page_size(0)
+                .with_memory_capacity(PAGE_SIZE)
+                .build()
+                .await
+                .is_err()
+        );
+        assert!(
+            PagePoolBuilder::default()
+                .with_page_size(PAGE_SIZE)
+                .with_memory_capacity(PAGE_SIZE + 1)
+                .build()
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn supports_a_single_memory_page() {
+        let pool = Arc::new(
+            PagePoolBuilder::default()
+                .with_page_size(PAGE_SIZE)
+                .with_memory_capacity(PAGE_SIZE)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let page = pool.acquire_page().await;
+        assert_eq!(pool.remain(), 0);
+        drop(page);
+        assert_eq!(pool.remain(), 1);
+    }
+
+    #[tokio::test]
     async fn basic() {
         install_fmt_log();
 
@@ -257,8 +307,8 @@ mod tests {
         let pool = Arc::new(
             PagePoolBuilder::default()
                 .with_page_size(PAGE_SIZE)
-                .with_memory_capacity(300 << 20)
-                .with_disk_capacity_and_path(1 << 30, disk_pool_path.to_str().unwrap())
+                .with_memory_capacity(PAGE_SIZE * 3)
+                .with_disk_capacity_and_path(PAGE_SIZE * 3, disk_pool_path.to_str().unwrap())
                 .build()
                 .await
                 .unwrap(),
@@ -269,7 +319,7 @@ mod tests {
             .map(|i| {
                 let pool = pool.clone();
                 tokio::spawn(async move {
-                    let page = pool.acquire_page().await;
+                    let mut page = pool.acquire_page().await;
                     let mut data = Vec::from(format!("hello {}", i));
                     let data_len = data.len();
                     let mut cursor = Cursor::new(&mut data);

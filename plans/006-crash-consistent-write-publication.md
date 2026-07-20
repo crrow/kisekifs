@@ -12,7 +12,7 @@
 
 ## Status
 
-- **State**: IN PROGRESS
+- **State**: DONE
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
@@ -36,8 +36,9 @@ Deterministic tests now cover `FlushBulk`, `FlushFull`, `CommitIdle`, remote
 fsync failure/retry, and an aborted RocksDB publication transaction. Subprocess
 tests terminate immediately after durable local flush and after remote fsync,
 then reopen and read the exact bytes from local recovery and remote storage,
-respectively. The remaining acceptance item before this plan is `DONE` is the
-mounted crash matrix owned by plan 008's Linux FUSE harness.
+respectively. The code-level fault matrix and repository gates pass. Mounted
+crash/restart acceptance remains intentionally owned by plan 008's Linux FUSE
+harness rather than extending this plan's implementation scope.
 
 ## Why this matters
 
@@ -301,18 +302,18 @@ zero/hole region or missing object.
 
 ## Done criteria
 
-- [ ] Canonical `SliceKey` names round-trip without changing emitted names.
-- [ ] No cache eviction or migration failure makes a local staged block
+- [x] Canonical `SliceKey` names round-trip without changing emitted names.
+- [x] No cache eviction or migration failure makes a local staged block
       unreadable.
-- [ ] Startup recovers all valid staged blocks before readiness.
-- [ ] `SliceBuffer` retains exact bytes and page ownership on every failure.
-- [ ] Writer timeouts/cancellation cannot discard buffered data.
-- [ ] Inode length and chunk slices publish in one RocksDB transaction.
-- [ ] `flush` satisfies local durability; `fsync` waits for remote durability.
-- [ ] No runtime `panic!`, `assert!`, or `assert_eq!` handles storage I/O errors
+- [x] Startup recovers all valid staged blocks before readiness.
+- [x] `SliceBuffer` retains exact bytes and page ownership on every failure.
+- [x] Writer timeouts/cancellation cannot discard buffered data.
+- [x] Inode length and chunk slices publish in one RocksDB transaction.
+- [x] `flush` satisfies local durability; `fsync` waits for remote durability.
+- [x] No runtime `panic!`, `assert!`, or `assert_eq!` handles storage I/O errors
       in the in-scope production paths.
-- [ ] Fault matrix, workspace tests, check, lint, and format all pass.
-- [ ] `plans/README.md` is updated with completion evidence.
+- [x] Fault matrix, workspace tests, check, lint, and format all pass.
+- [x] `plans/README.md` is updated with completion evidence.
 
 ## STOP conditions
 

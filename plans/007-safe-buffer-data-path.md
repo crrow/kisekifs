@@ -13,13 +13,34 @@
 
 ## Status
 
-- **State**: TODO
+- **State**: DONE
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: HIGH
 - **Depends on**: `plans/006-crash-consistent-write-publication.md`
 - **Category**: bug / tech-debt
 - **Planned at**: commit `2fb2c95`, 2026-07-20
+
+### Completion at 2026-07-20
+
+`MemoryPagePool` now moves owned `Box<[u8]>` values through its free queue.
+Each acquired `Page` exclusively owns one allocation, page writes require a
+mutable borrow, drop zeroes and recycles the buffer, and an outstanding page no
+longer keeps its pool alive. Page-pool configuration and every page/chunk range
+are validated in release builds with typed errors.
+
+Storage and VFS parallel reads now create disjoint destination borrows with
+`split_at_mut` and run borrowed futures with `try_join_all`; no spawned task or
+raw pointer is needed. Both crate roots deny unsafe code. Tests cover pool
+exhaustion/wakeup, zeroed reuse, pool teardown, mutable writes, invalid ranges,
+logical EOF, short objects, and unaligned reads across three blocks.
+
+The broad Tokio-based Miri selector is not runnable on macOS because Miri does
+not implement `mio`'s `kqueue` syscall. The runtime-free ownership core was
+therefore isolated as the narrow `miri_` test set: 2 tests pass locally and the
+same command is enforced in Linux CI. Targeted storage/VFS nextest completed
+94/94 tests successfully and the full workspace completed 143/143; repository
+check, lint, docs, format, and Miri also pass.
 
 ## Why this matters
 
@@ -73,7 +94,7 @@ of undefined behavior.
 | Unsafe scan | `rg -n '\bunsafe\b|Box::leak|get_unchecked|from_raw_parts' components/storage/src components/vfs/src` | no code matches; comments only if intentional |
 | Storage tests | `KISEKI_DISABLE_DISK_POOL=1 cargo nextest run -p kiseki-storage` | all pass |
 | VFS tests | `KISEKI_DISABLE_DISK_POOL=1 cargo nextest run -p kiseki-vfs` | all pass |
-| Miri | `KISEKI_DISABLE_DISK_POOL=1 cargo +nightly miri test -p kiseki-storage memory_pool` | selected small tests pass |
+| Miri | `KISEKI_DISABLE_DISK_POOL=1 cargo +nightly miri test -p kiseki-storage miri_` | runtime-free ownership tests pass |
 | Gates | `just check && just lint && cargo +nightly fmt --all -- --check` | all exit 0 |
 
 ## Suggested executor toolkit
@@ -212,15 +233,15 @@ temporary unsafe block makes compilation fail; remove the temporary block.
 
 ## Done criteria
 
-- [ ] No first-party `unsafe`, unsafe trait impl, raw slice reconstruction,
+- [x] No first-party `unsafe`, unsafe trait impl, raw slice reconstruction,
       unchecked indexing, or `Box::leak` remains in storage/VFS.
-- [ ] Page write access requires `&mut Page`.
-- [ ] Pool allocations are reclaimed on drop and buffers are zeroed on reuse.
-- [ ] Parallel reads use safe disjoint borrowed slices.
-- [ ] Release builds validate all page/chunk ranges.
-- [ ] Storage and VFS deny new unsafe code.
-- [ ] Scoped Miri, targeted tests, check, lint, and format pass.
-- [ ] `plans/README.md` is updated with completion evidence.
+- [x] Page write access requires `&mut Page`.
+- [x] Pool allocations are reclaimed on drop and buffers are zeroed on reuse.
+- [x] Parallel reads use safe disjoint borrowed slices.
+- [x] Release builds validate all page/chunk ranges.
+- [x] Storage and VFS deny new unsafe code.
+- [x] Scoped Miri, targeted tests, check, lint, and format pass.
+- [x] `plans/README.md` is updated with completion evidence.
 
 ## STOP conditions
 

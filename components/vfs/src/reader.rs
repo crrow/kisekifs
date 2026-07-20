@@ -17,7 +17,6 @@
 use std::{
     cmp::{max, min},
     fmt::Debug,
-    io::Cursor,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -26,23 +25,18 @@ use std::{
 
 use dashmap::DashMap;
 use kiseki_common::{BLOCK_SIZE, BlockIndex, BlockSize, CHUNK_SIZE, ChunkIndex, FH};
-use kiseki_storage::{
-    cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef},
-    err::{JoinErrSnafu, UnknownIOSnafu},
-};
+use kiseki_storage::cache::{file_cache::FileCacheRef, mem_cache::MemCacheRef};
 use kiseki_types::{
     ino::Ino,
     slice::{OverlookedSlicesRef, Slice, SliceID, SliceKey},
 };
 use kiseki_utils::readable_size::ReadableSize;
 use rangemap::RangeMap;
-use snafu::ResultExt;
-use tokio::task::JoinHandle;
 use tracing::{debug, instrument, warn};
 
 use crate::{
     data_manager::DataManager,
-    err::{ObjectBlockNotFoundSnafu, Result},
+    err::{InvalidRangeSnafu, ObjectBlockNotFoundSnafu, Result, UnexpectedLengthSnafu},
 };
 
 impl DataManager {
@@ -160,11 +154,7 @@ impl FileReader {
         }
 
         // cal the real read length.
-        let expected_read_len = if offset + expected_read_len > length {
-            length - offset
-        } else {
-            expected_read_len
-        };
+        let expected_read_len = min(expected_read_len, length - offset);
 
         debug!(
             "{:?}, actual can read length: {}",
@@ -248,10 +238,7 @@ impl FileReader {
                             "chunk_size{}, find hole in chunk: {:?}, range: {:?}",
                             chunk_size, chunk_idx, r,
                         );
-                        // we may even don't have to write the 0.
-                        for i in r {
-                            dst[i - chunk_pos] = 0;
-                        }
+                        dst[start..end].fill(0);
                     }
                     VirtualSlice::Slice(s) => {
                         debug!(
@@ -334,23 +321,23 @@ async fn read_slice_from_cache(
     offset: usize, // read offset
     dst: &mut [u8],
 ) -> Result<usize> {
-    let expected_read_len = dst.len();
-    if expected_read_len == 0 {
+    if length > CHUNK_SIZE {
+        return InvalidRangeSnafu {
+            subject: "cached slice",
+            offset: 0usize,
+            length,
+            bound: CHUNK_SIZE,
+        }
+        .fail();
+    }
+    if dst.is_empty() || offset >= length {
         return Ok(0);
     }
 
-    debug_assert!(
-        offset + expected_read_len <= CHUNK_SIZE,
-        "offset {} + expect read len {} will exceed the chunk size",
-        offset,
-        expected_read_len
-    );
-
-    let expected_read_len = min(length - offset, expected_read_len);
+    let expected_read_len = min(length - offset, dst.len());
     let mut total_read_len = 0;
-    let mut hanldes = vec![];
-    let dst_ptr = dst.as_mut_ptr();
-    let dst_len = dst.len();
+    let mut remaining_dst = &mut dst[..expected_read_len];
+    let mut reads = vec![];
 
     while total_read_len < expected_read_len {
         let new_pos = total_read_len + offset;
@@ -362,56 +349,73 @@ async fn read_slice_from_cache(
             obj_block_size - block_offset, // don't exceed the block boundary.
         );
 
-        // FIXME: use chunks_exact_mut to build slice.
-        let dst = unsafe { std::slice::from_raw_parts_mut(dst_ptr, dst_len) };
-        let dst_slice = &mut dst[total_read_len..(total_read_len + current_block_to_read_len)];
-        let mut writer = Cursor::new(dst_slice);
+        let (dst_slice, rest) = remaining_dst.split_at_mut(current_block_to_read_len);
+        remaining_dst = rest;
 
         total_read_len += current_block_to_read_len;
 
         let file_cache_clone = file_cache.clone();
         let mem_cache_clone = mem_cache.clone();
-        let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
+        reads.push(async move {
             let key = SliceKey::new(slice_id, block_idx, obj_block_size);
             // 1. first of all, try to get block from file-cache
             if let Some(block_reader) = file_cache_clone
                 .get_range(&key, block_offset, current_block_to_read_len)
                 .await?
             {
-                let mut slice = block_reader.as_ref();
-                // copy to the writer
-                let copy_len = tokio::io::copy(&mut slice, &mut writer)
-                    .await
-                    .context(UnknownIOSnafu)?;
-                return Ok(copy_len as usize);
+                if block_reader.len() != current_block_to_read_len {
+                    return UnexpectedLengthSnafu {
+                        subject:  "file cache block",
+                        expected: current_block_to_read_len,
+                        actual:   block_reader.len(),
+                    }
+                    .fail();
+                }
+                dst_slice.copy_from_slice(&block_reader);
+                return Ok(current_block_to_read_len);
             }
 
             // 2. try to get block from mem-cache
             if let Some(block) = mem_cache_clone.get(&key).await? {
-                // copy to the writer
-                let reader = block.slice(block_offset..block_offset + current_block_to_read_len);
-                let mut slice = reader.as_ref();
-                let copy_len = tokio::io::copy(&mut slice, &mut writer)
-                    .await
-                    .context(UnknownIOSnafu)?;
-                return Ok(copy_len as usize);
+                let Some(block_end) = block_offset.checked_add(current_block_to_read_len) else {
+                    return InvalidRangeSnafu {
+                        subject: "memory cache block",
+                        offset:  block_offset,
+                        length:  current_block_to_read_len,
+                        bound:   block.len(),
+                    }
+                    .fail();
+                };
+                let Some(source) = block.get(block_offset..block_end) else {
+                    return InvalidRangeSnafu {
+                        subject: "memory cache block",
+                        offset:  block_offset,
+                        length:  current_block_to_read_len,
+                        bound:   block.len(),
+                    }
+                    .fail();
+                };
+                dst_slice.copy_from_slice(source);
+                return Ok(current_block_to_read_len);
             }
 
             // 3. report not found error
             ObjectBlockNotFoundSnafu { key }.fail()?
         });
-        hanldes.push(handle);
     }
 
-    let mut actual_read_cnt = 0;
-    for x in futures::future::try_join_all(hanldes)
-        .await
-        .context(JoinErrSnafu)?
+    let actual_read_cnt = futures::future::try_join_all(reads)
+        .await?
         .into_iter()
-    {
-        actual_read_cnt += x?;
+        .sum::<usize>();
+    if actual_read_cnt != total_read_len {
+        return UnexpectedLengthSnafu {
+            subject:  "cached slice read",
+            expected: total_read_len,
+            actual:   actual_read_cnt,
+        }
+        .fail();
     }
-    assert_eq!(actual_read_cnt, total_read_len);
 
     Ok(total_read_len)
 }
@@ -426,8 +430,13 @@ fn cal_object_block_size(length: usize, block_idx: BlockIndex, block_size: Block
 #[cfg(test)]
 mod tests {
     use kiseki_meta::{MetaConfig, context::FuseContext};
+    use kiseki_storage::cache::{file_cache::FileCache, mem_cache::MemCache};
     use kiseki_types::{ino::ROOT_INO, setting::Format};
-    use kiseki_utils::{logger::install_fmt_log, object_storage::new_memory_object_store};
+    use kiseki_utils::{
+        logger::install_fmt_log, object_storage::new_memory_object_store,
+        readable_size::ReadableSize,
+    };
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
@@ -477,6 +486,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cached_read_handles_three_unaligned_blocks() {
+        let remote = new_memory_object_store();
+        let slice_id = 0xABCD_EF10;
+        let final_block_len = 17;
+        for (block_idx, (block_len, value)) in [
+            (BLOCK_SIZE, b'a'),
+            (BLOCK_SIZE, b'b'),
+            (final_block_len, b'c'),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = SliceKey::new(slice_id, block_idx, block_len);
+            let mut writer = remote.writer(&key.make_object_storage_path());
+            writer.write_all(&vec![value; block_len]).await.unwrap();
+            writer.shutdown().await.unwrap();
+        }
+
+        let stage_dir = tempfile::tempdir().unwrap();
+        let file_cache = Arc::new(
+            FileCache::new(
+                kiseki_storage::cache::file_cache::Config {
+                    stage_cache_dir: stage_dir.path().to_path_buf(),
+                    max_stage_size: ReadableSize::mb(16),
+                    ..Default::default()
+                },
+                remote.clone(),
+            )
+            .unwrap(),
+        );
+        let mem_cache = Arc::new(MemCache::new(
+            kiseki_storage::cache::mem_cache::Config {
+                capacity: ReadableSize::mb(16),
+            },
+            remote,
+        ));
+        let length = BLOCK_SIZE * 2 + final_block_len;
+        let offset = BLOCK_SIZE - 3;
+        let mut dst = vec![0; BLOCK_SIZE + 20];
+
+        let read_len =
+            read_slice_from_cache(slice_id, file_cache, mem_cache, length, offset, &mut dst)
+                .await
+                .unwrap();
+
+        assert_eq!(read_len, dst.len());
+        assert_eq!(&dst[..3], &[b'a'; 3]);
+        assert!(dst[3..3 + BLOCK_SIZE].iter().all(|byte| *byte == b'b'));
+        assert_eq!(&dst[3 + BLOCK_SIZE..], &[b'c'; 17]);
+    }
+
+    #[tokio::test]
+    async fn cached_read_handles_eof_and_rejects_short_blocks() {
+        let remote = new_memory_object_store();
+        let slice_id = 0xABCD_EF11;
+        let key = SliceKey::new(slice_id, 0, 4);
+        let mut writer = remote.writer(&key.make_object_storage_path());
+        writer.write_all(b"xy").await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let stage_dir = tempfile::tempdir().unwrap();
+        let file_cache = Arc::new(
+            FileCache::new(
+                kiseki_storage::cache::file_cache::Config {
+                    stage_cache_dir: stage_dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                remote.clone(),
+            )
+            .unwrap(),
+        );
+        let mem_cache = Arc::new(MemCache::new(Default::default(), remote));
+        let mut dst = [0xA5; 8];
+
+        assert_eq!(
+            read_slice_from_cache(
+                slice_id,
+                file_cache.clone(),
+                mem_cache.clone(),
+                4,
+                4,
+                &mut dst,
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(dst, [0xA5; 8]);
+        assert!(
+            read_slice_from_cache(slice_id, file_cache, mem_cache, 4, 0, &mut dst[..4],)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

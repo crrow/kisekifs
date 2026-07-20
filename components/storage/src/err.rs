@@ -51,6 +51,37 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "invalid {subject} range: offset {offset} + length {length} exceeds bound {bound}"
+    ))]
+    InvalidRange {
+        subject:  &'static str,
+        offset:   usize,
+        length:   usize,
+        bound:    usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "invalid page pool configuration: page size {page_size}, capacity {capacity}"
+    ))]
+    InvalidPagePoolConfig {
+        page_size: usize,
+        capacity:  usize,
+        #[snafu(implicit)]
+        location:  Location,
+    },
+
+    #[snafu(display("unexpected {subject} length: expected {expected}, got {actual}"))]
+    UnexpectedLength {
+        subject:  &'static str,
+        expected: usize,
+        actual:   usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     DiskPoolMmapError {
         #[snafu(implicit)]
         location: Location,

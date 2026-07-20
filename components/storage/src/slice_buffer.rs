@@ -26,14 +26,14 @@ use kiseki_utils::{
     readable_size::ReadableSize,
 };
 use snafu::ResultExt;
-use tokio::{io::AsyncWriteExt, task::JoinHandle, time::Instant};
+use tokio::{io::AsyncWriteExt, time::Instant};
 use tracing::{debug, instrument};
 
 use crate::{
     cache,
     err::{
-        InvalidSliceBufferWriteOffsetSnafu, JoinErrSnafu, ObjectStorageSnafu, Result,
-        UnknownIOSnafu,
+        InvalidRangeSnafu, InvalidSliceBufferWriteOffsetSnafu, ObjectStorageSnafu, Result,
+        UnexpectedLengthSnafu, UnknownIOSnafu,
     },
     pool::{GLOBAL_HYBRID_PAGE_POOL, Page},
 };
@@ -48,21 +48,23 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
     offset: usize, // read offset
     dst: &mut [u8],
 ) -> Result<usize> {
-    let expected_read_len = dst.len();
-    if expected_read_len == 0 {
+    if length > CHUNK_SIZE {
+        return InvalidRangeSnafu {
+            subject: "object slice",
+            offset: 0usize,
+            length,
+            bound: CHUNK_SIZE,
+        }
+        .fail();
+    }
+    if dst.is_empty() || offset >= length {
         return Ok(0);
     }
 
-    debug_assert!(
-        offset + expected_read_len <= CHUNK_SIZE,
-        "offset {offset} + expect read len {expected_read_len} will exceed the chunk size"
-    );
-
-    let expected_read_len = min(length - offset, expected_read_len);
+    let expected_read_len = min(length - offset, dst.len());
     let mut total_read_len = 0;
-    let mut handles = vec![];
-    let dst_ptr = dst.as_mut_ptr();
-    let dst_len = dst.len();
+    let mut remaining_dst = &mut dst[..expected_read_len];
+    let mut reads = vec![];
 
     while total_read_len < expected_read_len {
         let new_pos = total_read_len + offset;
@@ -76,38 +78,52 @@ pub async fn read_slice_from_object_storage<F: Fn(BlockIndex, BlockSize) -> Stri
 
         let key = gen_key(block_idx, obj_block_size);
         let sto = object_storage.clone();
-        let dst = unsafe { std::slice::from_raw_parts_mut(dst_ptr, dst_len) };
-        let dst_slice = &mut dst[total_read_len..(total_read_len + current_block_to_read_len)];
+        let (dst_slice, rest) = remaining_dst.split_at_mut(current_block_to_read_len);
+        remaining_dst = rest;
 
         total_read_len += current_block_to_read_len;
 
-        let handle: JoinHandle<Result<usize>> = tokio::spawn(async move {
+        reads.push(async move {
             let path = kiseki_utils::object_storage::ObjectStoragePath::parse(&key)
                 .map_err(kiseki_utils::object_storage::ObjectStorageError::from)
                 .context(ObjectStorageSnafu)?;
             let block = sto.get(&path).await.context(ObjectStorageSnafu)?;
             let block_buf = block.bytes().await.context(ObjectStorageSnafu)?;
-
-            // let block_buf = sto.read(&key).await.context(OpenDalSnafu)?;
-            let mut cursor = Cursor::new(dst_slice);
-            let n = cursor
-                .write(&block_buf[block_offset..block_offset + current_block_to_read_len])
-                .await
-                .context(UnknownIOSnafu)?;
-            Ok(n)
+            let Some(block_end) = block_offset.checked_add(current_block_to_read_len) else {
+                return InvalidRangeSnafu {
+                    subject: "object block",
+                    offset:  block_offset,
+                    length:  current_block_to_read_len,
+                    bound:   block_buf.len(),
+                }
+                .fail();
+            };
+            let Some(source) = block_buf.get(block_offset..block_end) else {
+                return InvalidRangeSnafu {
+                    subject: "object block",
+                    offset:  block_offset,
+                    length:  current_block_to_read_len,
+                    bound:   block_buf.len(),
+                }
+                .fail();
+            };
+            dst_slice.copy_from_slice(source);
+            Ok(current_block_to_read_len)
         });
-        handles.push(handle);
     }
 
-    let mut actual_read_cnt = 0;
-    for x in futures::future::try_join_all(handles)
-        .await
-        .context(JoinErrSnafu)?
+    let actual_read_cnt = futures::future::try_join_all(reads)
+        .await?
         .into_iter()
-    {
-        actual_read_cnt += x?;
+        .sum::<usize>();
+    if actual_read_cnt != total_read_len {
+        return UnexpectedLengthSnafu {
+            subject:  "object slice read",
+            expected: total_read_len,
+            actual:   actual_read_cnt,
+        }
+        .fail();
     }
-    assert_eq!(actual_read_cnt, total_read_len);
 
     Ok(total_read_len)
 }
@@ -160,22 +176,25 @@ impl SliceBuffer {
         if offset >= self.length {
             return Ok(0);
         }
-        let expected_read_len = dst.len();
-        if expected_read_len == 0 {
+        if dst.is_empty() {
             return Ok(0);
         }
-        debug_assert!(
-            expected_read_len + offset <= CHUNK_SIZE,
-            "offset: {offset}, expected_read_len: {expected_read_len} should not exceed \
-             CHUNK_SIZE: {CHUNK_SIZE}"
-        );
+        let expected_read_len = min(dst.len(), self.length - offset);
 
         let mut total_read_len = 0;
         while total_read_len < expected_read_len {
             let new_pos = total_read_len + offset;
             let block_idx = new_pos / BLOCK_SIZE;
             let block_offset = new_pos % BLOCK_SIZE;
-            let block = unsafe { self.block_slots.get_unchecked(block_idx) };
+            let Some(block) = self.block_slots.get(block_idx) else {
+                return InvalidRangeSnafu {
+                    subject: "slice buffer block",
+                    offset:  block_idx,
+                    length:  1usize,
+                    bound:   self.block_slots.len(),
+                }
+                .fail();
+            };
 
             let current_block_to_read_len = min(
                 expected_read_len - total_read_len,
@@ -199,7 +218,16 @@ impl SliceBuffer {
                         dst[total_read_len..total_read_len + current_page_to_read_len].fill(0);
                     }
                     Block::Data(db) => {
-                        if let Some(page) = unsafe { db.pages.get_unchecked(page_idx) } {
+                        let Some(page) = db.pages.get(page_idx) else {
+                            return InvalidRangeSnafu {
+                                subject: "data block page",
+                                offset:  page_idx,
+                                length:  1usize,
+                                bound:   db.pages.len(),
+                            }
+                            .fail();
+                        };
+                        if let Some(page) = page {
                             let mut cursor = Cursor::new(
                                 &mut dst
                                     [total_read_len..(total_read_len + current_page_to_read_len)],
@@ -232,11 +260,18 @@ impl SliceBuffer {
             return Ok(0);
         }
 
-        debug_assert!(
-            offset + expected_write_len <= CHUNK_SIZE,
-            "offset: {offset}, expected_write len: {expected_write_len} should not exceed \
-             CHUNK_SIZE: {CHUNK_SIZE}"
-        );
+        let Some(write_end) = offset
+            .checked_add(expected_write_len)
+            .filter(|end| *end <= CHUNK_SIZE)
+        else {
+            return InvalidRangeSnafu {
+                subject: "slice buffer write",
+                offset,
+                length: expected_write_len,
+                bound: CHUNK_SIZE,
+            }
+            .fail();
+        };
 
         if offset < self.flushed_length {
             return InvalidSliceBufferWriteOffsetSnafu.fail()?;
@@ -254,11 +289,29 @@ impl SliceBuffer {
             let new_offset = offset + total_write_len;
             let block_index = new_offset / BLOCK_SIZE;
             let block_offset = new_offset % BLOCK_SIZE;
-            let block = unsafe { self.block_slots.get_unchecked_mut(block_index) };
+            let block_slots_len = self.block_slots.len();
+            let Some(block) = self.block_slots.get_mut(block_index) else {
+                return InvalidRangeSnafu {
+                    subject: "slice buffer block",
+                    offset:  block_index,
+                    length:  1usize,
+                    bound:   block_slots_len,
+                }
+                .fail();
+            };
 
             if matches!(block, Block::Empty) {
                 *block = Block::new_data_block();
             }
+            let Block::Data(data_block) = block else {
+                return InvalidRangeSnafu {
+                    subject: "empty data block",
+                    offset:  block_index,
+                    length:  1usize,
+                    bound:   block_slots_len,
+                }
+                .fail();
+            };
 
             // how many bytes we can write to the block.
             let mut total_page_write_len = 0;
@@ -270,7 +323,7 @@ impl SliceBuffer {
                 let new_block_offset = block_offset + total_page_write_len;
                 let page_index = new_block_offset / PAGE_SIZE;
                 let page_offset = new_block_offset % PAGE_SIZE;
-                let (page, new_one) = block.get_page(page_index).await;
+                let (page, new_one) = data_block.get_page(page_index).await?;
                 if new_one {
                     self.total_page_cnt += 1;
                 }
@@ -285,10 +338,10 @@ impl SliceBuffer {
 
                 total_page_write_len += to_write_page_len;
                 total_write_len += to_write_page_len;
-                block.update_len(max(block.get_len(), block_offset + total_page_write_len));
+                data_block.length = max(data_block.length, block_offset + total_page_write_len);
             }
         }
-        self.length = max(self.length, offset + total_write_len);
+        self.length = max(self.length, write_end);
         Ok(total_write_len)
     }
 
@@ -353,12 +406,18 @@ impl SliceBuffer {
         key_gen: F,
         object_storage: ObjectStorage,
     ) -> Result<usize> {
-        assert!(
-            self.flushed_length <= offset,
-            "offset should be greater than flushed length {}, {}",
-            self.flushed_length,
-            offset
-        );
+        if self.flushed_length > offset {
+            return InvalidSliceBufferWriteOffsetSnafu.fail();
+        }
+        if offset > CHUNK_SIZE {
+            return InvalidRangeSnafu {
+                subject: "slice buffer flush",
+                offset,
+                length: 0usize,
+                bound: CHUNK_SIZE,
+            }
+            .fail();
+        }
 
         let pending_block_idxes = self
             .block_slots
@@ -425,12 +484,18 @@ impl SliceBuffer {
         offset: usize,
         cache: cache::file_cache::FileCacheRef,
     ) -> Result<usize> {
-        assert!(
-            self.flushed_length <= offset,
-            "offset should be greater than flushed length {}, {}",
-            self.flushed_length,
-            offset
-        );
+        if self.flushed_length > offset {
+            return InvalidSliceBufferWriteOffsetSnafu.fail();
+        }
+        if offset > CHUNK_SIZE {
+            return InvalidRangeSnafu {
+                subject: "slice buffer stage",
+                offset,
+                length: 0usize,
+                bound: CHUNK_SIZE,
+            }
+            .fail();
+        }
 
         let pending_block_idxes = self
             .block_slots
@@ -491,7 +556,16 @@ async fn copy_data_block_to_object_storage(
             PAGE_SIZE - page_offset,
             data_block.length - current_flush_data,
         );
-        match &data_block.pages[page_idx] {
+        let Some(page) = data_block.pages.get(page_idx) else {
+            return InvalidRangeSnafu {
+                subject: "data block page",
+                offset:  page_idx,
+                length:  1usize,
+                bound:   data_block.pages.len(),
+            }
+            .fail();
+        };
+        match page {
             None => writer
                 .write_all(&vec![0u8; to_flush_len])
                 .await
@@ -558,47 +632,46 @@ impl Block {
         })
     }
 
-    async fn get_page(&mut self, page_idx: usize) -> (&mut Page, bool) {
-        let start = Instant::now();
-        debug_assert!(!matches!(self, Block::Empty));
-        debug!("try to get a page from block.");
-        if let Block::Data(db) = self {
-            let mut new_one = false;
-            if db.pages[page_idx].is_none() {
-                let page = GLOBAL_HYBRID_PAGE_POOL.acquire_page().await;
-                db.pages[page_idx] = Some(page);
-                new_one = true;
-            };
-            debug!(
-                "get a page from block, new: {}, cost: {:?}",
-                new_one,
-                start.elapsed(),
-            );
-            (db.pages[page_idx].as_mut().unwrap(), new_one)
-        } else {
-            panic!("Block is empty");
-        }
-    }
-
-    fn update_len(&mut self, len: usize) {
-        if let Block::Data(db) = self {
-            db.length = len;
-        }
-    }
-
-    fn get_len(&self) -> usize {
-        if let Block::Data(db) = self {
-            db.length
-        } else {
-            panic!("Block is empty")
-        }
-    }
-
     fn is_full(&self) -> bool {
         match self {
             Block::Empty => false,
             Block::Data(db) => db.length == BLOCK_SIZE,
         }
+    }
+}
+
+impl DataBlock {
+    async fn get_page(&mut self, page_idx: usize) -> Result<(&mut Page, bool)> {
+        let start = Instant::now();
+        debug!("try to get a page from block.");
+        let pages_len = self.pages.len();
+        let Some(slot) = self.pages.get_mut(page_idx) else {
+            return InvalidRangeSnafu {
+                subject: "data block page",
+                offset:  page_idx,
+                length:  1usize,
+                bound:   pages_len,
+            }
+            .fail();
+        };
+        let new_one = slot.is_none();
+        if new_one {
+            *slot = Some(GLOBAL_HYBRID_PAGE_POOL.acquire_page().await);
+        }
+        debug!(
+            "get a page from block, new: {}, cost: {:?}",
+            new_one,
+            start.elapsed(),
+        );
+        let Some(page) = slot.as_mut() else {
+            return UnexpectedLengthSnafu {
+                subject:  "initialized data block page count",
+                expected: 1usize,
+                actual:   0usize,
+            }
+            .fail();
+        };
+        Ok((page, new_one))
     }
 }
 
@@ -677,6 +750,27 @@ mod tests {
         let read_len = slice_buffer.read_at(5, dst.as_mut_slice()).await.unwrap();
         assert_eq!(read_len, 5);
         assert_eq!(dst, vec![0u8; 5]);
+    }
+
+    #[tokio::test]
+    async fn read_clamps_at_logical_eof() {
+        let mut slice_buffer = SliceBuffer::new();
+        slice_buffer.write_at(0, b"hello").await.unwrap();
+        let mut dst = [0xA5; 8];
+
+        let read_len = slice_buffer.read_at(3, &mut dst).await.unwrap();
+
+        assert_eq!(read_len, 2);
+        assert_eq!(&dst[..2], b"lo");
+        assert_eq!(&dst[2..], &[0xA5; 6]);
+    }
+
+    #[tokio::test]
+    async fn rejects_writes_outside_the_chunk() {
+        let mut slice_buffer = SliceBuffer::new();
+
+        assert!(slice_buffer.write_at(CHUNK_SIZE, b"x").await.is_err());
+        assert!(slice_buffer.write_at(usize::MAX, b"x").await.is_err());
     }
 
     #[tokio::test]
@@ -974,5 +1068,77 @@ mod tests {
         .unwrap();
         assert_eq!(read_len, data.len());
         assert_eq!(dst, data);
+    }
+
+    #[tokio::test]
+    async fn parallel_object_read_handles_three_unaligned_blocks() {
+        let object_storage = new_memory_object_store();
+        let final_block_len = 17;
+        for (block_idx, (block_len, value)) in [
+            (BLOCK_SIZE, b'a'),
+            (BLOCK_SIZE, b'b'),
+            (final_block_len, b'c'),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = ObjectStoragePath::parse(format!("block-{block_idx}")).unwrap();
+            let mut writer = object_storage.writer(&path);
+            writer.write_all(&vec![value; block_len]).await.unwrap();
+            writer.shutdown().await.unwrap();
+        }
+
+        let length = BLOCK_SIZE * 2 + final_block_len;
+        let offset = BLOCK_SIZE - 3;
+        let mut dst = vec![0; BLOCK_SIZE + 20];
+        let read_len = read_slice_from_object_storage(
+            |block_idx, _| format!("block-{block_idx}"),
+            object_storage,
+            length,
+            offset,
+            &mut dst,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(read_len, dst.len());
+        assert_eq!(&dst[..3], &[b'a'; 3]);
+        assert!(dst[3..3 + BLOCK_SIZE].iter().all(|byte| *byte == b'b'));
+        assert_eq!(&dst[3 + BLOCK_SIZE..], &[b'c'; 17]);
+    }
+
+    #[tokio::test]
+    async fn object_read_handles_eof_and_rejects_short_blocks() {
+        let object_storage = new_memory_object_store();
+        let mut dst = [0xA5; 8];
+        assert_eq!(
+            read_slice_from_object_storage(
+                |_, _| "unused".to_string(),
+                object_storage.clone(),
+                4,
+                4,
+                &mut dst,
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(dst, [0xA5; 8]);
+
+        let path = ObjectStoragePath::parse("short-block").unwrap();
+        let mut writer = object_storage.writer(&path);
+        writer.write_all(b"xy").await.unwrap();
+        writer.shutdown().await.unwrap();
+        assert!(
+            read_slice_from_object_storage(
+                |_, _| "short-block".to_string(),
+                object_storage,
+                4,
+                0,
+                &mut dst[..4],
+            )
+            .await
+            .is_err()
+        );
     }
 }

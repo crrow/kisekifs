@@ -99,6 +99,29 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  miri:
+    name: Miri buffer ownership
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install nightly Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-miri"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check owned buffer recycling
+        env:
+          KISEKI_DISABLE_DISK_POOL: 1
+        run: cargo +nightly miri test -p kiseki-storage miri_
+
   # Coverage report (only on main branch pushes)
   coverage:
     name: Coverage
@@ -177,13 +200,14 @@ jobs:
   rust-success:
     name: Rust Success
     runs-on: ubuntu-latest
-    needs: [clippy, docs, coverage, advisories]
+    needs: [clippy, docs, miri, coverage, advisories]
     if: always()
     steps:
       - name: Check all Rust jobs status
         run: |
           if [[ "${{ needs.clippy.result }}" != "success" || \
                 "${{ needs.docs.result }}" != "success" || \
+                "${{ needs.miri.result }}" != "success" || \
                 "${{ needs.advisories.result }}" != "success" || \
                 ("${{ needs.coverage.result }}" != "success" && \
                  "${{ needs.coverage.result }}" != "skipped") ]]; then

@@ -510,9 +510,9 @@ mod tests {
     }
 
     async fn stage_bytes(cache: &Arc<FileCache>, slice_key: SliceKey, content: &[u8]) {
-        let memory_pool = pool::memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_SIZE * 2);
+        let memory_pool = pool::memory_pool::MemoryPagePool::new(PAGE_SIZE, PAGE_SIZE * 2).unwrap();
         let mut pages: Box<[Option<Page>]> = (0..(BLOCK_SIZE / PAGE_SIZE)).map(|_| None).collect();
-        let mem_page = memory_pool.acquire_page().await;
+        let mut mem_page = memory_pool.acquire_page().await;
         let mut reader = std::io::Cursor::new(content);
         mem_page
             .copy_from_reader(0, content.len(), &mut reader)
@@ -852,10 +852,10 @@ mod tests {
         let cache = Arc::new(FileCache::new(config, remote_storage).unwrap());
 
         let pool_size = 20 << 20; // 20M
-        let memory_pool = pool::memory_pool::MemoryPagePool::new(PAGE_SIZE, pool_size);
+        let memory_pool = pool::memory_pool::MemoryPagePool::new(PAGE_SIZE, pool_size).unwrap();
 
         let mut pages: Box<[Option<Page>]> = (0..(BLOCK_SIZE / PAGE_SIZE)).map(|_| None).collect();
-        let mem_page = memory_pool.acquire_page().await;
+        let mut mem_page = memory_pool.acquire_page().await;
         let content = b"hello world".to_vec();
         let mut reader = std::io::Cursor::new(&content);
         mem_page
